@@ -15,6 +15,9 @@ import (
 
 const ID = "cursorsdk"
 
+// DefaultBridgeExecutable is the plugin-private bridge launcher file name. The
+// packaged default resolves it as ../private/bridge/lip-cursor-sdk-bridge[.exe]
+// next to the installed outer plugin executable and never looks it up on PATH.
 const DefaultBridgeExecutable = "lip-cursor-sdk-bridge"
 
 const (
@@ -184,7 +187,13 @@ func Normalize(in Input, fallbackAPIKey string) (Config, error) {
 
 	exeName := strings.TrimSpace(in.BridgeExecutable)
 	if exeName == "" {
-		exeName = DefaultBridgeExecutable
+		// The packaged default is a direct plugin-local launcher next to the
+		// running outer plugin executable, not a PATH/global-npm lookup.
+		companion, err := defaultPrivateCompanionPath()
+		if err != nil {
+			return Config{}, err
+		}
+		exeName = companion
 	}
 	if err := rejectShellOrNPMExecutable(exeName); err != nil {
 		return Config{}, err
