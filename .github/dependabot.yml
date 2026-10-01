@@ -26,6 +26,36 @@ updates:
         update-types:
           - minor
 
+  # The Cursor SDK bridge now lives in this repository with its production
+  # lockfile, so SDK and JavaScript dependency updates are maintained here
+  # independently of the Go-LIP host, which must stay free of npm tooling.
+  - package-ecosystem: npm
+    directories:
+      - /bridge-node
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      # The certified baseline is deliberately not automated: `@cursor/sdk` is
+      # an exact pin and the `undici` security override is a release decision,
+      # so neither moves through an unattended update. Only the bridge's own
+      # development tooling is grouped here.
+      npm-patch:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+      npm-minor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -40,8 +70,3 @@ updates:
       github-actions:
         patterns:
           - "*"
-
-  # The npm ecosystem entry is added by the task that relocates the Cursor SDK
-  # bridge, its package.json, and its lockfile into this repository. SDK and
-  # JavaScript dependency updates are then maintained here independently of the
-  # Go-LIP host, which must stay free of npm tooling.

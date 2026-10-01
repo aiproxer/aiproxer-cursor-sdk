@@ -54,21 +54,18 @@ jobs:
         run: go test ./...
 
   bridge-node:
-    name: bridge-node (disabled until bridge relocation)
-    # Intentionally skipped. This repository currently holds no npm manifest,
-    # lockfile, or bridge source, so an npm lane could only fail on missing
-    # files or fabricate bridge evidence. The Node 22.22.3 pin, `npm ci`,
-    # `npm test`, and `npm run typecheck` steps are enabled by the task that
-    # relocates the Cursor SDK bridge and its npm manifests here; SDK and
-    # JavaScript dependency security verification is owned by this repository
-    # from that point on and never by the Go-LIP host.
-    if: false
+    name: bridge-node
+    # The SDK bridge now lives in this repository together with its production
+    # lockfile, so the plugin owns its own SDK and JavaScript dependency
+    # security verification and the Go-LIP host runs no Node tooling. The lane
+    # keeps the host's proven sequence on the host's exact Node 22.22.3
+    # baseline: `npm ci`, `npm test`, `npm run typecheck`.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       # Each job runs in its own workspace, so the lane needs its own checkout.
-      # Without it the enabled-by-2.2 npm steps would run against an empty
-      # directory with no bridge source, manifest, or lockfile.
+      # Without it the npm steps would run against an empty directory with no
+      # bridge source, manifest, or lockfile.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
