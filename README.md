@@ -9,8 +9,16 @@ Cursor's JavaScript toolchain and dependencies evolve and release independently 
 
 The standard Go-LIP distribution does not depend on this repository. Cursor support is optional: an
 operator installs a released plugin archive through Go-LIP's existing trusted plugin mechanism, and the
-Go-LIP host binary is unchanged. Node and npm are required to build and test the Cursor bridge, but only
-inside this repository; the Go-LIP host carries no Node or npm tooling.
+Go-LIP host binary is unchanged.
+
+Full host decoupling is the intended end state, not the current one. Once the relocation tracked by the
+Go-LIP `cursor-sdk-standalone` specification completes, Node and npm will be required to build and test the
+Cursor bridge only inside this repository, and the Go-LIP host will carry no Cursor SDK source and no Node or
+npm tooling. Relocation is still in progress: today the Go-LIP host repository still carries the Cursor SDK
+source under `connectors/cursorsdk/` and verifies its bridge with its own Node 22.22.3 `npm ci`/`npm test`
+lane in
+[`.github/workflows/cursor-sdk-platform.yml`](https://github.com/matdev83/go-llm-interactive-proxy/blob/main/.github/workflows/cursor-sdk-platform.yml).
+That host-side Node/npm tooling is removed when the bridge and its npm manifests land here.
 
 ## Status
 
