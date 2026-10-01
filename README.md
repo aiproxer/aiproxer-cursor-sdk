@@ -24,7 +24,10 @@ That host-side Node/npm tooling is removed when the bridge and its npm manifests
 
 Relocation is in progress. The Go connector now lives here: `cmd/lip-backend-cursorsdk/`,
 `internal/service/`, `internal/product/` (provider adapter, lifecycle, diagnostics, protocol, fixtures,
-and the Go test suite), plus `release.yaml` and `manifest/template.backendplugin.json`. The SDK bridge and
+and the Go test suite), the root-level `service_test.go` and `manifest_posture_parity_test.go`, plus
+`release.yaml`, `manifest/template.backendplugin.json`, the relocated example configuration
+`config/examples/cursor-sdk-experimental.yaml`, and the relocated live-bridge harness scripts
+`scripts/test-cursor-sdk-live-bridge.ps1` and `scripts/test-cursor-sdk-live-bridge.sh`. The SDK bridge and
 its npm manifests have not been moved yet; that relocation is tracked in the Go-LIP
 `cursor-sdk-standalone` specification. The Go-LIP host still carries its own copy of this source under
 `connectors/cursorsdk/` until the cutover completes. Do not install anything from this repository: no
