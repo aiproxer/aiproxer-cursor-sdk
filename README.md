@@ -22,10 +22,13 @@ That host-side Node/npm tooling is removed when the bridge and its npm manifests
 
 ## Status
 
-This repository is currently a skeleton. It contains the module, license, provenance, and independent
-verification workflows only. No Cursor connector source, no SDK bridge, and no npm manifests have been
-moved here yet; that relocation is tracked in the Go-LIP `cursor-sdk-standalone` specification. Do not
-install anything from this repository: no plugin release has been published.
+Relocation is in progress. The Go connector now lives here: `cmd/lip-backend-cursorsdk/`,
+`internal/service/`, `internal/product/` (provider adapter, lifecycle, diagnostics, protocol, fixtures,
+and the Go test suite), plus `release.yaml` and `manifest/template.backendplugin.json`. The SDK bridge and
+its npm manifests have not been moved yet; that relocation is tracked in the Go-LIP
+`cursor-sdk-standalone` specification. The Go-LIP host still carries its own copy of this source under
+`connectors/cursorsdk/` until the cutover completes. Do not install anything from this repository: no
+plugin release has been published.
 
 ## Pinned host contract baseline
 
@@ -37,8 +40,11 @@ file, and no sibling checkout requirement.
 | `github.com/matdev83/go-llm-interactive-proxy` | `v0.1.0-rc.1` |
 | `github.com/matdev83/go-llm-interactive-proxy/connector-support/acp` | `v0.1.0-rc.1` |
 
-`internal/pinnedcontracts` imports the public contract packages of those modules so that `go build ./...`
-and `go test ./...` prove the pins resolve from a clean checkout.
+The relocated connector imports only the public contract packages of those modules — `pkg/lipapi`,
+`pkg/lipsdk`, `pkg/lipsdk/backendplugin`, `pkg/lipsdk/modelinventory`, `api/backendplugin/v1`, and
+`connector-support/acp` — so `go build ./...` and `go test ./...` prove the pins resolve from a clean
+checkout. The connector never imports host `internal/` packages, and no generated protobuf code is
+vendored here: `api/backendplugin/v1` comes from the released root module.
 
 ## Verifying
 

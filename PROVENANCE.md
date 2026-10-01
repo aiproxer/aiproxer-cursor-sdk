@@ -41,9 +41,10 @@ explicitly:
 - Apache License 2.0 requires derived files to retain their copyright and license notices. Every relocated
   file keeps its original Apache-2.0 header, and its provenance is attributable to the host repository and
   the baseline commit above.
-- Original work added in this repository (relocation scaffolding, the standalone module and its pinned
-  contract guard, repository hygiene, and the plugin-specific bridge, release, and documentation changes)
-  is MIT-licensed.
+- Original work added in this repository (relocation scaffolding, the standalone module, repository
+  hygiene, and the plugin-specific bridge, release, and documentation changes) is MIT-licensed. The
+  scaffold-only `internal/pinnedcontracts` guard was deleted once the real connector source arrived; the
+  relocated connector itself is derived from the host module above.
 - Any redistributed JavaScript runtime or SDK dependency added by a later task must carry its own license
   and provenance notices in the released artifact.
 
@@ -52,7 +53,13 @@ attributes the origin of derived material.
 
 ## Current commit scope
 
-This commit is provisioning only: module path, pinned published dependencies, license, provenance,
-repository hygiene, and independent Go plus Node verification workflows. No Cursor implementation
-source, bridge code, npm manifest, lockfile, fixture, or test has been moved here yet, and no plugin
-artifact has been released.
+The Go connector is relocated: `cmd/lip-backend-cursorsdk/`, `internal/service/`, `internal/product/`
+(including its Go test suite and `testdata` fixtures), `release.yaml`,
+`manifest/template.backendplugin.json`, the relocated `config/examples/` entry, and the relocated live
+bridge harness scripts. Changes relative to the in-tree module are limited to module-relative import
+paths, repository-root path assumptions in relocated tests and scripts, the `release.yaml` module and
+`replace_policy` fields, and the deletion of the now-redundant scaffold guard. No provider behavior,
+error mapping, configuration semantics, or credential handling was altered.
+
+No SDK bridge code, npm manifest, lockfile, or private runtime packaging has been moved here yet, and no
+plugin artifact has been released.

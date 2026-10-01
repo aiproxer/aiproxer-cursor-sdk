@@ -6,3 +6,6 @@
 /.github/dependabot.yml text eol=lf
 /go.mod text eol=lf
 /go.sum text eol=lf
+/config/examples/*.yaml text eol=lf
+/scripts/*.sh text eol=lf
+/scripts/*.ps1 text eol=lf
