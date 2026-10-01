@@ -1,0 +1,86 @@
+name: Verify
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Push and PR events for the same branch share a group, avoiding duplicate runs.
+  group: verify-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go (GOWORK=off, released contracts only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # The plugin module is standalone: it must resolve its published Go-LIP
+      # dependencies on its own, never through a workspace file or a sibling
+      # checkout.
+      GOWORK: "off"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify module checksums
+        run: go mod verify
+
+      # A replace directive would mean the build no longer proves that released
+      # contracts resolve on their own, so a dirty go.mod fails the lane.
+      - name: Check go.mod is tidy
+        run: go mod tidy -diff
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+  bridge-node:
+    name: bridge-node (disabled until bridge relocation)
+    # Intentionally skipped. This repository currently holds no npm manifest,
+    # lockfile, or bridge source, so an npm lane could only fail on missing
+    # files or fabricate bridge evidence. The Node 22.22.3 pin, `npm ci`,
+    # `npm test`, and `npm run typecheck` steps are enabled by the task that
+    # relocates the Cursor SDK bridge and its npm manifests here; SDK and
+    # JavaScript dependency security verification is owned by this repository
+    # from that point on and never by the Go-LIP host.
+    if: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Setup Node (22.22.3)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: bridge-node/package-lock.json
+
+      - name: Install bridge dependencies
+        working-directory: bridge-node
+        run: npm ci
+
+      - name: Bridge unit tests
+        working-directory: bridge-node
+        run: npm test
+
+      - name: Bridge typecheck
+        working-directory: bridge-node
+        run: npm run typecheck

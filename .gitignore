@@ -1,0 +1,62 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build and test artifacts
+*.test
+*.test.exe
+*.out
+coverage.out
+coverage.html
+
+# Go profiling and execution traces
+*.prof
+*.pprof
+trace.out.*
+
+# Local Go workspace (this module is standalone; a go.work file would silently
+# change dependency resolution and is intentionally never committed)
+go.work
+go.work.sum
+
+# Node/npm (bridge runtime, private packaged runtime, archives)
+node_modules/
+bridge-node/dist/
+/private/
+*.tgz
+npm-debug.log*
+
+# Local QA / release scratch
+.tmp/
+*.log
+/scratch/
+
+# OS junk
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor / backup files
+*~
+*.swp
+*.swo
+
+# Workspace and agent-local files
+.idea/
+.vscode/
+.dev/
+.local/
+.agents/
+.claude/
+.cursor/
+.opencode/
+
+# Local env/config overrides
+.env
+.env.*
+.envrc

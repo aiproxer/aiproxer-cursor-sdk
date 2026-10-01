@@ -1,0 +1,8 @@
+# Keep workflow, ignore, and attribution files LF-only so `git diff --check`
+# stays clean on Windows checkouts.
+/.gitignore text eol=lf
+/.gitattributes text eol=lf
+/.github/workflows/*.yml text eol=lf
+/.github/dependabot.yml text eol=lf
+/go.mod text eol=lf
+/go.sum text eol=lf

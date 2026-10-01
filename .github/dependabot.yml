@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # The plugin module depends only on released Go-LIP modules. There are no
+  # sibling checkout replacements, so the root directory is the whole module
+  # stream today; additional directories arrive with relocated Go modules.
+  - package-ecosystem: gomod
+    directories:
+      - /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      go-patch:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+      go-minor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # The npm ecosystem entry is added by the task that relocates the Cursor SDK
+  # bridge, its package.json, and its lockfile into this repository. SDK and
+  # JavaScript dependency updates are then maintained here independently of the
+  # Go-LIP host, which must stay free of npm tooling.
