@@ -3,7 +3,8 @@
 This repository was extracted from the Go-LIP host repository
 [`matdev83/go-llm-interactive-proxy`](https://github.com/matdev83/go-llm-interactive-proxy). It is
 governed by the Go-LIP specification `cursor-sdk-standalone` (`tasks.md` task 1.3 provisioned this
-repository skeleton; the connector and bridge relocation follows in later tasks).
+repository skeleton, task 2.1 relocated the Go connector, and task 2.2 relocated the SDK bridge; private
+runtime packaging and release tooling follow in later tasks).
 
 ## Extraction baseline
 
@@ -14,10 +15,11 @@ repository skeleton; the connector and bridge relocation follows in later tasks)
 | Specification inventory baseline | `14cdd0e9` (`.kiro/specs/cursor-sdk-standalone/migration-inventory.json`) |
 | Original in-tree module | `github.com/matdev83/go-llm-interactive-proxy/connectors/cursorsdk` |
 
-## Identity and baseline to be carried by the bridge relocation
+## Identity and carried baseline
 
 The extracted integration keeps its existing externally observable identity. The following values are
-preserved by the later relocation tasks and are intentionally not encoded in this skeleton commit:
+preserved by the relocated sources here and are intentionally not encoded in the manifest, the module
+metadata, or the release metadata:
 
 | Aspect | Preserved value |
 | --- | --- |
@@ -30,8 +32,8 @@ preserved by the later relocation tasks and are intentionally not encoded in thi
 
 ## Licensing and attribution
 
-This repository, including the Cursor plugin source that later tasks move here, is licensed under the MIT
-License; see [LICENSE](LICENSE).
+This repository, including the Cursor connector and SDK bridge source relocated here, is licensed under the
+MIT License; see [LICENSE](LICENSE).
 
 The host repository it is extracted from is **not** MIT-licensed: `matdev83/go-llm-interactive-proxy` is
 distributed under the Apache License 2.0. Code, documentation, and configuration that originate in that
@@ -49,7 +51,8 @@ explicitly:
   scaffold-only `internal/pinnedcontracts` guard was deleted once the real connector source arrived; the
   relocated connector itself is derived from the host module above.
 - Any redistributed JavaScript runtime or SDK dependency added by a later task must carry its own license
-  and provenance notices in the released artifact.
+  and provenance notices in the released artifact. The relocated `bridge-node/` sources carry no npm
+  licenses of their own; the installed SDK and runtime tree is assembled and licensed at packaging time.
 
 Nothing in this file re-licenses the host project as MIT; it only states the license of this repository and
 attributes the origin of derived material.
@@ -65,5 +68,13 @@ and scripts, the `release.yaml` module and `replace_policy` fields, and the dele
 now-redundant scaffold guard. No provider behavior, error mapping, configuration semantics, or
 credential handling was altered.
 
-No SDK bridge code, npm manifest, lockfile, or private runtime packaging has been moved here yet, and no
-plugin artifact has been released.
+The SDK bridge is relocated as `bridge-node/`: bridge source, the production `package-lock.json`, the
+TypeScript tsconfigs, the `bin/` entry, the bridge README, and the SDK fixtures/tests it shares with Go.
+The bridge moved unmodified, so its baseline is byte-identical to the in-tree
+`connectors/cursorsdk/bridge-node`: `@cursor/sdk` exact `1.0.23`, the `undici` `6.28.1` security
+override, `engines.node >=22.13`, no npm lifecycle hooks, and 108 hermetic tests passing on Node
+`22.22.3`. Only the bridge README's repository-relative documentation and smoke-tooling links changed,
+because they pointed at host-only paths. The bridge now owns its own CI lane and npm Dependabot entry in
+this repository, and its Node tooling no longer depends on the Go-LIP host.
+
+Private runtime packaging is not present here yet, and no plugin artifact has been released.
