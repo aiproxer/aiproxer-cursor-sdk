@@ -36,6 +36,27 @@ bridge tests pass unchanged from this repository, and the shared Go/TypeScript f
 own copy of the bridge until the cutover completes. Do not install anything from this repository: no
 plugin release has been published, and no private runtime packaging exists yet.
 
+## Default bridge resolution
+
+With no `bridge_executable` in the plugin configuration, the connector resolves its private
+companion launcher as a direct path relative to the running outer plugin executable:
+`../private/bridge/lip-cursor-sdk-bridge[.exe]` next to `bin/lip-backend-cursorsdk[.exe]`,
+matching the release archive layout. Resolution never consults `PATH`, a shell, npm, a global
+binary directory, or the current working directory, and it never installs or downloads
+anything. If that file is absent, configuration fails with an explicit prerequisite error that
+names the expected relative location; there is no fallback to another Cursor integration.
+
+An explicit `bridge_executable` keeps its previous meaning: a direct bridge binary given as an
+absolute path or as a `PATH` name, with the same rejection of shell and npm launchers. Set it
+explicitly when running from a source checkout, for example
+`bridge_executable: lip-cursor-sdk-bridge` resolved through `PATH` after building the bridge in
+`bridge-node/`.
+
+The packaged private companion launcher does not exist yet: `cmd/lip-cursor-sdk-bridge` and the
+archive assembly that stages the private Node runtime are later work. Until an installed plugin
+package provides that file, the packaged default has nothing to resolve and a source checkout
+needs an explicit `bridge_executable`.
+
 ## Pinned host contract baseline
 
 The module depends only on published Go-LIP modules. There are no `replace` directives, no `go.work`
