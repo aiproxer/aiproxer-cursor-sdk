@@ -165,11 +165,14 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		words := strings.Join(strings.Fields(notices), " ")
 
 		// A runtime staged from the build machine's toolchain has to say so in the
-		// archive's own notices, not only in compatibility.json.
+		// archive's own notices, not only in compatibility.json. The remedy is named
+		// in the packager's own option spelling, so the check is spelling-agnostic.
 		require.Contains(t, words, "source kind: "+built.nodeSourceKind)
 		if built.nodeSourceKind != "official-distribution" {
 			require.Contains(t, words, "not from an official Node distribution")
-			require.Contains(t, words, "-NodeDist")
+			remedy := strings.NewReplacer("-", "", " ", "").Replace(strings.ToLower(words))
+			require.Contains(t, remedy, "nodedist",
+				"the notice has to name the option that re-stages an official distribution")
 		}
 	})
 
