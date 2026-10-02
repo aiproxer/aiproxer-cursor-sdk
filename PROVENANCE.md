@@ -78,3 +78,11 @@ because they pointed at host-only paths. The bridge now owns its own CI lane and
 this repository, and its Node tooling no longer depends on the Go-LIP host.
 
 Private runtime packaging is not present here yet, and no plugin artifact has been released.
+
+The plugin-private bridge launcher in `cmd/lip-cursor-sdk-bridge/` is original work added in this
+repository and is MIT-licensed under the same terms as the rest of this repository. It is a small
+Go program that resolves the packaged private Node runtime and bridge entry relative to its own
+location and forwards the bridge protocol; it contains no relocated host code, no JavaScript, and no
+bundled or vendored runtime. Redistribution of the private Node runtime and of the production
+`@cursor/sdk` tree into a released archive, with its license and provenance notices, remains the
+responsibility of the later packaging task; nothing in this launcher redistributes either one.

@@ -53,6 +53,35 @@ jobs:
       - name: Test
         run: go test ./...
 
+  go-race:
+    name: go -race (launcher and bridge lifecycle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Same standalone-module contract as the go lane; the race detector is
+      # Linux-only here, so this lane is the Linux race evidence for the private
+      # runtime launcher and the bridge lifecycle suites.
+      GOWORK: "off"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: go mod download
+
+      # The launcher owns a live process descendant, forwards its streams, and
+      # settles it exactly once, so its lifecycle and the bridge lifecycle suites
+      # that supervise processes are verified under the race detector.
+      - name: Race test launcher and bridge lifecycle
+        run: go test -race ./cmd/lip-cursor-sdk-bridge/... ./internal/product/... .
+
   bridge-node:
     name: bridge-node
     # The SDK bridge now lives in this repository together with its production

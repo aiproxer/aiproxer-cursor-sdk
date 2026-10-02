@@ -84,6 +84,37 @@ func TestInstalledLayout_PrivateCompanionResolution(t *testing.T) {
 		require.NotEmpty(t, models.GetModels())
 	})
 
+	t.Run("default_launcher_starts_private_node_runtime", func(t *testing.T) {
+		// The packaged companion is the real launcher executable, which then
+		// starts the packaged private Node runtime. PATH and the working
+		// directory both hold decoys named like the companion, and PATH also
+		// holds a startable `node`, so a resolution that escaped the installed
+		// layout would either fail or run the wrong runtime.
+		layout, privateNode, runtimeSelfLog := newInstalledLauncherLayout(t)
+		decoys := newBridgeDecoys(t, false)
+		nodePathDir := t.TempDir()
+		installBinary(t, filepath.Join(nodePathDir, "node"+exeSuffix()), fakebridge.BuildNodeExe(t))
+
+		instanceID := "installed-launcher-private-runtime"
+		pluginProc := startInstalledPlugin(t, layout, decoys.workDir, childEnvWithPathOnly(nodePathDir))
+
+		token := negotiateToken(t, pluginProc)
+		require.NoError(t, configureInstance(t, pluginProc, token, instanceID, instanceConfigYAML("", t.TempDir())))
+
+		models, err := pluginProc.listModels(t, instanceID)
+		require.NoError(t, err, "plugin stderr:\n%s", pluginProc.stderrText())
+		require.NotEmpty(t, models.GetModels())
+		require.Equal(t, "gpt-5.3-codex", models.GetModels()[0].GetNativeModelId())
+		require.Equal(t, "cursorsdk", models.GetModels()[0].GetFactoryKind())
+
+		// The runtime that served the request is the packaged private Node
+		// executable, not a `node` reachable through PATH or the working
+		// directory.
+		selfRaw, err := os.ReadFile(runtimeSelfLog)
+		require.NoError(t, err, "the private runtime never recorded its own path")
+		require.Equal(t, privateNode, strings.TrimSpace(string(selfRaw)))
+	})
+
 	t.Run("explicit_override_is_honored_without_packaged_companion", func(t *testing.T) {
 		layout := newInstalledLayout(t, false)
 		decoys := newBridgeDecoys(t, false)
@@ -374,6 +405,69 @@ func exeSuffix() string {
 		return ".exe"
 	}
 	return ""
+}
+
+// newInstalledLauncherLayout installs the packaged private runtime layout around
+// the real launcher executable: the launcher at private/bridge, the private Node
+// runtime at private/node, and the bridge entry at private/bridge/bin. The
+// private runtime is the deterministic fake Node binary, which records the path
+// of the runtime binary that actually served a request.
+func newInstalledLauncherLayout(t *testing.T) (installedLayout, string, string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "plugin root with spaces")
+	outer := installBinary(t, filepath.Join(root, "bin", installedOuterName+exeSuffix()), buildOuterPluginExe(t))
+	bridgeDir := filepath.Join(root, filepath.FromSlash(installedCompanionDir))
+	installBinary(t, filepath.Join(bridgeDir, installedCompanionName+exeSuffix()), buildLauncherExe(t))
+
+	privateNode := filepath.Join(root, "private", "node", "node"+exeSuffix())
+	installBinary(t, privateNode, fakebridge.BuildNodeExe(t))
+
+	runtimeSelfLog := filepath.Join(t.TempDir(), "runtime-self.log")
+	entry := filepath.Join(bridgeDir, "bin", "lip-cursor-sdk-bridge.js")
+	require.NoError(t, os.MkdirAll(filepath.Dir(entry), 0o755))
+	script := fmt.Sprintf(`{"mode":"bridge","selfLog":%s}`, strconv.Quote(runtimeSelfLog))
+	require.NoError(t, os.WriteFile(entry, []byte(script), 0o644))
+
+	return installedLayout{root: root, outer: outer}, privateNode, runtimeSelfLog
+}
+
+var (
+	buildLauncherOnce sync.Once
+	buildLauncherPath string
+	buildLauncherErr  error
+)
+
+// buildLauncherExe compiles the plugin-private bridge launcher once for the whole
+// package, mirroring buildOuterPluginExe.
+func buildLauncherExe(tb testing.TB) string {
+	tb.Helper()
+	buildLauncherOnce.Do(func() {
+		_, thisFile, _, ok := runtime.Caller(0)
+		if !ok {
+			buildLauncherErr = errors.New("runtime.Caller failed")
+			return
+		}
+		dir, err := os.MkdirTemp("", "lip-cursor-sdk-bridge-build-")
+		if err != nil {
+			buildLauncherErr = err
+			return
+		}
+		exe := filepath.Join(dir, installedCompanionName+exeSuffix())
+		ctx, cancel := context.WithTimeout(context.Background(), installedBuildTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "go", "build", "-o", exe, "./cmd/lip-cursor-sdk-bridge")
+		cmd.Dir = filepath.Dir(thisFile)
+		cmd.Env = os.Environ()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			buildLauncherErr = fmt.Errorf("go build lip-cursor-sdk-bridge: %w\n%s", err, out)
+			return
+		}
+		buildLauncherPath = exe
+	})
+	if buildLauncherErr != nil {
+		tb.Fatal(buildLauncherErr)
+	}
+	return buildLauncherPath
 }
 
 var (
