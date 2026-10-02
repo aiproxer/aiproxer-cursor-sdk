@@ -97,12 +97,15 @@ also reaches the runtime and anything the runtime started.
 Two limits of that model are operator-visible, so they are stated rather than implied:
 
 - **A launcher-only escalation reaches the direct child, not a tree the runtime forked.** When the
-  launcher is stopped by itself - its own stdin closes, or it is sent `SIGINT`, `SIGTERM`, or `SIGHUP`
-  - it closes the runtime's stdin and then terminates the private runtime process. On POSIX that
-  escalation is aimed at the direct child only, so processes the runtime itself started can outlive
-  it; on Windows it walks the runtime's own descendants with `taskkill /T /F`. The connector's kill is
-  the wider one on both platforms: the launcher's POSIX process group, or that same `taskkill /T /F`
-  ancestry walk on Windows.
+  launcher is stopped by itself - its own stdin closes, or it is sent a termination signal the launcher
+  registers, which is `SIGINT` or `SIGTERM` on Windows and `SIGINT`, `SIGTERM`, or `SIGHUP` on POSIX -
+  it closes the runtime's stdin. The shipped bridge reads that as end of input, drains its in-flight
+  work, and exits by itself; the launcher terminates the private runtime process only when the bridge
+  has not exited on its own by the end of the graceful cleanup bound. On POSIX that escalation is
+  aimed at the direct child only, so processes the runtime itself started can outlive it; on Windows
+  it walks the runtime's own descendants with `taskkill /T /F`. The connector's kill is the wider one
+  on both platforms: the launcher's POSIX process group, or that same `taskkill /T /F` ancestry walk on
+  Windows.
 - **A launcher killed by its own process handle alone can strand the private runtime.** A crash, an
   external kill, or the connector's narrow process-identity-mismatch downgrade - which kills only the
   launcher handle so a reused process id can never widen the blast radius - runs none of the cleanup
