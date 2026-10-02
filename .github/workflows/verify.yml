@@ -168,5 +168,14 @@ jobs:
       # private file, an unlisted or missing file, a platform overclaim, a missing
       # companion, an install root containing spaces, or any dependence on a global
       # Node for the private-runtime variant.
+      #
+      # -timeout is raised off Go's 10m default on purpose. The gate verifies one
+      # assembled tree about fifteen times (every way a package can lie has to be
+      # shown to fail), each verification walks and digests the whole staged tree
+      # including the private Node runtime, and on a POSIX runner every one of those
+      # verifications runs the shell verifier as well as the PowerShell one. Ten
+      # minutes is not a budget this lane can meet, and a lane that panics on the
+      # default reports no platform evidence at all. It stays inside the job's own
+      # 30m ceiling so a slow run is a failure with a real report rather than a kill.
       - name: Native package platform validation
-        run: go test -count=1 -run TestPackageArchive -v .
+        run: go test -count=1 -timeout 25m -run TestPackageArchive -v .

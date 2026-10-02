@@ -25,9 +25,6 @@
     authenticates them: the host's manifest digest stays the authority for the
     outer executable only.
 
-.PARAMETER RepoRoot
-    Plugin repository root. Defaults to the parent of this script's directory.
-
 .PARAMETER PackageRoot
     Install tree to verify. Required.
 
@@ -41,7 +38,6 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = '',
     [string]$PackageRoot = '',
     [string]$ReportPath = '',
     [string]$ExpectPlatform = ''
@@ -140,8 +136,14 @@ function Test-SamePath([string]$Left, [string]$Right) {
     return [string]::Equals([System.IO.Path]::GetFullPath($a), [System.IO.Path]::GetFullPath($b), [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
-$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+# The repository is the parent of this script's directory, and there is no way to
+# substitute another one. The layout contract and release.yaml below are inputs to the
+# verdict, so an option that replaced them would let whoever passed it decide what an
+# install tree is - the same hole as asking the working directory, with a switch. The
+# verifier ships inside the repository it needs (this script, release.yaml and
+# cmd/lip-cursor-sdk-packaging), so there is no caller the default does not already
+# serve; a tree that lives outside a checkout is what -PackageRoot is for.
+$RepoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 if (-not $PackageRoot) { UsageError '-PackageRoot is required' }
 if (-not (Test-Path -LiteralPath $PackageRoot -PathType Container)) {
     UsageError "$PackageRoot is not an install directory"
@@ -406,7 +408,16 @@ if ($script:Record) {
 # The notice count is a collection count: under Set-StrictMode a scalar result has no
 # Count property, so a license directory holding fewer than two notices threw here and
 # discarded the whole report, findings included.
-Add-Line "licenses: $(@(Get-ChildItem -LiteralPath (Join-Path $PackageRoot $layout.licenses_dir) -File -ErrorAction SilentlyContinue).Count) notices under $($layout.licenses_dir)/"
+#
+# An empty directory is a finding, not a reported count of zero. The archive is
+# required to carry the runtime's license and provenance notices; the packager fails
+# without them, and a verifier that only prints how many it found would report a tree
+# carrying none as evidence that it looked.
+$licenseCount = @(Get-ChildItem -LiteralPath (Join-Path $PackageRoot $layout.licenses_dir) -File -ErrorAction SilentlyContinue).Count
+Add-Line "licenses: $licenseCount notices under $($layout.licenses_dir)/"
+if ($licenseCount -eq 0) {
+    Add-Finding "$($layout.licenses_dir) carries no license or provenance notice; an archive that redistributes a private Node runtime has to ship its notices"
+}
 Add-Line '--- files ---'
 foreach ($rel in $checksumOrder) {
     Add-Line "$($listed[$rel])$($layout.checksum_separator)$rel"

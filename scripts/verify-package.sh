@@ -14,6 +14,14 @@
 # The archive layout is not restated here. It is read from
 # cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout.
 #
+# The repository is the parent of this script's directory, and there is no way to
+# substitute another one. The layout contract and release.yaml below are inputs to the
+# verdict, so an option that replaced them would let whoever passed it decide what an
+# install tree is - the same hole as asking the working directory, with a switch. The
+# verifier ships inside the repository it needs (this script, release.yaml and
+# cmd/lip-cursor-sdk-packaging), so there is no caller the default does not already
+# serve; a tree that lives outside a checkout is what --package-root is for.
+#
 # The private runtime is executed by absolute path. Nothing here requires a node on
 # PATH: the private-runtime variant ships its own runtime, and a verification that
 # needed a global Node would prove the opposite of what it claims.
@@ -23,7 +31,7 @@
 # executable only.
 #
 # Usage:
-#   scripts/verify-package.sh --package-root DIR [--repo-root DIR]
+#   scripts/verify-package.sh --package-root DIR
 #                             [--report FILE] [--expect-platform os/arch]
 set -euo pipefail
 
@@ -33,7 +41,6 @@ usage() {
   awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$1"
 }
 
-repo_root=""
 package_root=""
 report_path=""
 expect_platform=""
@@ -41,7 +48,6 @@ expect_platform=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --package-root) package_root="${2:-}"; shift 2 ;;
-    --repo-root) repo_root="${2:-}"; shift 2 ;;
     --report) report_path="${2:-}"; shift 2 ;;
     --expect-platform) expect_platform="${2:-}"; shift 2 ;;
     -h|--help) usage "$0"; exit 0 ;;
@@ -50,8 +56,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
-[ -n "$repo_root" ] || repo_root="$(dirname -- "$script_dir")"
-repo_root="$(cd -- "$repo_root" && pwd)"
+repo_root="$(cd -- "$(dirname -- "$script_dir")" && pwd)"
 [ -n "$package_root" ] || { printf 'verify-package: --package-root is required\n' >&2; exit 2; }
 [ -d "$package_root" ] || { printf 'verify-package: %s is not an install directory\n' "$package_root" >&2; exit 2; }
 package_root="$(cd -- "$package_root" && pwd)"
@@ -404,8 +409,15 @@ if [ -n "$record_json" ]; then
   fi
 fi
 
+# An empty directory is a finding, not a reported count of zero. The archive is
+# required to carry the runtime's license and provenance notices; the packager fails
+# without them, and a verifier that only prints how many it found would report a tree
+# carrying none as evidence that it looked.
 license_count="$(find "$package_root/$licenses_dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
 line "licenses: $license_count notices under $licenses_dir/"
+if [ "$license_count" -eq 0 ]; then
+  finding "$licenses_dir carries no license or provenance notice; an archive that redistributes a private Node runtime has to ship its notices"
+fi
 line '--- files ---'
 for entry in "${checksum_order[@]:-}"; do
   [ -n "$entry" ] || continue

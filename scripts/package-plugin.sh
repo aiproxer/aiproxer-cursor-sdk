@@ -106,9 +106,14 @@ release_scalar() {
   sed -n "s/^$1:[[:space:]]*//p" "$repo_root/release.yaml" | head -n 1
 }
 
-# layout_report reads one field of the archive layout contract.
+# layout_report reads one field of the archive layout contract. The contract comes from
+# this script's own repository, not from the directory the packager was started in:
+# `go run ./cmd/lip-cursor-sdk-packaging` is a module-relative path, so asking the
+# working directory for it makes packaging work from a checkout and fail from anywhere
+# else. This is the `cd "$repo_root"` the PowerShell packager's
+# Invoke-Tool -WorkingDirectory corresponds to.
 layout_report() {
-  layout_json="$(GOWORK=off go run ./cmd/lip-cursor-sdk-packaging layout -platform "$layout_platform")"
+  layout_json="$(cd "$repo_root" && GOWORK=off go run ./cmd/lip-cursor-sdk-packaging layout -platform "$layout_platform")"
   printf '%s' "$layout_json" | tr -d '\n' | sed "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/"
 }
 
@@ -285,8 +290,12 @@ launcher="$staging/$launcher_rel"
 mkdir -p "$(dirname -- "$outer_exe")" "$(dirname -- "$launcher")"
 outer_command="$(release_scalar command)"
 [ -n "$outer_command" ] || fail 'release.yaml has no command'
-GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$outer_exe" "$outer_command"
-GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$launcher" "./cmd/$launcher_name"
+# Every module-relative go invocation below runs in the repository rather than in
+# whatever directory the packager was started in, so the script assembles an archive
+# from any working directory. See layout_report for the same rule applied to the
+# layout contract.
+(cd "$repo_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$outer_exe" "$outer_command")
+(cd "$repo_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$launcher" "./cmd/$launcher_name")
 
 # 2. Production JavaScript. The dev toolchain stays in the source tree; only the
 #    built output and the production dependency tree are staged.
@@ -371,9 +380,9 @@ node_version="$("$private_runtime_path" --version)"
 # 5. Closed host manifest and release metadata, both derived from the staged tree
 #    rather than described independently of it.
 exe_digest="$(sha256_of "$outer_exe")"
-GOWORK=off go run ./cmd/lip-cursor-sdk-packaging render \
+(cd "$repo_root" && GOWORK=off go run ./cmd/lip-cursor-sdk-packaging render \
   -repo "$repo_root" -staging "$staging" -platform "$layout_platform" \
-  -exe-sha256 "$exe_digest" -node-source-kind "$runtime_kind" -node-source "$runtime_label" >/dev/null
+  -exe-sha256 "$exe_digest" -node-source-kind "$runtime_kind" -node-source "$runtime_label" >/dev/null)
 
 write_third_party_notices "$staging/$licenses_dir/THIRD-PARTY-NOTICES.md" \
   "$staging/$bridge_modules" "$private_runtime_path" "$node_version" "$runtime_kind" \

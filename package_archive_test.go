@@ -578,6 +578,48 @@ func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 	}
 }
 
+// TestPackageArchive_VerifierRequiresLicenseNotices keeps the archive's license and
+// provenance notices load-bearing.
+//
+// The design has the archive carry them, the packager fails without them, and both
+// verifiers already count what they find under LICENSES/ and print the count. A count
+// of zero reported as evidence is the failure mode this covers: the verifier would read
+// a tree that redistributes a private Node runtime and ships no notice for it as one it
+// had inspected. Both directions matter, so the same tree is verified with the notices
+// present and removed, and the finding has to appear only in the second run.
+//
+// The tree is synthetic and tiny, so this holds on every platform and in the default
+// unit lane rather than only where the opt-in package gate assembles a real archive.
+func TestPackageArchive_VerifierRequiresLicenseNotices(t *testing.T) {
+	t.Parallel()
+
+	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+	require.NoError(t, err)
+
+	for _, impl := range verifierImplementations(t) {
+		t.Run(impl, func(t *testing.T) {
+			withNotices := callerTamperedTree(t, archive)
+			report, _ := runVerifyScriptImpl(t, impl, withNotices, nil, nil)
+			require.NotContains(t, report, "carries no license or provenance notice",
+				"a tree that ships its notices is not a finding:\n%s", report)
+
+			withoutNotices := callerTamperedTree(t, archive)
+			require.NoError(t, os.RemoveAll(filepath.Join(withoutNotices,
+				filepath.FromSlash(archive.LicensesDir()))))
+			require.NoError(t, os.MkdirAll(filepath.Join(withoutNotices,
+				filepath.FromSlash(archive.LicensesDir())), 0o755))
+
+			report, errCode := runVerifyScriptImpl(t, impl, withoutNotices, nil, nil)
+			require.NotEqual(t, 0, errCode,
+				"a tree with an empty notice directory passed the %s verifier:\n%s", impl, report)
+			require.Contains(t, report, "carries no license or provenance notice",
+				"the finding has to name what is missing:\n%s", report)
+			require.Contains(t, report, archive.LicensesDir(),
+				"the finding has to name the directory it is about:\n%s", report)
+		})
+	}
+}
+
 // TestPackageArchive_VerifierReadsTheLayoutContractFromTheVerifiedRepository keeps the
 // archive layout contract out of the caller's hands.
 //
@@ -960,7 +1002,6 @@ func scriptOption(impl, name string) string {
 		"platform":        "Platform",
 		"report":          "ReportPath",
 		"expect-platform": "ExpectPlatform",
-		"repo-root":       "RepoRoot",
 	}[name]
 	if spelled == "" {
 		return "-" + name

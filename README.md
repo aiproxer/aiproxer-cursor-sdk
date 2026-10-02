@@ -97,7 +97,9 @@ What the packager stages, and only this:
   the Node grant together with the notices for the components Node bundles), this repository's `LICENSE`,
   and a generated `THIRD-PARTY-NOTICES.md` recording the staged production dependency inventory, the
   components the private runtime reports about itself, and the unresolved Cursor SDK question. Staging a
-  runtime without its license notices is a packaging failure, not a warning.
+  runtime without its license notices is a packaging failure, not a warning, and both verifiers fail an
+  install tree whose `LICENSES/` carries no notice rather than reporting a count of zero as evidence that
+  they looked.
 - **Checksums over every archive file**, plugin-private files included, in `sha256sum` line order so an
   operator can check them with the platform tool of their choice.
 
@@ -106,10 +108,14 @@ and every plugin-private file, so a tampered or missing companion is detected. T
 remains the authority for the outer process only; nothing here claims the host authenticates companion
 files. `compatibility.json` records the digest of the manifest and of the private runtime, and both
 verifiers compare those against the staged files rather than printing a provenance claim nothing has ever
-checked. Both verifiers read the layout contract from the repository they ship in (`--repo-root`), never
-from the directory they were started in: that one report decides what an install tree is, so a caller's
-working directory must not decide it. Install into a protected plugin root: the archive is only as
-trustworthy as the directory it is unpacked into.
+checked. Both verifiers read the layout contract and `release.yaml` from the repository they ship in - the
+parent of their own `scripts/` directory - and there is no option to substitute another one: one report
+decides what an install tree is, so a caller-supplied one would let the caller decide it, which is the
+same hole as asking the working directory with a switch. Verifying a tree that lives outside a checkout is
+what `--package-root` is for; it was verified on both implementations from a working directory that is
+neither the repository nor the install tree. The scripts also assemble and verify from any working
+directory, because every `go` invocation in them runs in the repository rather than in the caller's. Install
+into a protected plugin root: the archive is only as trustworthy as the directory it is unpacked into.
 
 ### Verified platforms
 
@@ -138,6 +144,36 @@ checksum-record ordering, the staged runtime starting as a direct process, and v
 `node` reachable on `PATH`. On a POSIX runner that lane also drives the PowerShell verifier over the same
 tree, so both verifier implementations reach the same verdicts. The public Linux/Windows claims in the
 manifest survive only for the platforms in the table above.
+
+The always-on half runs in the default unit lane and holds on every platform, whichever script this host
+happens to use: the layout contract comes from the repository the verifier ships in rather than from the
+caller's working directory, and it comes from the repository with no override; the PowerShell
+install-ownership predicate classifies every permission mode; the PowerShell verifier turns a
+writable-beyond-owner verdict into exactly one finding more than an owner-only root does; a tree with an
+empty `LICENSES/` is a finding and one with notices is not; both verifiers cross-check the recorded
+release digests; and no script restates the archive layout or reaches a global Node.
+
+### Verification limitations
+
+Stated rather than left to be discovered:
+
+- **A probe has no timeout.** Both verifiers run the staged private runtime and the launcher by absolute
+  path and wait for them, so a staged executable that never returns hangs the verification instead of
+  failing it. That is not a way past a check: the private runtime is covered by `checksums.sha256` and
+  cross-checked against `private_runtime_sha256` in `compatibility.json`, so a replaced binary is already
+  a finding, and CI bounds the hang with the job timeout. Making a probe time out needs process control
+  with different semantics on each platform, and is not implemented.
+- **Path comparison does not normalize Unicode.** `Test-SamePath`/`same_path` fold case on a
+  case-insensitive filesystem and drop the Windows extended-length prefix, but they compare the rest
+  byte for byte. Two spellings of one path that differ only in Unicode normalization therefore read as
+  different paths, and verification fails. It fails closed.
+- **The PowerShell install-ownership branch is driven end to end only where permission bits are
+  readable.** On Windows the check reports `not machine-checkable (Windows ACL)` rather than guessing, so a
+  Windows-only checkout proves the predicate for every permission mode
+  (`TestPackageArchive_PowerShellOwnershipCheckRejectsWritableInstallRoot`, which runs wherever `pwsh`
+  does) but not the script's FAIL branch. The `ubuntu-latest` package leg drives that branch: on a POSIX
+  host `verifierImplementations` runs the PowerShell verifier over the same tree, chmods the root to
+  `0777`, and requires a non-zero exit from it.
 
 ### Licensing status
 
@@ -299,6 +335,12 @@ private Node runtime), so it needs the build-time toolchain (`go`, `npm`, `node`
 several minutes; it is opt-in through `LIP_PACKAGE_GATE=1` rather than part of the default unit lane, and
 it skips itself in `-short` mode. Running `scripts/package-plugin` and `scripts/verify-package` by hand
 proves the same things.
+
+Budget for it accordingly. The gate verifies one assembled tree about fifteen times, and each verification
+walks and digests the whole staged tree, so on a POSIX host it takes roughly seven to eight minutes -
+past Go's 10m default is not a comfortable margin on a loaded runner. CI runs it as
+`go test -count=1 -timeout 25m -run TestPackageArchive -v .`, which stays inside the package job's own 30m
+ceiling; pass `-timeout` yourself if you run the gate locally and it panics on the default.
 
 ## Documentation
 

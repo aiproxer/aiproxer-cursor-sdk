@@ -2,10 +2,12 @@ package cursorsdk_test
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -98,6 +100,16 @@ func TestPackageArchive_PowerShellOwnershipCheckRejectsWritableInstallRoot(t *te
 // finding that names the remedy, and a root that is owner-only writable is reported as
 // such instead.
 //
+// The assertion is the difference between the two verdicts, not the exit code of
+// either. The substituted root is deliberately empty, so both runs also report every
+// required archive entry as missing, and a non-zero exit proves nothing about the
+// ownership branch; and the report prints the verdict as a status line either way, so
+// a neutered branch still contains its own text. What a neutered branch removes is one
+// finding, so the writable root has to produce exactly one finding more than the
+// owner-only root, and that finding has to be the ownership one. Deleting the
+// Add-Finding call in scripts/verify-package.ps1 makes the two sets identical and fails
+// this test.
+//
 // Only the verdict is substituted. The verifier is the shipped script, copied verbatim;
 // what it dot-sources is replaced by a stub. No option and no environment variable can
 // reach the shipped verifier's decision, because none exists.
@@ -105,20 +117,23 @@ func TestPackageArchive_VerifierFailsOnAWritableBeyondOwnerInstallRoot(t *testin
 	t.Parallel()
 	requirePowerShell(t)
 
-	for _, tc := range []struct {
+	cases := []struct {
 		name     string
 		mode     string
 		writable bool
 	}{
 		{name: "writable_beyond_owner", mode: "0777", writable: true},
-		{name: "owner_only_write", mode: "0700"},
-	} {
+		{name: "owner_only_write", mode: "0700", writable: false},
+	}
+
+	findings := make(map[string][]string, len(cases))
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "plugin install root with spaces")
 			require.NoError(t, os.MkdirAll(root, 0o755))
 
-			report, errCode := runVerifyScriptImplFrom(t, "ps1", substitutedVerifierDir(t, tc.mode, tc.writable),
-				"", root, nil, []string{"--repo-root", repoRoot(t)})
+			report, _ := runVerifyScriptImplFrom(t, "ps1", substitutedVerifierRepo(t, tc.mode, tc.writable),
+				"", root, nil, nil)
 
 			// The report has to carry the verdict in both directions, so the case that
 			// passes proves the branch is driven by the verdict rather than always
@@ -130,32 +145,74 @@ func TestPackageArchive_VerifierFailsOnAWritableBeyondOwnerInstallRoot(t *testin
 					"an owner-only writable root is not a finding:\n%s", report)
 				require.NotContains(t, report, "writable beyond its owner",
 					"an owner-only writable root must not fail:\n%s", report)
-				return
 			}
-			require.NotEqual(t, 0, errCode,
-				"a plugin root writable beyond its owner passed verification:\n%s", report)
-			require.Contains(t, report, "FAILED: writable beyond its owner",
-				"the verifier has to fail the install on the verdict it read:\n%s", report)
-			require.Contains(t, report, "is writable beyond its owner",
-				"the finding has to name the verdict:\n%s", report)
-			require.Contains(t, report, "protected plugin root",
-				"the finding has to name the operator remedy:\n%s", report)
+			findings[tc.name] = verifyFindings(report)
 		})
 	}
+
+	ownerOnly, writable := findings["owner_only_write"], findings["writable_beyond_owner"]
+	added := findingsOnlyIn(writable, ownerOnly)
+	require.Len(t, added, 1,
+		"a root writable beyond its owner has to add exactly one finding over an owner-only writable root; "+
+			"the FAIL branch in scripts/verify-package.ps1 decides it.\nowner-only: %v\nwritable: %v",
+		ownerOnly, writable)
+
+	ownershipFinding := added[0]
+	require.Contains(t, ownershipFinding, "verify-package: FAIL: install root",
+		"the finding the verdict added has to be the verifier's own: %q", ownershipFinding)
+	require.Contains(t, ownershipFinding, "is writable beyond its owner",
+		"the finding has to name the verdict: %q", ownershipFinding)
+	require.Contains(t, ownershipFinding, "protected plugin root",
+		"the finding has to name the operator remedy: %q", ownershipFinding)
 }
 
-// substitutedVerifierDir copies the shipped PowerShell verifier and replaces only the
-// install-ownership library it dot-sources, so a case can decide what the verifier reads
-// without giving the shipped script an option that could bypass its own check.
-func substitutedVerifierDir(tb testing.TB, mode string, writableBeyondOwner bool) string {
+// findingsOnlyIn returns the findings that appear in have but not in without, so a
+// verdict can be isolated from the findings both runs share. Order is not evidence:
+// the verifier reports its checks in a fixed order, not in verdict order.
+func findingsOnlyIn(have, without []string) []string {
+	shared := make(map[string]struct{}, len(without))
+	for _, finding := range without {
+		shared[finding] = struct{}{}
+	}
+	var only []string
+	for _, finding := range have {
+		if _, ok := shared[finding]; !ok {
+			only = append(only, finding)
+		}
+	}
+	return only
+}
+
+// verifyFindings returns the verifier's FAIL lines, which are what decide its exit
+// status. The report also prints the install-ownership verdict as a status line, so
+// only these lines are evidence that a branch produced a finding.
+func verifyFindings(report string) []string {
+	var findings []string
+	for _, raw := range strings.Split(report, "\n") {
+		if line := strings.TrimSpace(raw); strings.HasPrefix(line, "verify-package: FAIL:") {
+			findings = append(findings, line)
+		}
+	}
+	return findings
+}
+
+// substitutedVerifierRepo gives the shipped verifier a repository to resolve its own
+// layout contract from, with the install-ownership library replaced.
+//
+// The verifier takes no repository override on purpose: the contract and release.yaml
+// are inputs to its verdict, so a caller-supplied one would let the caller decide what
+// an install tree is. Deciding a verdict from a temporary directory therefore means
+// giving the script a temporary repository, which this builds by mirroring the sources
+// the layout report reads and substituting only the ownership helper.
+func substitutedVerifierRepo(tb testing.TB, mode string, writableBeyondOwner bool) string {
 	tb.Helper()
 
-	dir := tb.TempDir()
-	scripts := filepath.Join(dir, "scripts")
-	require.NoError(tb, os.MkdirAll(filepath.Join(scripts, "lib"), 0o755))
+	root := tb.TempDir()
+	mirrorRepo(tb, repoRoot(tb), root)
 
-	shipped := readFileText(tb, filepath.Join(repoRoot(tb), "scripts", "verify-package.ps1"))
-	require.NoError(tb, os.WriteFile(filepath.Join(scripts, "verify-package.ps1"), []byte(shipped), 0o644))
+	// PowerShell has no bareword boolean: an expression that reads `true` yields null
+	// rather than a verdict, so a substituted library that wanted a measured answer
+	// would hand the verifier none.
 	stub := fmt.Sprintf(`# Substituted by TestPackageArchive_VerifierFailsOnAWritableBeyondOwnerInstallRoot.
 # The verifier script is the shipped one; only the verdict it reads changes here.
 function Get-InstallOwnershipVerdict([string]$Path) {
@@ -167,8 +224,48 @@ function Get-InstallOwnershipVerdict([string]$Path) {
     }
 }
 `, psq(mode), boolPowerShellLiteral(writableBeyondOwner))
-	require.NoError(tb, os.WriteFile(filepath.Join(scripts, "lib", "install-ownership.ps1"), []byte(stub), 0o644))
-	return dir
+	require.NoError(tb, os.WriteFile(filepath.Join(root, "scripts", "lib", "install-ownership.ps1"), []byte(stub), 0o644))
+	return root
+}
+
+// mirrorRepo copies a repository without the parts a layout report never reads: the
+// git history, the bridge workspace, and any installed npm tree, which is tens of
+// megabytes of symlinks. Everything else is copied, so a packaging command that grows
+// an import of another internal package still compiles here rather than failing the
+// case for a reason of its own.
+func mirrorRepo(tb testing.TB, src, dst string) {
+	tb.Helper()
+
+	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		if mirroredAway(rel) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		return copyFileMode(path, target)
+	})
+	require.NoError(tb, err)
+}
+
+// mirroredAway reports the top-level and nested directories a mirror leaves out.
+func mirroredAway(rel string) bool {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if parts[0] == ".git" || parts[0] == "dist" || parts[0] == "bridge-node" {
+		return true
+	}
+	return slices.Contains(parts, "node_modules")
 }
 
 // installOwnershipModes is the table of permission bits the ownership check has to
