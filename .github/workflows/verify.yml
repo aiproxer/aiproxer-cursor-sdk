@@ -118,3 +118,45 @@ jobs:
       - name: Bridge typecheck
         working-directory: bridge-node
         run: npm run typecheck
+
+  package:
+    name: package (native archive validation)
+    # The archive carries the plugin-private Node runtime, so it can only be trusted
+    # where it was assembled and actually run. This lane therefore validates exactly
+    # one platform - the runner's own - and the packager refuses to cross-compile a
+    # platform claim. A second platform needs its own native runner, not a matrix
+    # entry that no one has run the private runtime on.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # Packaging is a build-time operation: npm resolves the production dependency
+      # tree and stages the private Node runtime from the runner's Node toolchain.
+      # Nothing in the assembled archive needs npm or a global Node at run time.
+      - name: Setup Node (22.22.3)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: bridge-node/package-lock.json
+
+      - name: Download modules
+        run: go mod download
+
+      # Assembles the archive, verifies it, and fails on a tampered or missing
+      # private file, an unlisted or missing file, a platform overclaim, a missing
+      # companion, an install root containing spaces, or any dependence on a global
+      # Node for the private-runtime variant.
+      - name: Native package platform validation
+        run: go test -run TestPackageArchive -v .

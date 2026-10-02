@@ -3,8 +3,9 @@
 This repository was extracted from the Go-LIP host repository
 [`matdev83/go-llm-interactive-proxy`](https://github.com/matdev83/go-llm-interactive-proxy). It is
 governed by the Go-LIP specification `cursor-sdk-standalone` (`tasks.md` task 1.3 provisioned this
-repository skeleton, task 2.1 relocated the Go connector, and task 2.2 relocated the SDK bridge; private
-runtime packaging and release tooling follow in later tasks).
+repository skeleton, task 2.1 relocated the Go connector, task 2.2 relocated the SDK bridge, task 2.3
+wired plugin-local companion resolution, task 3.1 added the private Node launcher, and task 3.2 added
+native archive assembly and verification; release metadata and publication follow in later tasks).
 
 ## Extraction baseline
 
@@ -57,7 +58,29 @@ explicitly:
 Nothing in this file re-licenses the host project as MIT; it only states the license of this repository and
 attributes the origin of derived material.
 
-## Current commit scope
+## Redistributed runtime and dependency notices
+
+`scripts/package-plugin.{sh,ps1}` stages the components below into every archive and writes the collected
+notices to `LICENSES/`, so the artifact carries its own attribution:
+
+| Component | License | Notice staged |
+| --- | --- | --- |
+| Node.js private runtime (`private/node/node[.exe]`) | MIT, with the notices for the components Node bundles (ICU, OpenSSL, c-ares, libuv, ...) in the distribution `LICENSE` | `LICENSES/nodejs-LICENSE` |
+| This repository's plugin sources | MIT | `LICENSES/plugin-LICENSE` |
+| Staged production npm dependencies (`@bufbuild/protobuf`, `@connectrpc/*`, `@statsig/*`, `undici`, `zod`) | As declared by each package: Apache-2.0 and/or BSD-3-Clause, Apache-2.0, ISC, MIT, MIT | `LICENSES/THIRD-PARTY-NOTICES.md` |
+| `@cursor/sdk` and its platform package | Proprietary. `LICENSE.md` states that use is subject to [Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right. The platform package additionally ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package does not redistribute. | `LICENSES/THIRD-PARTY-NOTICES.md` (factually recorded) |
+
+The generated notice file records what the archive redistributes; it is evidence, not a license grant. It
+states explicitly that a maintainer must confirm the redistribution rights for `@cursor/sdk` and its
+bundled binaries before publication. **That confirmation does not exist yet, so this repository has
+published nothing and must publish nothing until it does.** `compatibility.json` carries the same status
+inside every archive, and `scripts/verify-package` reports the staged notices so an operator sees the same
+question the maintainers have to answer.
+
+The private Node runtime is a copy of an official Node.js distribution selected at packaging time, never
+of a developer's working installation; `compatibility.json` records its version, digest, and provenance
+label. Both artifacts are reproducible from the inputs recorded there, and neither is checked into this
+repository.## Current commit scope
 
 The Go connector is relocated: `cmd/lip-backend-cursorsdk/`, `internal/service/`, `internal/product/`
 (including its Go test suite and `testdata` fixtures), the root-level `service_test.go` and
@@ -77,12 +100,17 @@ override, `engines.node >=22.13`, no npm lifecycle hooks, and 108 hermetic tests
 because they pointed at host-only paths. The bridge now owns its own CI lane and npm Dependabot entry in
 this repository, and its Node tooling no longer depends on the Go-LIP host.
 
-Private runtime packaging is not present here yet, and no plugin artifact has been released.
+Native archive assembly and verification are original work added in this repository and are MIT-licensed
+under the same terms as the rest of it: `internal/packagelayout` (the single archive-layout contract),
+`cmd/lip-cursor-sdk-packaging` (its build-time reporting and metadata-rendering surface),
+`scripts/package-plugin.{sh,ps1}`, `scripts/verify-package.{sh,ps1}`, and the packaging tests. They contain
+no relocated host code and no JavaScript. **No plugin artifact has been released: there is no tag and no
+GitHub release, and the redistribution rights above are still unconfirmed.**
 
 The plugin-private bridge launcher in `cmd/lip-cursor-sdk-bridge/` is original work added in this
 repository and is MIT-licensed under the same terms as the rest of this repository. It is a small
 Go program that resolves the packaged private Node runtime and bridge entry relative to its own
 location and forwards the bridge protocol; it contains no relocated host code, no JavaScript, and no
-bundled or vendored runtime. Redistribution of the private Node runtime and of the production
-`@cursor/sdk` tree into a released archive, with its license and provenance notices, remains the
-responsibility of the later packaging task; nothing in this launcher redistributes either one.
+bundled or vendored runtime. It redistributes nothing by itself: the private Node runtime and the
+production `@cursor/sdk` tree enter an archive only through the packaging scripts above, which carry the
+notices recorded in this file.
