@@ -94,6 +94,31 @@ and treats repeated cleanup as the same single completion. The runtime deliberat
 the launcher's own process tree, so the connector's existing process-tree kill of the launcher
 also reaches the runtime and anything the runtime started.
 
+Two limits of that model are operator-visible, so they are stated rather than implied:
+
+- **A launcher-only escalation reaches the direct child, not a tree the runtime forked.** When the
+  launcher is stopped by itself - its own stdin closes, or it is sent `SIGINT`, `SIGTERM`, or `SIGHUP`
+  - it closes the runtime's stdin and then terminates the private runtime process. On POSIX that
+  escalation is aimed at the direct child only, so processes the runtime itself started can outlive
+  it; on Windows it walks the runtime's own descendants with `taskkill /T /F`. The connector's kill is
+  the wider one on both platforms: the launcher's POSIX process group, or that same `taskkill /T /F`
+  ancestry walk on Windows.
+- **A launcher killed by its own process handle alone can strand the private runtime.** A crash, an
+  external kill, or the connector's narrow process-identity-mismatch downgrade - which kills only the
+  launcher handle so a reused process id can never widen the blast radius - runs none of the cleanup
+  above, because the launcher executes no more code. The stranded runtime then sees its stdin pipe
+  close, since the launcher held the only write end, and the shipped bridge stops on that EOF
+  (`bridge-node/src/main.ts` serves until its input ends). A runtime that ignored the EOF would have
+  to be ended by the operator: close the instance to release everything the connector owns, and
+  terminate the leftover `private/node/node[.exe]` process.
+
+The second limit is a stated supervision boundary, not a claim of full ownership. No launcher code can
+close it, because it needs an OS-level parent-death mechanism - a parent-death signal on POSIX, a
+kill-on-close job object on Windows - that this launcher does not install.
+`TestLauncherProcess_AbruptLauncherDeathByHandleAloneStrandsPrivateRuntime` measures that boundary and
+`TestLauncherProcess_ConnectorTreeKillReapsRuntimeDescendants` proves the connector's tree kill does
+reach the same runtime.
+
 ## Pinned host contract baseline
 
 The module depends only on published Go-LIP modules. There are no `replace` directives, no `go.work`

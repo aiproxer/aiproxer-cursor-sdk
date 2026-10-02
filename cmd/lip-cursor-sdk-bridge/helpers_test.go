@@ -24,7 +24,6 @@ func mustLayout(tb testing.TB, lay installedPrivateLayout) privateLayout {
 // resolve, so a caller can prove the failure happens before any start.
 func unresolvedLayoutFor(lay installedPrivateLayout) privateLayout {
 	return privateLayout{
-		Root:    filepath.Dir(lay.launcher),
 		Runtime: lay.runtime,
 		Entry:   lay.entry,
 	}

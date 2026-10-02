@@ -98,23 +98,45 @@ func TestPrivateLayoutFor_RejectsNonRegularPrivateRuntimeAndUnknownLauncher(t *t
 	require.NoError(t, os.MkdirAll(lay.runtime, 0o755))
 	got, err := privateLayoutFor(lay.launcher)
 	require.Error(t, err)
-	require.Empty(t, got.Runtime)
+	require.Equal(t, privateLayout{}, got)
 	require.Contains(t, err.Error(), "private/node/node")
 	require.Contains(t, err.Error(), "directory")
 
 	got, err = privateLayoutFor("   ")
 	require.Error(t, err)
-	require.Empty(t, got.Root)
+	require.Equal(t, privateLayout{}, got)
 	require.Contains(t, err.Error(), "launcher executable")
 }
 
 // TestPrivateLayoutRelPaths_MatchReleaseArchive pins the slash-separated archive
-// locations quoted in operator diagnostics.
+// locations quoted in operator diagnostics against what layout resolution
+// actually produces.
+//
+// privateEntryRelPath is the single constant the diagnostics quote and the one the
+// packager must stage, so the assertion has to be a correspondence rather than a
+// restating of the expression that defines it: the constant must name exactly the
+// entry path that privateLayoutFor resolves inside the packaged install root, and
+// the runtime constant must stay the documented platform-suffixed archive
+// spelling. A layout that moves its bridge entry, its entry directory, or the
+// runtime directory therefore fails here instead of producing diagnostics that
+// name a file the install does not contain.
 func TestPrivateLayoutRelPaths_MatchReleaseArchive(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, "private/node/node[.exe]", privateRuntimeRelPath)
-	require.Equal(t, "private/bridge/bin/"+bridgeEntryName, privateEntryRelPath)
+
+	lay := installPrivateLayout(t, true, true)
+	got, err := privateLayoutFor(lay.launcher)
+	require.NoError(t, err)
+
+	runtimeRel, err := filepath.Rel(lay.root, got.Runtime)
+	require.NoError(t, err)
+	require.Equal(t, "private/node/node"+platformExeSuffix(), filepath.ToSlash(runtimeRel))
+
+	entryRel, err := filepath.Rel(lay.root, got.Entry)
+	require.NoError(t, err)
+	require.Equal(t, "private/bridge/bin/lip-cursor-sdk-bridge.js", filepath.ToSlash(entryRel))
+	require.Equal(t, privateEntryRelPath, filepath.ToSlash(entryRel))
 	require.NotContains(t, privateRuntimeRelPath, `\`)
 	require.NotContains(t, privateEntryRelPath, `\`)
 }

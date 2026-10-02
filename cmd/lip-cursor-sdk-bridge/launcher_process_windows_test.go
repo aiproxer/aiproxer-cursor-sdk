@@ -18,6 +18,10 @@ const stillActive = 0x00000103
 // this test needs to observe whether a descendant is still alive.
 const processQueryLimitedInformation = 0x1000
 
+// processTerminate is the access right a test-owned process handle needs to
+// stop a process it started.
+const processTerminate = 0x0001
+
 // setProcessGroupForTest mirrors the connector's own process-group isolation for
 // the launcher it spawns, so the tree-kill test exercises the production
 // arrangement.
@@ -47,4 +51,18 @@ func processAlive(t testing.TB, pid int) bool {
 		return false
 	}
 	return code == stillActive
+}
+
+// terminatePID kills one process by pid for test cleanup. It is deliberately a
+// direct handle kill: a cleanup that reached a whole tree could mask which
+// process the test actually left behind.
+func terminatePID(pid int) {
+	if pid > 1 {
+		h, err := syscall.OpenProcess(processTerminate, false, uint32(pid))
+		if err != nil {
+			return
+		}
+		defer func() { _ = syscall.CloseHandle(h) }()
+		_ = syscall.TerminateProcess(h, 1)
+	}
 }

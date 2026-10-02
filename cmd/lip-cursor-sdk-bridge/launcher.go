@@ -129,7 +129,6 @@ type Launcher struct {
 	childStdin  *os.File
 	childStdout *os.File
 	childStderr *os.File
-	startErr    error
 	waitErr     error
 	exitStatus  int
 
@@ -188,7 +187,7 @@ func (l *Launcher) Start(ctx context.Context) (err error) {
 
 	defer func() {
 		if err != nil {
-			l.finishStartFailure(err)
+			l.finishStartFailure()
 		}
 		close(l.startDone)
 	}()
@@ -294,10 +293,10 @@ func (l *Launcher) settle(child runtimeChild) {
 }
 
 // finishStartFailure settles a start that acquired nothing, so a waiter is never
-// left blocked on a runtime that does not exist.
-func (l *Launcher) finishStartFailure(startErr error) {
+// left blocked on a runtime that does not exist. The start error itself is the
+// caller's own return value, so only the settlement has to be recorded here.
+func (l *Launcher) finishStartFailure() {
 	l.mu.Lock()
-	l.startErr = startErr
 	if l.state != launcherStopping && l.state != launcherStopped {
 		l.state = launcherStopped
 	}

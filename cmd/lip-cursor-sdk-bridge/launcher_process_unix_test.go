@@ -33,6 +33,15 @@ func processAlive(t testing.TB, pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
+// terminatePID kills one process by pid for test cleanup. It is deliberately a
+// direct handle kill: a cleanup that reached a whole tree could mask which
+// process the test actually left behind.
+func terminatePID(pid int) {
+	if pid > 1 {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 // TestLauncherProcess_TerminationSignalReapsRuntime covers termination
 // forwarding: a termination signal aimed at the launcher must reach its owned
 // private runtime descendant, which must then be reaped rather than left behind.

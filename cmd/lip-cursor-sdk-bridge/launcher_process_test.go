@@ -169,6 +169,49 @@ func TestLauncherProcess_ConnectorTreeKillReapsRuntimeDescendants(t *testing.T) 
 	requireEventuallyDead(t, descendantPID)
 }
 
+// TestLauncherProcess_AbruptLauncherDeathByHandleAloneStrandsPrivateRuntime
+// pins the one supervision gap the launcher cannot close from user space, so the
+// documented model stays a measured claim instead of an assumption.
+//
+// Every supervised path reaches the runtime because the runtime stays inside the
+// launcher's own process tree: the connector's tree kill, the connector's
+// graceful close, and termination forwarding. A launcher that is terminated by
+// its own process handle alone - the connector's deliberate
+// process-identity-mismatch downgrade, a crash, or an external kill - runs no
+// cleanup code at all, so nothing terminates the private runtime.
+//
+// The assertion is the measured bound, not a desired behavior: it holds together
+// with TestLauncherProcess_ConnectorTreeKillReapsRuntimeDescendants, which proves
+// the connector's tree kill does reach the same runtime. Closing this gap needs
+// an OS-level parent-death mechanism rather than launcher code, so this test
+// fails the moment one is added and the README claim must change with it.
+func TestLauncherProcess_AbruptLauncherDeathByHandleAloneStrandsPrivateRuntime(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the launcher executable")
+	}
+
+	lay := installedLauncherLayout(t, true)
+	runtimePIDFile := filepath.Join(t.TempDir(), "runtime.pid")
+	writeBridgeScript(t, lay, `{"mode":"hold","pidFile":`+strconvQuote(runtimePIDFile)+`}`)
+
+	proc := startLauncherProcess(t, lay.launcher)
+	waitForFile(t, runtimePIDFile)
+	runtimePID := readPID(t, runtimePIDFile)
+	require.True(t, processAlive(t, runtimePID))
+	// The runtime is expected to outlive this test's launcher kill, so the test
+	// reaps it itself instead of leaving a private process behind.
+	t.Cleanup(func() { terminatePID(runtimePID) })
+
+	// Terminate the launcher process itself and nothing else. This is the shape of
+	// the connector's identity-mismatch downgrade, so the private runtime must
+	// still be running once the launcher has been reaped.
+	require.NoError(t, proc.cmd.Process.Kill())
+	_ = proc.cmd.Wait()
+
+	require.True(t, processAlive(t, runtimePID),
+		"a launcher killed by handle alone no longer strands the private runtime; close the gap and update the documented supervision limit")
+}
+
 // launcherProcess is a running launcher executable with its own pipes.
 type launcherProcess struct {
 	cmd    *exec.Cmd

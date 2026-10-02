@@ -36,8 +36,6 @@ const (
 
 // privateLayout is the resolved plugin-private runtime contract.
 type privateLayout struct {
-	// Root is the private bridge directory holding the launcher.
-	Root string
 	// Runtime is the fixed private Node executable.
 	Runtime string
 	// Entry is the fixed bridge entry the private runtime executes.
@@ -69,7 +67,6 @@ func privateLayoutFor(launcherExecutable string) (privateLayout, error) {
 	}
 	root := filepath.Dir(filepath.Clean(self))
 	lay := privateLayout{
-		Root:    root,
 		Runtime: filepath.Clean(filepath.Join(root, "..", runtimeFileBase, runtimeFileBase+platformExeSuffix())),
 		Entry:   filepath.Clean(filepath.Join(root, entryDirName, bridgeEntryName)),
 	}
