@@ -188,14 +188,16 @@ func Normalize(in Input, fallbackAPIKey string) (Config, error) {
 	exeName := strings.TrimSpace(in.BridgeExecutable)
 	if exeName == "" {
 		// The packaged default is a direct plugin-local launcher next to the
-		// running outer plugin executable, not a PATH/global-npm lookup.
+		// running outer plugin executable, not a PATH/global-npm lookup. It is
+		// derived from os.Executable() and never operator-influenced, so the
+		// shell/npm guard below applies to bridge_executable only. See
+		// [defaultPrivateCompanionPath].
 		companion, err := defaultPrivateCompanionPath()
 		if err != nil {
 			return Config{}, err
 		}
 		exeName = companion
-	}
-	if err := rejectShellOrNPMExecutable(exeName); err != nil {
+	} else if err := rejectShellOrNPMExecutable(exeName); err != nil {
 		return Config{}, err
 	}
 	resolved, ok := checkBridgeExecutable(exeName)

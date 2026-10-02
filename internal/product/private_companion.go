@@ -31,6 +31,18 @@ func privateCompanionRelPath() string {
 // path: it never consults PATH, a shell, npm, a global binary directory, or the
 // current working directory, and it never downloads or falls back to another
 // Cursor integration.
+//
+// The resolved path deliberately bypasses rejectShellOrNPMExecutable. That guard
+// exists to stop an operator-supplied bridge_executable from smuggling a shell
+// or npm launcher into the bridge argv, which the connector never expands
+// through a shell. Here every component is derived: the outer path comes from
+// os.Executable() and the leaf from the fixed packaged layout name. A `$` or `&`
+// here is part of the install root the operator already chose by installing
+// there, so rejecting it would fail a correct packaged install with a diagnostic
+// naming a field the operator never set. The safety properties the guard
+// protects are already structural: the companion is an exact stat-ed file next
+// to the plugin executable, it is a fixed private name rather than a launcher
+// name, and the connector executes it as a direct binary.
 func defaultPrivateCompanionPath() (string, error) {
 	outer, err := os.Executable()
 	if err != nil {

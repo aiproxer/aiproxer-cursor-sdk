@@ -64,6 +64,26 @@ func TestInstalledLayout_PrivateCompanionResolution(t *testing.T) {
 		require.Equal(t, "cursorsdk", models.GetModels()[0].GetFactoryKind())
 	})
 
+	t.Run("default_starts_plugin_local_companion_under_shell_metacharacter_install_root", func(t *testing.T) {
+		// `$` and `&` are legal in a POSIX install root. The packaged default is
+		// plugin-derived, not operator-supplied, so an install root carrying shell
+		// metacharacters must start the companion instead of failing with the
+		// operator-facing bridge_executable rejection that names a field the
+		// operator never set.
+		layout := newInstalledLayoutRooted(t, true, "plugin $root & co")
+		decoys := newBridgeDecoys(t, true)
+		pluginProc := startInstalledPlugin(t, layout, decoys.workDir, childEnvWithPathOnly(decoys.pathDir))
+
+		token := negotiateToken(t, pluginProc)
+		instanceID := "installed-metacharacter-companion"
+		err := configureInstance(t, pluginProc, token, instanceID, instanceConfigYAML("", t.TempDir()))
+		require.NoError(t, err, "plugin stderr:\n%s", pluginProc.stderrText())
+
+		models, err := pluginProc.listModels(t, instanceID)
+		require.NoError(t, err, "plugin stderr:\n%s", pluginProc.stderrText())
+		require.NotEmpty(t, models.GetModels())
+	})
+
 	t.Run("explicit_override_is_honored_without_packaged_companion", func(t *testing.T) {
 		layout := newInstalledLayout(t, false)
 		decoys := newBridgeDecoys(t, false)
@@ -112,6 +132,13 @@ func TestInstalledLayout_PrivateCompanionResolution(t *testing.T) {
 			instanceConfigYAML(missing, t.TempDir()))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not found (direct PATH/absolute lookup only; Go-LIP never runs npm install)")
+
+		// The shell/npm guard stays scoped to operator-supplied values: skipping it
+		// for the plugin-derived default must not relax it for bridge_executable.
+		err = configureInstance(t, pluginProc, negotiateToken(t, pluginProc), "installed-override-metacharacter",
+			instanceConfigYAML("bridge && curl evil", t.TempDir()))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must not contain shell metacharacters")
 	})
 }
 
@@ -124,7 +151,15 @@ type installedLayout struct {
 
 func newInstalledLayout(t *testing.T, withCompanion bool) installedLayout {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "plugin root with spaces")
+	return newInstalledLayoutRooted(t, withCompanion, "plugin root with spaces")
+}
+
+// newInstalledLayoutRooted lets the packaged root directory name carry
+// characters that only a shell would interpret, proving that companion
+// resolution and launch stay shell-free.
+func newInstalledLayoutRooted(t *testing.T, withCompanion bool, rootName string) installedLayout {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), rootName)
 	outer := installBinary(t, filepath.Join(root, "bin", installedOuterName+exeSuffix()), buildOuterPluginExe(t))
 	if withCompanion {
 		installBinary(t,
