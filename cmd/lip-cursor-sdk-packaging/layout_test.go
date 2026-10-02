@@ -30,13 +30,18 @@ func TestMain_LayoutReportIsTheSinglePackagingContract(t *testing.T) {
 	require.Equal(t, "private/bridge/bin/lip-cursor-sdk-bridge.js", report["bridge_entry"])
 	require.Equal(t, "private/node/node[.exe]", report["private_runtime_doc"])
 
-	for _, key := range []string{"os", "arch", "exe_suffix", "manifest", "outer_executable",
+	for _, key := range []string{"os", "arch", "manifest", "outer_executable",
 		"launcher", "launcher_name", "bridge_package_dir", "bridge_entry", "bridge_dist",
 		"bridge_modules", "bridge_package_json", "private_runtime",
 		"private_runtime_doc", "private_prefix", "compatibility", "checksums", "licenses_dir",
 		"checksum_separator", "declared_platforms"} {
 		require.NotEmpty(t, report[key], "layout report key %q", key)
 	}
+
+	// exe_suffix is the one report field that is legitimately empty: it is empty
+	// exactly on the platforms whose executables carry no suffix. An empty value
+	// there is the contract, not a missing field, so it is compared instead.
+	require.Equal(t, packagelayout.ExeSuffixFor(runtime.GOOS), report["exe_suffix"])
 
 	required := stringSlice(t, report["required_entries"])
 	require.Contains(t, required, "plugin.backendplugin.json")

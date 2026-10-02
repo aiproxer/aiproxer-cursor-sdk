@@ -27,19 +27,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// packageGateEnv opts a checkout into the native package gate.
+//
+// The gate assembles a real archive: it builds production JavaScript, resolves the
+// production dependency tree over the network, and copies a private Node runtime,
+// which takes minutes and needs the build-time toolchain. That is deliberate work,
+// not a unit test, so it runs only where it is asked for - the packaging lane, or a
+// maintainer running scripts/package-plugin by hand. The static half of this file
+// (the layout-parity check) always runs.
+const packageGateEnv = "LIP_PACKAGE_GATE"
+
 // TestPackageArchive_NativeArchiveIsInstallableAndVerifiable is the native package
 // platform validation gate: an archive assembled on this machine has to install,
 // verify, and run its private runtime, and every way a package can lie about its
 // contents has to fail verification rather than pass silently.
 //
 // Nothing here is hermetic: packaging builds production JavaScript and stages the
-// production dependency tree with npm. The gate therefore skips in -short mode and
-// when the build-time toolchain is absent, and it validates exactly one platform:
+// production dependency tree with npm, and the gate validates exactly one platform:
 // the one it runs on. Cross-compiling another platform's archive and claiming it
 // would be the failure mode this gate exists to prevent.
 func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("native package platform validation builds production JavaScript and stages the dependency tree")
+	}
+	if !packageGateRequested() {
+		t.Skipf("set %s=1, or run scripts/package-plugin and scripts/verify-package, to assemble and validate a native archive",
+			packageGateEnv)
 	}
 	for _, tool := range []string{"go", "npm", "node"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -372,6 +385,16 @@ func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 			require.NotContains(t, body, literal, "%s restates the archive layout", script)
 		}
 		require.Contains(t, body, "lip-cursor-sdk-packaging", "%s must read the layout contract", script)
+	}
+}
+
+// packageGateRequested reports whether this run opted into the native package gate.
+func packageGateRequested() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(packageGateEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

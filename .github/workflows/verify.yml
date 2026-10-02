@@ -130,6 +130,10 @@ jobs:
     timeout-minutes: 20
     env:
       GOWORK: "off"
+      # The gate assembles a real archive (production JavaScript, production
+      # dependency tree over the network, a private Node runtime), so it is opt-in
+      # rather than part of the default unit lane, and this lane is what opts in.
+      LIP_PACKAGE_GATE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

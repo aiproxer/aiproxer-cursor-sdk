@@ -272,11 +272,14 @@ A third lane validates the archive natively on its runner - the same gate as
 `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`:
 
 ```sh
-GOWORK=off go test -run TestPackageArchive .
+LIP_PACKAGE_GATE=1 GOWORK=off go test -run TestPackageArchive .
 ```
 
-It needs the build-time toolchain (`go`, `npm`, `node`) and network access for `npm ci`; it skips itself
-in `-short` mode and when that toolchain is absent.
+It assembles a real archive (production JavaScript, the production dependency tree over the network, a
+private Node runtime), so it needs the build-time toolchain (`go`, `npm`, `node`), network access, and
+several minutes; it is opt-in through `LIP_PACKAGE_GATE=1` rather than part of the default unit lane, and
+it skips itself in `-short` mode. Running `scripts/package-plugin` and `scripts/verify-package` by hand
+proves the same things.
 
 ## Documentation
 
