@@ -118,3 +118,64 @@ jobs:
       - name: Bridge typecheck
         working-directory: bridge-node
         run: npm run typecheck
+
+  package:
+    name: package (${{ matrix.os }})
+    # The archive carries the plugin-private Node runtime, so it can only be trusted
+    # where it was assembled and actually run. Each leg of this matrix therefore
+    # validates exactly one platform - its own - and the packager refuses to
+    # cross-compile a platform claim. Both legs are native runners, because a
+    # cross-compiled archive has never had its private runtime run: the matrix exists
+    # so the Windows/amd64 claim has enforced CI evidence of its own rather than a
+    # maintainer's word, not to multiply claims.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      GOWORK: "off"
+      # The gate assembles a real archive (production JavaScript, production
+      # dependency tree over the network, a private Node runtime), so it is opt-in
+      # rather than part of the default unit lane, and this lane is what opts in.
+      LIP_PACKAGE_GATE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # Packaging is a build-time operation: npm resolves the production dependency
+      # tree and stages the private Node runtime from the runner's Node toolchain.
+      # Nothing in the assembled archive needs npm or a global Node at run time.
+      - name: Setup Node (22.22.3)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: bridge-node/package-lock.json
+
+      - name: Download modules
+        run: go mod download
+
+      # Assembles the archive, verifies it, and fails on a tampered or missing
+      # private file, an unlisted or missing file, a platform overclaim, a missing
+      # companion, an install root containing spaces, or any dependence on a global
+      # Node for the private-runtime variant.
+      #
+      # -timeout is raised off Go's 10m default on purpose. The gate verifies one
+      # assembled tree about fifteen times (every way a package can lie has to be
+      # shown to fail), each verification walks and digests the whole staged tree
+      # including the private Node runtime, and on a POSIX runner every one of those
+      # verifications runs the shell verifier as well as the PowerShell one. Ten
+      # minutes is not a budget this lane can meet, and a lane that panics on the
+      # default reports no platform evidence at all. It stays inside the job's own
+      # 30m ceiling so a slow run is a failure with a real report rather than a kill.
+      - name: Native package platform validation
+        run: go test -count=1 -timeout 25m -run TestPackageArchive -v .

@@ -3,11 +3,11 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/aiproxer/aiproxer-cursor-sdk/internal/packagelayout"
 )
 
 // The packaged release layout places this launcher at private/bridge/ and the
@@ -16,22 +16,28 @@ import (
 // consults PATH, a shell, npm, a global binary directory, or the current
 // working directory, and it never downloads or installs anything.
 //
+// The archive layout itself is not owned here. internal/packagelayout is the
+// single contract that the release packaging scripts stage and the package
+// verification script require, so this launcher consumes it instead of
+// restating the names: a layout that moved the bridge entry, the entry
+// directory, or the runtime directory would otherwise make this launcher look
+// for a file the archive does not contain.
+//
 // The bridge entry is the bridge package's own bin/ shim, not dist/main.js,
 // because the connector's tool contract includes the shim's `--version` and
 // `doctor` handling. The shim resolves dist/, node_modules/, and package.json
 // relative to its own parent directory, which is exactly private/bridge/.
 const (
-	launcherName    = "lip-cursor-sdk-bridge"
-	runtimeFileBase = "node"
+	launcherName    = packagelayout.LauncherName
 	entryDirName    = "bin"
-	bridgeEntryName = "lip-cursor-sdk-bridge.js"
+	bridgeEntryName = packagelayout.BridgeEntryName
 )
 
 // privateRuntimeRelPath and privateEntryRelPath are the slash-separated archive
 // locations quoted verbatim in operator diagnostics.
 const (
-	privateRuntimeRelPath = "private/node/node[.exe]"
-	privateEntryRelPath   = "private/bridge/bin/" + bridgeEntryName
+	privateRuntimeRelPath = packagelayout.RuntimeRelDoc
+	privateEntryRelPath   = packagelayout.PrivatePrefix + "bridge/" + entryDirName + "/" + bridgeEntryName
 )
 
 // privateLayout is the resolved plugin-private runtime contract.
@@ -61,15 +67,14 @@ func resolvePrivateLayout() (privateLayout, error) {
 // missing private runtime or bridge entry is an explicit prerequisite failure
 // that names the expected archive location and offers no fallback.
 func privateLayoutFor(launcherExecutable string) (privateLayout, error) {
-	self := strings.TrimSpace(launcherExecutable)
-	if self == "" {
-		return privateLayout{}, errors.New("lip-cursor-sdk-bridge: cannot locate the launcher executable")
+	priv, err := packagelayout.PrivateFor(launcherExecutable, runtime.GOOS)
+	if err != nil {
+		if errors.Is(err, packagelayout.ErrUnknownLauncherPath) {
+			return privateLayout{}, errors.New("lip-cursor-sdk-bridge: cannot locate the launcher executable")
+		}
+		return privateLayout{}, fmt.Errorf("lip-cursor-sdk-bridge: %w", err)
 	}
-	root := filepath.Dir(filepath.Clean(self))
-	lay := privateLayout{
-		Runtime: filepath.Clean(filepath.Join(root, "..", runtimeFileBase, runtimeFileBase+platformExeSuffix())),
-		Entry:   filepath.Clean(filepath.Join(root, entryDirName, bridgeEntryName)),
-	}
+	lay := privateLayout{Runtime: priv.Runtime, Entry: priv.Entry}
 	if err := lay.validate(); err != nil {
 		return privateLayout{}, err
 	}
@@ -87,34 +92,39 @@ func (l privateLayout) validate() error {
 }
 
 // requirePrivateRuntimeFile rejects an absent, unreadable, or non-regular
-// private runtime slot before any process is created.
+// private runtime slot before any process is created. Slot classification is
+// shared with the packaging tooling; the wording stays launcher-specific and
+// names the packaged location plus the operator remedy.
 func requirePrivateRuntimeFile(path, rel string) error {
-	info, err := os.Stat(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	err := packagelayout.CheckSlot(path, rel)
+	if err == nil {
+		return nil
+	}
+	var slot *packagelayout.SlotError
+	if !errors.As(err, &slot) {
+		return fmt.Errorf("lip-cursor-sdk-bridge: %w", err)
+	}
+	switch slot.Kind {
+	case packagelayout.SlotMissing:
 		return fmt.Errorf(
 			"lip-cursor-sdk-bridge: private runtime file %q not found (expected %s next to the installed plugin bridge; reinstall the Cursor plugin package)",
 			path, rel)
-	case err != nil:
+	case packagelayout.SlotUnusable:
 		return fmt.Errorf(
 			"lip-cursor-sdk-bridge: private runtime file %q is unusable (expected %s next to the installed plugin bridge): %w",
-			path, rel, err)
-	case info.IsDir():
+			path, rel, slot.Err)
+	case packagelayout.SlotDirectory:
 		return fmt.Errorf(
 			"lip-cursor-sdk-bridge: private runtime file %q is a directory (expected %s)",
 			path, rel)
-	case !info.Mode().IsRegular():
+	default:
 		return fmt.Errorf(
 			"lip-cursor-sdk-bridge: private runtime file %q is not a regular file (expected %s)",
 			path, rel)
 	}
-	return nil
 }
 
 // platformExeSuffix is the executable suffix of the current platform.
 func platformExeSuffix() string {
-	if runtime.GOOS == "windows" {
-		return ".exe"
-	}
-	return ""
+	return strings.TrimSpace(packagelayout.ExeSuffixFor(runtime.GOOS))
 }
