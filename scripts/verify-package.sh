@@ -27,6 +27,12 @@
 #                             [--report FILE] [--expect-platform os/arch]
 set -euo pipefail
 
+# usage prints the leading comment block of this script, so the help text cannot drift
+# out of the file by an edit to the header.
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$1"
+}
+
 repo_root=""
 package_root=""
 report_path=""
@@ -38,7 +44,7 @@ while [ "$#" -gt 0 ]; do
     --repo-root) repo_root="${2:-}"; shift 2 ;;
     --report) report_path="${2:-}"; shift 2 ;;
     --expect-platform) expect_platform="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) usage "$0"; exit 0 ;;
     *) printf 'verify-package: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -91,6 +97,13 @@ probe() {
   "$@" 2>&1 || true
 }
 
+# probe_runs reports whether one packaged executable started and succeeded. A probe
+# that cannot run is a finding, never a skip: a runtime that was staged but does not
+# answer for its own version is not a working private runtime.
+probe_runs() {
+  "$@" >/dev/null 2>&1
+}
+
 host_os="$(GOWORK=off go env GOOS)"
 host_arch="$(GOWORK=off go env GOARCH)"
 host_platform="$host_os/$host_arch"
@@ -132,6 +145,32 @@ fi
 # platform does not expose them.
 dir_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || printf ''
+}
+
+# path_key reduces a reported path to the form a comparison can use: forward
+# slashes, no Windows extended-length prefix, and no trailing separator. A runtime
+# reports process.execPath in whatever spelling its platform prefers, so comparing it
+# to the staged path as written fails on a Windows tree for spelling reasons alone.
+path_key() {
+  printf '%s' "$1" | tr -d '\r' | tr '\\' '/' | sed -e 's|^//\?/||' -e 's|/*$||'
+}
+
+# same_path compares two paths the way the PowerShell verifier does. On a Windows
+# tree the filesystem is case-insensitive, so a difference in case is not a different
+# path; on POSIX it is.
+same_path() {
+  local left right system
+  left="$(path_key "$1")"
+  right="$(path_key "$2")"
+  [ -n "$right" ] || return 1
+  system="$(uname -s 2>/dev/null || printf '')"
+  case "$system" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+      [ "$(printf '%s' "$left" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$right" | tr 'A-Z' 'a-z')" ]
+      ;;
+    *) [ "$left" = "$right" ]
+      ;;
+  esac
 }
 
 line "install root: $package_root"
@@ -289,6 +328,7 @@ if [ -n "$record_json" ]; then
   fi
   line "sdk version (staged production tree): $sdk_version (pinned $pinned_version)"
   line "node engine required: $(json_string bridge_node_engine "$record_json")"
+  line "private runtime source: $(json_string private_runtime_source "$record_json")"
   tested_host="$(json_string tested_host_artifact_sha256 "$record_json")"
   line "tested host artifact sha256: ${tested_host:-(not certified in this archive)}"
 
@@ -297,11 +337,14 @@ if [ -n "$record_json" ]; then
   if [ -f "$private_runtime_path" ] && [ -f "$launcher_path" ]; then
     self_path="$(probe "$private_runtime_path" -p 'process.execPath')"
     resolved='no'
-    if [ "$self_path" = "$private_runtime_path" ]; then resolved='yes'; fi
+    if same_path "$self_path" "$private_runtime_path"; then resolved='yes'; fi
     line "private runtime: $private_runtime_path"
     line "private runtime resolves to itself: $resolved"
     [ "$resolved" = 'yes' ] ||
       finding "the staged private runtime resolved to '$self_path' instead of $private_runtime_path"
+    if ! probe_runs "$private_runtime_path" --version; then
+      finding "the staged private runtime did not run: $(probe "$private_runtime_path" --version)"
+    fi
     line "private runtime version: $(probe "$private_runtime_path" --version) (recorded $(json_string private_runtime_version "$record_json"))"
     components="$(probe "$private_runtime_path" -p 'JSON.stringify(process.versions)')"
     summary=""

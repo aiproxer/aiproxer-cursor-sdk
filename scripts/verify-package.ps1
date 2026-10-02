@@ -50,6 +50,16 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# The plugin module is standalone: every go invocation in this script has to run
+# with the workspace switched off, or it would answer for a developer's sibling
+# checkout instead of for this repository.
+$env:GOWORK = 'off'
+
+# The install-ownership decision lives in its own helper so it can be evaluated on a
+# platform that exposes no POSIX permission bits, and so one implementation of the
+# rule serves every host.
+. (Join-Path $PSScriptRoot 'lib/install-ownership.ps1')
+
 $script:Findings = [System.Collections.Generic.List[string]]::new()
 $script:Report = [System.Collections.Generic.List[string]]::new()
 
@@ -59,6 +69,14 @@ function Add-Finding([string]$Message) {
 
 function Add-Line([string]$Message) {
     $script:Report.Add($Message)
+}
+
+# UsageError reports a usage mistake and exits with the code the shell verifier uses,
+# so automation can treat the two scripts interchangeably. A thrown error would exit
+# with 1 and blur a usage mistake into a verification failure.
+function UsageError([string]$Message) {
+    [Console]::Error.WriteLine("verify-package: $Message")
+    exit 2
 }
 
 # Read-FileSHA256 digests one file.
@@ -124,9 +142,9 @@ function Test-SamePath([string]$Left, [string]$Right) {
 
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-if (-not $PackageRoot) { throw 'verify-package: -PackageRoot is required' }
+if (-not $PackageRoot) { UsageError '-PackageRoot is required' }
 if (-not (Test-Path -LiteralPath $PackageRoot -PathType Container)) {
-    throw "verify-package: $PackageRoot is not an install directory"
+    UsageError "$PackageRoot is not an install directory"
 }
 $PackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 
@@ -158,18 +176,14 @@ Add-Line "install root: $PackageRoot"
 # the checksum record exists to detect. Windows exposes this through the directory
 # ACL rather than through permission bits, and the host owns the plugin root's ACL,
 # so this script reports the requirement rather than guessing at it.
-$ownership = $null
-if ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+$ownership = Get-InstallOwnershipVerdict -Path $PackageRoot
+if (-not $ownership.Checkable) {
     Add-Line 'install ownership: not machine-checkable here (Windows ACL); install into a protected plugin root writable only by its owner'
+} elseif ($ownership.WritableBeyondOwner) {
+    Add-Finding "install root $PackageRoot is writable beyond its owner (mode $($ownership.Rendered)); reinstall into a protected plugin root so no local user can replace a checksummed companion"
+    Add-Line "install ownership: $($ownership.Rendered) (FAILED: writable beyond its owner)"
 } else {
-    $ownership = ([System.IO.File]::GetUnixFileMode($PackageRoot)).ToString()
-    $writableByOthers = $ownership -match '[2367]' -or $ownership -match '[2367]$'
-    if ($writableByOthers) {
-        Add-Finding "install root $PackageRoot is writable beyond its owner ($ownership); reinstall into a protected plugin root so no local user can replace a checksummed companion"
-        Add-Line "install ownership: $ownership (FAILED: writable beyond its owner)"
-    } else {
-        Add-Line "install ownership: $ownership (owner-only write required)"
-    }
+    Add-Line "install ownership: $($ownership.Rendered) (owner-only write required)"
 }
 
 # 1. Required archive entries. A missing entry is an explicit prerequisite failure
@@ -314,6 +328,7 @@ if ($script:Record) {
     }
     Add-Line "sdk version (staged production tree): $sdkVersion (pinned $pinnedVersion)"
     Add-Line "node engine required: $(Get-JsonField $record 'bridge_node_engine')"
+    Add-Line "private runtime source: $(Get-JsonField $record 'private_runtime_source')"
     Add-Line "tested host artifact sha256: $(if (Get-JsonField $record 'tested_host_artifact_sha256') { Get-JsonField $record 'tested_host_artifact_sha256' } else { '(not certified in this archive)' })"
 
     $privateRuntime = Join-Path $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)

@@ -139,6 +139,38 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		// Nothing in this task certified a host artifact, so the record says so
 		// instead of naming a host it never ran against.
 		require.Equal(t, "", record["tested_host_artifact_sha256"])
+
+		// The record may not read as a publication: release.yaml declares the tag a
+		// future release would carry, and there is no such tag.
+		require.Equal(t, "cursorsdk-v0.1.0", record["release_tag_declared"])
+		require.NotContains(t, record, "release_tag")
+
+		// The recorded runtime provenance has to name the source the packager
+		// actually used. Both scripts fall back to the node on PATH when they are
+		// given neither a distribution nor a runtime, and a gate run supplies
+		// neither, so an archive assembled here records a PATH fallback. Recording
+		// that as a copy of an official distribution would be a false statement
+		// about the artifact.
+		require.Equal(t, "nodejs-"+built.nodeSourceKind+":"+built.nodeSource, record["private_runtime_source"])
+		require.NotContains(t, record["private_runtime_source"], "official-distribution")
+	})
+
+	t.Run("third_party_notices_state_the_runtime_source_honestly", func(t *testing.T) {
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		notices := readFileText(t, filepath.Join(built.installRoot,
+			filepath.FromSlash(archive.LicensesDir()), "THIRD-PARTY-NOTICES.md"))
+		// The notice text is hard-wrapped, so the statements it makes are compared as
+		// one sequence of words.
+		words := strings.Join(strings.Fields(notices), " ")
+
+		// A runtime staged from the build machine's toolchain has to say so in the
+		// archive's own notices, not only in compatibility.json.
+		require.Contains(t, words, "source kind: "+built.nodeSourceKind)
+		if built.nodeSourceKind != "official-distribution" {
+			require.Contains(t, words, "not from an official Node distribution")
+			require.Contains(t, words, "-NodeDist")
+		}
 	})
 
 	t.Run("checksums_cover_every_file_including_plugin_private_ones", func(t *testing.T) {
@@ -171,6 +203,53 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.NotEmpty(t, filesUnderPrefix(t, listed, packagelayout.PrivatePrefix))
 	})
 
+	t.Run("checksum_record_is_ordered_ordinally_by_path", func(t *testing.T) {
+		// Both packagers have to write the record in the same order for the same
+		// tree, or a checksum record is not a reproducible artifact: the shell
+		// packager sorts with LC_ALL=C and the PowerShell one has to agree with it
+		// byte for byte. A culture-aware sort puts bin/ before LICENSES/ while an
+		// ordinal one puts LICENSES/ first, because 'b' < 'L' is false in code
+		// points and true in a case-insensitive collation.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+
+		paths := make([]string, 0, built.fileCount)
+		for _, line := range strings.Split(readFileText(t,
+			filepath.Join(built.installRoot, filepath.FromSlash(archive.ChecksumsPath()))), "\n") {
+			line = strings.TrimRight(line, "\r")
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			digest, rel, ok := strings.Cut(line, packagelayout.ChecksumSeparator)
+			require.True(t, ok, "malformed checksum line %q", line)
+			require.Len(t, digest, 64)
+			paths = append(paths, rel)
+		}
+		require.Len(t, paths, built.fileCount-1)
+		require.True(t, slices.IsSortedFunc(paths, strings.Compare),
+			"checksums.sha256 is not sorted by ordinal path comparison:\n%s", strings.Join(paths, "\n"))
+	})
+
+	t.Run("staged_private_runtime_is_startable_as_a_direct_process", func(t *testing.T) {
+		// The launcher starts the staged runtime by absolute path, without a shell.
+		// A runtime staged without its execute bit is an archive that cannot serve a
+		// request, so the packager has to grant the bit on the platform that has one.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		staged := filepath.Join(built.installRoot, filepath.FromSlash(archive.PrivateRuntimePath()))
+
+		info, err := os.Stat(staged)
+		require.NoError(t, err)
+		if runtime.GOOS != "windows" {
+			require.NotZero(t, info.Mode().Perm()&0o111,
+				"the staged private runtime is not executable: %v", info.Mode().Perm())
+		}
+
+		out, runErr := runPackagedExecutable(t, staged, "--version")
+		require.NoError(t, runErr, "the staged private runtime does not run: %s", out)
+		require.Equal(t, built.nodeVersion, strings.TrimSpace(out))
+	})
+
 	t.Run("verification_reports_files_checksums_and_runtime_metadata", func(t *testing.T) {
 		report, errCode := runVerifyScript(t, built.installRoot, nil, nil)
 		require.Equal(t, 0, errCode, "verify-package failed:\n%s", report)
@@ -200,25 +279,31 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 	})
 
 	t.Run("unprotected_install_root_is_rejected", func(t *testing.T) {
-		root := copyInstallRoot(t, built.installRoot)
-		report, errCode := runVerifyScript(t, root, nil, nil)
-		require.Equal(t, 0, errCode, "a protected install root failed verification:\n%s", report)
-		require.Contains(t, report, "install ownership:")
+		// Every verifier implementation this machine can run has to reach the same
+		// verdict: an install root any local user can write is not a protected root.
+		for _, impl := range verifierImplementations(t) {
+			t.Run(impl, func(t *testing.T) {
+				root := copyInstallRoot(t, built.installRoot)
+				report, errCode := runVerifyScriptImpl(t, impl, root, nil, nil)
+				require.Equal(t, 0, errCode, "a protected install root failed verification:\n%s", report)
+				require.Contains(t, report, "install ownership:")
 
-		if runtime.GOOS == "windows" {
-			// Windows exposes ownership through the directory ACL, which the host
-			// owns; the verifier states the requirement instead of guessing.
-			require.Contains(t, report, "not machine-checkable here (Windows ACL)")
-			return
+				if runtime.GOOS == "windows" {
+					// Windows exposes ownership through the directory ACL, which the host
+					// owns; the verifier states the requirement instead of guessing.
+					require.Contains(t, report, "not machine-checkable here (Windows ACL)")
+					return
+				}
+				// A group- or world-writable plugin root lets any local user replace a
+				// checksummed companion after verification.
+				require.NoError(t, os.Chmod(root, 0o777))
+				t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+				report, errCode = runVerifyScriptImpl(t, impl, root, nil, nil)
+				require.NotEqual(t, 0, errCode, "a world-writable plugin root passed the %s verifier:\n%s", impl, report)
+				require.Contains(t, report, "writable beyond its owner")
+				require.Contains(t, report, "protected plugin root")
+			})
 		}
-		// A group- or world-writable plugin root lets any local user replace a
-		// checksummed companion after verification.
-		require.NoError(t, os.Chmod(root, 0o777))
-		t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
-		report, errCode = runVerifyScript(t, root, nil, nil)
-		require.NotEqual(t, 0, errCode, "a world-writable plugin root passed verification")
-		require.Contains(t, report, "writable beyond its owner")
-		require.Contains(t, report, "protected plugin root")
 	})
 
 	t.Run("extracted_archive_installs_and_verifies", func(t *testing.T) {
@@ -358,6 +443,11 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 // layout report rather than carrying literals, otherwise a layout change could be
 // applied to the Go contract while a script kept staging the previous one. The
 // check is static so it holds for the platform it does not run on too.
+//
+// The staging directories count as layout rows as much as the file names do: a script
+// that reads private/bridge/bin/lip-cursor-sdk-bridge.js from the report and then
+// re-derives the source path by hand has restated the layout just as much as one that
+// spelled out the archive name.
 func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 	t.Parallel()
 
@@ -381,10 +471,26 @@ func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 			// including the private runtime, without forbidding the bare runtime
 			// file name, which is an ordinary word on POSIX.
 			packagelayout.PrivatePrefix,
+			// The rows a packager would have to spell out to find the bridge entry
+			// and the staged dependency tree in the source tree.
+			packagelayout.BridgeEntrySourceRel(),
+			packagelayout.ModulesDirName,
 		} {
 			require.NotContains(t, body, literal, "%s restates the archive layout", script)
 		}
 		require.Contains(t, body, "lip-cursor-sdk-packaging", "%s must read the layout contract", script)
+	}
+
+	// Both packagers have to read the entry and the dependency tree out of the report.
+	// The verifiers do not stage them and are not expected to.
+	for _, script := range []string{
+		filepath.Join("scripts", "package-plugin.sh"),
+		filepath.Join("scripts", "package-plugin.ps1"),
+	} {
+		body := readFileText(t, filepath.Join(repo, script))
+		for _, field := range []string{"bridge_entry", "bridge_modules", "bridge_package_dir"} {
+			require.Contains(t, body, field, "%s must derive its staging paths from the layout report", script)
+		}
 	}
 }
 
@@ -401,16 +507,17 @@ func packageGateRequested() bool {
 // packagedArchive is one natively assembled archive plus the report its packager
 // produced.
 type packagedArchive struct {
-	installRoot   string
-	archive       string
-	archiveSHA256 string
-	platform      string
-	pluginVersion string
-	buildID       string
-	nodeVersion   string
-	nodeSource    string
-	fileCount     int
-	outDir        string
+	installRoot    string
+	archive        string
+	archiveSHA256  string
+	platform       string
+	pluginVersion  string
+	buildID        string
+	nodeVersion    string
+	nodeSource     string
+	nodeSourceKind string
+	fileCount      int
+	outDir         string
 }
 
 var (
@@ -433,15 +540,16 @@ func builtPackage(tb testing.TB) *packagedArchive {
 		}
 		fields := parseReportFields(out)
 		result := &packagedArchive{
-			outDir:        outDir,
-			installRoot:   fields["install_root"],
-			archive:       fields["archive"],
-			archiveSHA256: fields["archive_sha256"],
-			platform:      fields["platform"],
-			pluginVersion: fields["plugin_version"],
-			buildID:       fields["build_id"],
-			nodeVersion:   fields["node_version"],
-			nodeSource:    fields["node_source"],
+			outDir:         outDir,
+			installRoot:    fields["install_root"],
+			archive:        fields["archive"],
+			archiveSHA256:  fields["archive_sha256"],
+			platform:       fields["platform"],
+			pluginVersion:  fields["plugin_version"],
+			buildID:        fields["build_id"],
+			nodeVersion:    fields["node_version"],
+			nodeSource:     fields["node_source"],
+			nodeSourceKind: fields["node_source_kind"],
 		}
 		count, err := strconv.Atoi(fields["file_count"])
 		if err != nil {
@@ -459,6 +567,10 @@ func builtPackage(tb testing.TB) *packagedArchive {
 	require.FileExists(tb, packageResult.archive)
 	require.Contains(tb, packageResult.installRoot, " ", "the install root must carry a space")
 	require.Equal(tb, runtime.GOOS+"/"+runtime.GOARCH, packageResult.platform)
+	// The packager has to say which of its three runtime sources it used, because the
+	// recorded provenance and the staged notices are both derived from that answer.
+	require.NotEmpty(tb, packageResult.nodeSourceKind)
+	require.NotEmpty(tb, packageResult.nodeSource)
 	return packageResult
 }
 
@@ -476,35 +588,79 @@ func runPackageScriptWithRoot(tb testing.TB, outDir string, extra []string) (str
 }
 
 // runVerifyScript verifies one install root with an overridden environment, which
-// is how the no-global-Node case runs.
+// is how the no-global-Node case runs, using this platform's own verifier.
 func runVerifyScript(tb testing.TB, installRoot string, env, extra []string) (string, int) {
 	tb.Helper()
 
-	return runPackagingScriptEnv(tb, "verify-package",
-		scriptArgs(map[string]string{"package-root": installRoot}, extra), env)
+	return runVerifyScriptImpl(tb, nativeScriptImpl(), installRoot, env, extra)
 }
 
-// scriptArgs renders options for the platform's packaging script. The canonical
+// runVerifyScriptImpl verifies one install root with one named implementation, so
+// the shell verifier and the PowerShell verifier are each exercised instead of only
+// the one this platform happens to use.
+func runVerifyScriptImpl(tb testing.TB, impl, installRoot string, env, extra []string) (string, int) {
+	tb.Helper()
+
+	return runPackagingScriptEnvImpl(tb, "verify-package", impl,
+		scriptArgsFor(impl, map[string]string{"package-root": installRoot}, extra), env)
+}
+
+// verifierImplementations lists the verify-package implementations this machine can
+// actually run, native first. Each implementation is a trust check in its own right,
+// so a verdict only counts as proven when every implementation that can run here
+// reaches it.
+//
+// The foreign implementation is only added on a POSIX host, where PowerShell can run
+// the same POSIX tree: a Windows host would have to hand the shell script a Windows
+// path, which is not a check of anything. The POSIX branch of the PowerShell
+// ownership check is therefore covered by the ubuntu packaging lane and, on every
+// platform, by the direct predicate test in TestPackageArchive_PowerShellOwnership.
+func verifierImplementations(tb testing.TB) []string {
+	tb.Helper()
+
+	out := []string{nativeScriptImpl()}
+	if runtime.GOOS == "windows" {
+		return out
+	}
+	if _, err := exec.LookPath("pwsh"); err == nil {
+		return append(out, "ps1")
+	}
+	return out
+}
+
+// nativeScriptImpl is the packaging-script implementation this platform uses.
+func nativeScriptImpl() string {
+	if runtime.GOOS == "windows" {
+		return "ps1"
+	}
+	return "sh"
+}
+
+// scriptArgs renders options for one implementation's packaging script. The canonical
 // spelling is the POSIX long option; the PowerShell script takes the same options
 // in its own parameter spelling, so the harness is what knows the difference.
 func scriptArgs(options map[string]string, extra []string) []string {
+	return scriptArgsFor(nativeScriptImpl(), options, extra)
+}
+
+func scriptArgsFor(impl string, options map[string]string, extra []string) []string {
 	args := make([]string, 0, 2*len(options)+len(extra))
 	for _, key := range slices.Sorted(maps.Keys(options)) {
-		args = append(args, scriptOption(key), options[key])
+		args = append(args, scriptOption(impl, key), options[key])
 	}
 	for i := 0; i < len(extra); i++ {
 		arg := extra[i]
 		if name, ok := strings.CutPrefix(arg, "--"); ok {
-			arg = scriptOption(name)
+			arg = scriptOption(impl, name)
 		}
 		args = append(args, arg)
 	}
 	return args
 }
 
-// scriptOption renders one canonical option name for this platform's script.
-func scriptOption(name string) string {
-	if runtime.GOOS != "windows" {
+// scriptOption renders one canonical option name for one implementation's script.
+func scriptOption(impl, name string) string {
+	if impl != "ps1" {
 		return "--" + name
 	}
 	spelled := map[string]string{
@@ -524,13 +680,13 @@ func scriptOption(name string) string {
 func runPackagingScript(tb testing.TB, name string, args []string) (string, int) {
 	tb.Helper()
 
-	return runPackagingScriptEnv(tb, name, args, nil)
+	return runPackagingScriptEnvImpl(tb, name, nativeScriptImpl(), args, nil)
 }
 
-func runPackagingScriptEnv(tb testing.TB, name string, args, env []string) (string, int) {
+func runPackagingScriptEnvImpl(tb testing.TB, name, impl string, args, env []string) (string, int) {
 	tb.Helper()
 
-	script, shell, shellArgs := packagingScriptArgs(tb, name)
+	script, shell, shellArgs := packagingScriptArgs(tb, name, impl)
 	argv := append(shellArgs, append([]string{script}, args...)...)
 	cmd := exec.Command(shell, argv...)
 	cmd.Dir = repoRoot(tb)
@@ -554,11 +710,11 @@ func runPackagingScriptEnv(tb testing.TB, name string, args, env []string) (stri
 // packagingScriptArgs picks the script and the interpreter that runs it. The
 // PowerShell script is the Windows implementation and the shell script is the
 // POSIX one; each platform validates its own.
-func packagingScriptArgs(tb testing.TB, name string) (script string, shell string, shellArgs []string) {
+func packagingScriptArgs(tb testing.TB, name, impl string) (script string, shell string, shellArgs []string) {
 	tb.Helper()
 
 	repo := repoRoot(tb)
-	if runtime.GOOS == "windows" {
+	if impl == "ps1" {
 		pwsh, err := exec.LookPath("pwsh")
 		require.NoError(tb, err)
 		return filepath.Join(repo, "scripts", name+".ps1"), pwsh, []string{"-NoProfile", "-NonInteractive", "-File"}
@@ -579,24 +735,25 @@ func runPackagedExecutable(tb testing.TB, exe string, args ...string) (string, e
 	return string(out), err
 }
 
-// nodeFreeEnvironment is the process environment in which no executable node is
-// reachable through PATH, which is what the private-runtime cases need: the
-// packaged runtime has to be the one that serves the request, and a verification
-// that quietly fell back to a developer Node would prove nothing.
+// nodeFreeEnvironment is the process environment in which no runnable node is
+// reachable through PATH, which is what the private-runtime cases need: the packaged
+// runtime has to be the one that serves the request, and a verification that quietly
+// fell back to a developer Node would prove nothing.
 //
-// On Windows the node directories are simply dropped, because the Go toolchain and
-// the PowerShell host live in their own node-free directories. On POSIX the system
-// directories hold both the POSIX tools the scripts need and the distribution's
-// node, so a directory named after the runtime is placed first on PATH instead:
-// PATH resolution stops there, and it holds no executable to run.
+// On Windows the node directories are dropped, because the Go toolchain and the
+// PowerShell host live in their own node-free directories. On POSIX the system
+// directories hold both the POSIX tools the scripts need and the distribution's node,
+// so they stay and a shim that fails on purpose shadows the runtime name: PATH
+// resolution stops at the first directory holding something runnable, so the shim has
+// to be the first such directory, not merely a directory named after the runtime.
 func nodeFreeEnvironment(tb testing.TB) []string {
 	tb.Helper()
 
-	poison := tb.TempDir()
-	names := []string{"node", "node.exe", "node.cmd", "node.ps1"}
-	for _, name := range names {
-		require.NoError(tb, os.Mkdir(filepath.Join(poison, name), 0o755))
-	}
+	poison := writeNodeShims(tb)
+	// Windows keeps the toolchain in node-free directories, so the node directories
+	// are dropped. On POSIX they are the system directories the scripts themselves
+	// need, so the failing shim does the work instead.
+	dropNodeDirs := runtime.GOOS == "windows"
 
 	var env []string
 	for _, entry := range os.Environ() {
@@ -611,60 +768,55 @@ func nodeFreeEnvironment(tb testing.TB) []string {
 			env = append(env, entry)
 			continue
 		}
-		// Windows keeps the toolchain in node-free directories, so the node
-		// directories are dropped. On POSIX the system directories hold both the
-		// POSIX tools the scripts need and the distribution's node, so they stay
-		// and the shadowing directory does the work.
-		dirs := []string{poison}
-		for _, dir := range filepath.SplitList(value) {
-			if runtime.GOOS == "windows" && hasNodeExecutable(filepath.Clean(dir)) {
-				continue
-			}
-			dirs = append(dirs, dir)
-		}
-		env = append(env, key+"="+strings.Join(dirs, string(filepath.ListSeparator)))
+		env = append(env, key+"="+scrubbedPath(value, poison, dropNodeDirs))
 	}
 
-	// The assertion the harness owes its readers: nothing executable named after a
-	// node runtime is reachable through this PATH.
-	for _, entry := range env {
-		if !strings.HasPrefix(strings.ToUpper(entry), "PATH=") {
+	// The assertion the harness owes its readers: the first runnable node on this
+	// PATH is the harness's own failing shim, or there is none at all.
+	for _, path := range pathValues(tb, env) {
+		reached := firstRunnableNodeDir(tb, path)
+		if reached == "" {
 			continue
 		}
-		seen := false
-		for _, dir := range filepath.SplitList(entry[len("PATH="):]) {
-			if !hasNodeName(filepath.Clean(dir)) {
-				continue
-			}
-			require.False(tb, hasNodeExecutable(filepath.Clean(dir)),
-				"%s is reachable on the scrubbed PATH as a node executable", dir)
-			seen = true
-			break
-		}
-		require.True(tb, seen, "the scrubbed PATH never shadows the runtime name")
+		require.Equal(tb, poison, reached,
+			"a working node is reachable on the scrubbed PATH:\n%s", path)
 	}
 	return append(env, "GOWORK=off")
 }
 
-// hasNodeName reports whether a directory holds any entry named after a node
-// runtime, executable or not.
-func hasNodeName(dir string) bool {
-	for _, name := range []string{"node", "node.exe", "node.cmd", "node.ps1", "node.bat"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return true
+// firstRunnableNodeDir resolves the runtime name through one PATH value the way a
+// process start does: the first directory holding a runnable node wins, and every
+// later directory is only reached when the earlier ones hold nothing runnable.
+func firstRunnableNodeDir(tb testing.TB, path string) string {
+	tb.Helper()
+
+	for _, dir := range filepath.SplitList(path) {
+		if hasNodeExecutable(filepath.Clean(dir)) {
+			return filepath.Clean(dir)
 		}
 	}
-	return false
+	return ""
 }
+
+// nodeRuntimeNames are the spellings a process start may pick up as the runtime,
+// ordered the way Windows resolves them within one directory.
+var nodeRuntimeNames = []string{"node", "node.exe", "node.cmd", "node.ps1", "node.bat"}
 
 // hasNodeExecutable reports whether a directory holds a runnable node or node shim.
 func hasNodeExecutable(dir string) bool {
-	for _, name := range []string{"node", "node.exe", "node.cmd", "node.ps1", "node.bat"} {
-		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && !info.IsDir() {
-			return true
+	_, ok := runnableNode(dir)
+	return ok
+}
+
+// runnableNode returns the runtime a process start would pick up in one directory.
+func runnableNode(dir string) (string, bool) {
+	for _, name := range nodeRuntimeNames {
+		candidate := filepath.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // copyInstallRoot installs one assembled archive into a fresh install root whose

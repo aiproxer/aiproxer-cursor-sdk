@@ -66,9 +66,9 @@ LICENSES/
 
 That layout lives in exactly one place, [`internal/packagelayout`](internal/packagelayout), which the
 packaging scripts read through `cmd/lip-cursor-sdk-packaging` and the private launcher consumes directly.
-Neither script restates an archive name; `TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout` fails
-if one does. That is why the launcher resolves the same files the archive stages instead of keeping a
-second copy of the layout.
+Neither script restates a layout name - not an archive file name and not a staging directory - and
+`TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout` fails if one does. That is why the launcher
+resolves the same files the archive stages instead of keeping a second copy of the layout.
 
 What the packager stages, and only this:
 
@@ -85,7 +85,11 @@ What the packager stages, and only this:
 - **The private Node runtime**, taken from an official Node distribution when one is supplied
   (`--node-dist <zip|tar.gz|dir>`, digest-checked against `nodejs.org/dist/<version>/SHASUMS256.txt` by
   the release operator), otherwise from `--node-runtime`/`LIP_PACKAGE_NODE_RUNTIME`, otherwise from the
-  `node` on `PATH` at build time. Its provenance label is recorded in `compatibility.json`.
+  `node` on `PATH` at build time. `compatibility.json` records which of the three it was, in
+  `private_runtime_source`: `nodejs-official-distribution:<artifact>` only for a distribution, and
+  `nodejs-supplied-runtime:<file>` or `nodejs-path-fallback:<file>` otherwise. An archive whose runtime
+  came from a `PATH` fallback says so in its own `LICENSES/THIRD-PARTY-NOTICES.md` too, because no
+  distribution digest backs that runtime; re-stage it with `--node-dist` before publishing.
 - **License and provenance notices** under `LICENSES/`: the Node distribution `LICENSE` (which contains
   the Node grant together with the notices for the components Node bundles), this repository's `LICENSE`,
   and a generated `THIRD-PARTY-NOTICES.md` recording the staged production dependency inventory, the
@@ -110,16 +114,23 @@ was assembled on, so an artifact cannot advertise support that was never tested,
 | Platform | State |
 | --- | --- |
 | `windows/amd64` | Natively assembled and verified on Windows/amd64. |
-| `linux/amd64` | Natively assembled and verified on Linux/amd64 (WSL2 on the same machine). |
+| `linux/amd64` | Natively assembled and verified on Linux/amd64. |
 | `windows/arm64`, `linux/arm64` | Declared in `manifest/template.backendplugin.json`, not assembled, not verified, no artifact. |
 | `darwin/*` | Not a declared plugin platform. |
+
+Both assembled platforms have enforced evidence rather than a maintainer's word: the `package` lane in
+[`.github/workflows/verify.yml`](.github/workflows/verify.yml) is a matrix over `windows-latest` and
+`ubuntu-latest`, and each leg assembles, verifies, and runs the private runtime on its own runner. A
+platform claim is a fact about a native run, so a new platform needs a new native runner.
 
 Each natively validated platform's evidence is `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`,
 which covers checksum coverage of private files, a tampered private file, a missing companion, a missing
 private runtime (in the verifier and in the launcher, which exits 78), unlisted and missing files, a
-platform overclaim, install roots containing spaces, extracted-archive round trips, and verification with
-no `node` reachable on `PATH`. The public Linux/Windows claims in the manifest survive only for the
-platforms in the table above.
+platform overclaim, install roots containing spaces, extracted-archive round trips, deterministic
+checksum-record ordering, the staged runtime starting as a direct process, and verification with no
+`node` reachable on `PATH`. On a POSIX runner that lane also drives the PowerShell verifier over the same
+tree, so both verifier implementations reach the same verdicts. The public Linux/Windows claims in the
+manifest survive only for the platforms in the table above.
 
 ### Licensing status
 
@@ -269,7 +280,8 @@ Both lanes run in CI. SDK and JavaScript dependency maintenance, including the p
 version and the `undici` security override, belongs here and never to the Go-LIP host.
 
 A third lane validates the archive natively on its runner - the same gate as
-`TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`:
+`TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`, run on both `windows-latest` and
+`ubuntu-latest` in CI:
 
 ```sh
 LIP_PACKAGE_GATE=1 GOWORK=off go test -run TestPackageArchive .

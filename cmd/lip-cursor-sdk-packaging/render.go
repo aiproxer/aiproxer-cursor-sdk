@@ -59,11 +59,14 @@ type releaseMeta struct {
 
 // compatibility is the flat plugin release metadata written into the archive.
 type compatibility struct {
-	Schema                  string `json:"schema"`
-	PluginID                string `json:"plugin_id"`
-	PluginVersion           string `json:"plugin_version"`
-	BuildID                 string `json:"build_id"`
-	ReleaseTag              string `json:"release_tag"`
+	Schema        string `json:"schema"`
+	PluginID      string `json:"plugin_id"`
+	PluginVersion string `json:"plugin_version"`
+	BuildID       string `json:"build_id"`
+	// ReleaseTagDeclared is the tag release.yaml declares for a future publication.
+	// No such tag exists: the field is named for the declaration so that nothing in an
+	// archive can be read as a claim that a release was published.
+	ReleaseTagDeclared      string `json:"release_tag_declared"`
 	Module                  string `json:"module"`
 	PublishedRootModule     string `json:"published_root_module"`
 	Platform                string `json:"platform"`
@@ -87,8 +90,8 @@ type compatibility struct {
 	PrivateRuntimeSource   string `json:"private_runtime_source"`
 	PrivateRuntimeSHA256   string `json:"private_runtime_sha256"`
 	// TestedHostArtifactSHA256 stays empty until a release is certified against a
-	// versioned host artifact. An unverified claim is recorded as absent rather
-	// than invented.
+	// versioned host artifact. An unverified claim is recorded as absent rather than
+	// invented.
 	TestedHostArtifactSHA256 string `json:"tested_host_artifact_sha256"`
 	// PackageVerification records how the archive was verified. The verification
 	// report itself is produced by scripts/verify-package and attached to release
@@ -109,6 +112,9 @@ func runRender(args []string) error {
 	platform := fs.String("platform", "", "os/arch of the staged archive (defaults to the host platform)")
 	exeSHA := fs.String("exe-sha256", "", "sha256 of the outer executable, lowercase hex")
 	nodeSource := fs.String("node-source", "", "provenance label of the private Node runtime source")
+	nodeSourceKind := fs.String("node-source-kind", "",
+		"where the private Node runtime came from: "+
+			strings.Join(slices.Sorted(maps.Keys(runtimeSourcePrefixes)), ", "))
 	if err := fs.Parse(args); err != nil {
 		return reportError("render", err)
 	}
@@ -120,7 +126,7 @@ func runRender(args []string) error {
 	if err != nil {
 		return reportError("render", err)
 	}
-	return reportError("render", renderStaged(*repo, *staging, *exeSHA, *nodeSource, archive))
+	return reportError("render", renderStaged(*repo, *staging, *exeSHA, *nodeSourceKind, *nodeSource, archive))
 }
 
 // hostOr returns the requested platform or the host platform when none was given.
@@ -137,7 +143,7 @@ func hostOr(platform string) (goos, goarch string) {
 func hostPlatform() (goos, goarch string) { return runtime.GOOS, runtime.GOARCH }
 
 // renderStaged writes both metadata files into the staged install root.
-func renderStaged(repo, staging, exeSHA, nodeSource string, archive packagelayout.Archive) error {
+func renderStaged(repo, staging, exeSHA, nodeSourceKind, nodeSource string, archive packagelayout.Archive) error {
 	meta, err := loadRelease(filepath.Join(repo, "release.yaml"))
 	if err != nil {
 		return err
@@ -165,7 +171,7 @@ func renderStaged(repo, staging, exeSHA, nodeSource string, archive packagelayou
 	if err != nil {
 		return fmt.Errorf("manifest template %s: %w", templatePath, err)
 	}
-	comp, err := renderCompatibility(staging, meta, archive, digest, nodeSource, manifest)
+	comp, err := renderCompatibility(staging, meta, archive, digest, nodeSourceKind, nodeSource, manifest)
 	if err != nil {
 		return err
 	}
@@ -316,10 +322,39 @@ func checkProtocolRange(manifest map[string]any) error {
 	return nil
 }
 
+// runtimeSourcePrefixes maps the runtime source kind the packaging script resolved to
+// the provenance prefix the release metadata records.
+//
+// The packager has three sources, and only one of them is an official distribution: it
+// can stage a distribution archive or directory, a runtime the caller supplied, or
+// the node on the build machine's PATH. Recording all three under the distribution
+// prefix would state, about a copy of somebody's working installation, that it is a
+// copy of an official distribution, so each source kind names itself.
+var runtimeSourcePrefixes = map[string]string{
+	"official-distribution": "nodejs-official-distribution",
+	"supplied-runtime":      "nodejs-supplied-runtime",
+	"path-fallback":         "nodejs-path-fallback",
+}
+
+// runtimeSource records where the staged private runtime actually came from. An
+// unknown kind is a packaging failure rather than a default prefix: guessing here
+// would put a false provenance statement inside a release artifact.
+func runtimeSource(kind, label string) (string, error) {
+	prefix, ok := runtimeSourcePrefixes[strings.TrimSpace(kind)]
+	if !ok {
+		return "", fmt.Errorf("-node-source-kind %q is not one of %s; the recorded provenance has to say where the runtime came from",
+			kind, strings.Join(slices.Sorted(maps.Keys(runtimeSourcePrefixes)), ", "))
+	}
+	if strings.TrimSpace(label) == "" {
+		return "", errors.New("-node-source is required: the private runtime provenance must be recorded")
+	}
+	return prefix + ":" + strings.TrimSpace(label), nil
+}
+
 // renderCompatibility derives the release metadata from the staged tree, so the
 // recorded SDK and private runtime versions are the ones the archive actually
 // carries.
-func renderCompatibility(staging string, meta releaseMeta, archive packagelayout.Archive, digest, nodeSource string, manifest map[string]any) (*compatibility, error) {
+func renderCompatibility(staging string, meta releaseMeta, archive packagelayout.Archive, digest, nodeSourceKind, nodeSource string, manifest map[string]any) (*compatibility, error) {
 	outer := filepath.Join(staging, filepath.FromSlash(archive.OuterExecutablePath()))
 	if err := packagelayout.CheckSlot(outer, archive.OuterExecutablePath()); err != nil {
 		return nil, prerequisite(err)
@@ -372,8 +407,9 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(nodeSource) == "" {
-		return nil, errors.New("-node-source is required: the private runtime provenance must be recorded")
+	provenance, err := runtimeSource(nodeSourceKind, nodeSource)
+	if err != nil {
+		return nil, err
 	}
 
 	manifestSHA, err := manifestSHA256(manifest)
@@ -385,7 +421,7 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 		PluginID:                 meta.PluginID,
 		PluginVersion:            meta.Version,
 		BuildID:                  meta.BuildID,
-		ReleaseTag:               orBuildID(meta.Tag, meta.BuildID),
+		ReleaseTagDeclared:       meta.Tag,
 		Module:                   meta.Module,
 		PublishedRootModule:      meta.PublishedRootModule,
 		Platform:                 archive.Platform(),
@@ -404,7 +440,7 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 		BridgeVersion:            stringField(bridge, "version"),
 		BridgeNodeEngine:         engineConstraint(bridge),
 		PrivateRuntimeVersion:    version,
-		PrivateRuntimeSource:     "nodejs-official-distribution:" + nodeSource,
+		PrivateRuntimeSource:     provenance,
 		PrivateRuntimeSHA256:     runtimeSHA,
 		TestedHostArtifactSHA256: "",
 		PackageVerification:      "scripts/verify-package",
@@ -600,12 +636,4 @@ func orUnknown(value string) string {
 		return "(none)"
 	}
 	return value
-}
-
-// orBuildID falls back to the build id when no release tag is declared.
-func orBuildID(tag, buildID string) string {
-	if strings.TrimSpace(tag) == "" {
-		return buildID
-	}
-	return tag
 }

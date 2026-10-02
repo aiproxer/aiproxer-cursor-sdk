@@ -27,6 +27,12 @@
 #                             [--platform os/arch]
 set -euo pipefail
 
+# usage prints the leading comment block of this script, so the help text cannot drift
+# out of the file by an edit to the header.
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$1"
+}
+
 repo_root=""
 out_dir=""
 node_dist=""
@@ -40,7 +46,7 @@ while [ "$#" -gt 0 ]; do
     --node-dist) node_dist="${2:-}"; shift 2 ;;
     --node-runtime) node_runtime="${2:-}"; shift 2 ;;
     --platform) platform="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) usage "$0"; exit 0 ;;
     *) printf 'package-plugin: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -167,7 +173,7 @@ find_node_license() {
 # what is unresolved. It states the licenses the components declare and it does not
 # assert a redistribution right nobody has confirmed.
 write_third_party_notices() {
-  local path="$1" modules="$2" runtime="$3" node_version="$4" node_source="$5" platform_tag="$6"
+  local path="$1" modules="$2" runtime="$3" node_version="$4" node_kind="$5" node_label="$6" platform_tag="$7"
   local manifest pkg_name pkg_version pkg_license rel
 
   {
@@ -176,8 +182,14 @@ write_third_party_notices() {
     printf 'license grant: the licenses below are the ones the redistributed components\n'
     printf 'declare, and no redistribution right is asserted here.\n\n'
     printf 'Platform: %s\n' "$platform_tag"
-    printf 'Private Node runtime: %s (source: %s)\n\n' "$node_version" "$node_source"
+    printf 'Private Node runtime: %s (source kind: %s, source: %s)\n\n' "$node_version" "$node_kind" "$node_label"
     printf '## Private Node runtime\n\n'
+    if [ "$node_kind" != 'official-distribution' ]; then
+      printf -- '- This runtime was staged from the build machine'"'"'s toolchain, not from an\n'
+      printf '  official Node distribution, and no distribution digest backs it. Re-stage\n'
+      printf '  with --node-dist <official archive> before publishing so the provenance of the\n'
+      printf '  shipped runtime can be checked against the release SHASUMS256.txt.\n'
+    fi
     printf -- '- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds\n'
     printf '  the Node.js license grant together with the notices for the components Node\n'
     printf '  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.\n'
@@ -298,11 +310,16 @@ mkdir -p "$(dirname -- "$staging/$bridge_entry")"
 cp "$bridge_source/$entry_name" "$staging/$bridge_entry"
 
 # 4. Private Node runtime plus the notices that have to travel with it.
+#    The source kind is recorded next to the label because the three sources are not
+#    the same claim: only an official distribution is a copy of a distribution, and a
+#    runtime staged from the build machine's PATH says so in the archive.
 mkdir -p "$staging/$licenses_dir"
 runtime_source=""
 runtime_label=""
+runtime_kind=""
 if [ -n "$node_dist" ]; then
   [ -e "$node_dist" ] || fail "-NodeDist $node_dist does not exist"
+  runtime_kind="official-distribution"
   runtime_label="$(basename -- "$node_dist")"
   if [ -d "$node_dist" ]; then
     dist_root="$(node_dist_root "$node_dist" "$runtime_file_name")"
@@ -321,18 +338,21 @@ if [ -n "$node_dist" ]; then
 elif [ -n "$node_runtime" ]; then
   runtime_source="$node_runtime"
   [ -e "$runtime_source" ] || fail "private Node runtime $runtime_source does not exist"
-  runtime_label="path:$(basename -- "$runtime_source")"
+  runtime_kind="supplied-runtime"
+  runtime_label="$(basename -- "$runtime_source")"
   runtime_license="$(find_node_license "$(cd -- "$(dirname -- "$runtime_source")" && pwd)/$(basename -- "$runtime_source")")"
 elif [ -n "${LIP_PACKAGE_NODE_RUNTIME:-}" ]; then
   runtime_source="$LIP_PACKAGE_NODE_RUNTIME"
   [ -e "$runtime_source" ] || fail "private Node runtime $runtime_source does not exist"
-  runtime_label="path:$(basename -- "$runtime_source")"
+  runtime_kind="supplied-runtime"
+  runtime_label="$(basename -- "$runtime_source")"
   runtime_license="$(find_node_license "$runtime_source")"
 else
   command -v node >/dev/null 2>&1 ||
     fail 'no private Node runtime source: pass --node-dist <distribution>, --node-runtime <executable>, or set LIP_PACKAGE_NODE_RUNTIME'
   runtime_source="$(command -v node)"
-  runtime_label="path:$(basename -- "$runtime_source")"
+  runtime_kind="path-fallback"
+  runtime_label="$(basename -- "$runtime_source")"
   runtime_license="$(find_node_license "$runtime_source")"
 fi
 
@@ -349,10 +369,11 @@ node_version="$("$private_runtime_path" --version)"
 exe_digest="$(sha256_of "$outer_exe")"
 GOWORK=off go run ./cmd/lip-cursor-sdk-packaging render \
   -repo "$repo_root" -staging "$staging" -platform "$layout_platform" \
-  -exe-sha256 "$exe_digest" -node-source "$runtime_label" >/dev/null
+  -exe-sha256 "$exe_digest" -node-source-kind "$runtime_kind" -node-source "$runtime_label" >/dev/null
 
 write_third_party_notices "$staging/$licenses_dir/THIRD-PARTY-NOTICES.md" \
-  "$staging/$bridge_modules" "$private_runtime_path" "$node_version" "$runtime_label" "$layout_platform"
+  "$staging/$bridge_modules" "$private_runtime_path" "$node_version" "$runtime_kind" \
+  "$runtime_label" "$layout_platform"
 
 # 6. Checksums over every archive file, plugin-private files included. The record
 #    cannot cover itself, so it is written last.
@@ -386,5 +407,6 @@ printf 'install_root: %s\n' "$install_root"
 printf 'archive: %s\n' "$archive"
 printf 'archive_sha256: %s\n' "$archive_digest"
 printf 'node_version: %s\n' "$node_version"
+printf 'node_source_kind: %s\n' "$runtime_kind"
 printf 'node_source: %s\n' "$runtime_label"
 printf 'file_count: %s\n' "$file_count"

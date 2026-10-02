@@ -51,6 +51,30 @@ func TestArchive_MatchesDesignLayoutBlock(t *testing.T) {
 	}
 }
 
+// TestArchive_ExposesThePathsAPackagerMustStage pins the layout rows a packaging
+// script cannot restate. The scripts have to copy the bridge entry out of the source
+// tree and enumerate the staged dependency tree, and both paths exist here for exactly
+// that reason: a script that spelled them out would be a second copy of the layout.
+func TestArchive_ExposesThePathsAPackagerMustStage(t *testing.T) {
+	t.Parallel()
+
+	a, err := packagelayout.ForPlatform("linux", "amd64")
+	require.NoError(t, err)
+
+	require.Equal(t, "bin/lip-cursor-sdk-bridge.js", packagelayout.BridgeEntrySourceRel())
+	require.Equal(t, a.BridgePackageDirPath()+"/"+packagelayout.BridgeEntrySourceRel(), a.BridgeEntryPath())
+	require.Equal(t, "node_modules", packagelayout.ModulesDirName)
+	require.Equal(t, a.BridgePackageDirPath()+"/"+packagelayout.ModulesDirName, a.BridgeModulesPath())
+
+	// The source-relative rows the packager derives have to stay inside the bridge
+	// package directory: a script joins them onto the source tree, and a row that
+	// escaped it would stage from somewhere the layout does not describe.
+	for _, rel := range []string{packagelayout.BridgeEntrySourceRel(), packagelayout.ModulesDirName} {
+		require.False(t, strings.HasPrefix(rel, "/"), "%s is not relative", rel)
+		require.False(t, strings.Contains(rel, ".."), "%s escapes the bridge package directory", rel)
+	}
+}
+
 // TestArchive_RequiredEntries_AreInstallRootRelativeCleanSlashPaths keeps the
 // contract usable by both packaging scripts: every archive-relative path is
 // slash-separated, clean, relative to the install root, and free of any

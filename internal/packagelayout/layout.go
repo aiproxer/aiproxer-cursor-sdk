@@ -54,12 +54,16 @@ const (
 	// for the outer process only.
 	PrivatePrefix = "private/"
 
+	// ModulesDirName is the staged production npm dependency directory. It is named
+	// here rather than in a packaging script so that a script which has to know it
+	// reads it from this contract instead of restating it.
+	ModulesDirName = "node_modules"
+
 	binDirName            = "bin"
 	privateDirName        = "private"
 	bridgeDirName         = "bridge"
 	runtimeDirName        = "node"
 	bridgeDistDirName     = "dist"
-	bridgeModulesDirName  = "node_modules"
 	bridgePackageJSONName = "package.json"
 )
 
@@ -78,7 +82,13 @@ const ChecksumSeparator = "  "
 
 // entryRelPath is the archive location of the bridge entry, independent of any
 // platform.
-var entryRelPath = PrivatePrefix + bridgeDirName + "/" + binDirName + "/" + BridgeEntryName
+var entryRelPath = PrivatePrefix + bridgeDirName + "/" + BridgeEntrySourceRel()
+
+// BridgeEntrySourceRel is the bridge entry relative to the bridge package directory.
+// The bridge source tree stages the same relative path under bridge-node/, which is
+// why the packager derives the file it copies from this and never names the entry
+// directory itself.
+func BridgeEntrySourceRel() string { return binDirName + "/" + BridgeEntryName }
 
 // supportedPlatforms is the set of platforms the manifest template declares.
 // A platform is only packageable because it is declared here; the packaging
@@ -167,7 +177,7 @@ func (a Archive) BridgeDistPath() string { return a.BridgePackageDirPath() + "/"
 
 // BridgeModulesPath is the staged production npm dependency tree.
 func (a Archive) BridgeModulesPath() string {
-	return a.BridgePackageDirPath() + "/" + bridgeModulesDirName
+	return a.BridgePackageDirPath() + "/" + ModulesDirName
 }
 
 // BridgePackageJSONPath is the bridge package manifest the entrypoint reads to

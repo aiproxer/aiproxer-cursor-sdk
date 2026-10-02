@@ -55,6 +55,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# The plugin module is standalone: every go invocation in this script has to run with
+# the workspace switched off, or it would answer for a developer's sibling checkout
+# instead of for this repository. It is set before the first one, because a build id,
+# a layout report, or a rendered manifest produced inside a workspace is not this
+# repository's.
+$env:GOWORK = 'off'
+
 # Fail aborts packaging with a diagnosable message.
 function Fail([string]$Message) {
     throw "package-plugin: $Message"
@@ -142,6 +149,18 @@ function Get-LayoutReport([string]$Repo, [string]$RequestPlatform) {
     }
 }
 
+# Get-BridgeRelativePath reduces one bridge layout path to the path relative to the
+# bridge package directory. The staged source tree uses the same relative paths, so
+# deriving them here keeps the entry directory, the build output directory, and the
+# modules directory named by the layout contract alone.
+function Get-BridgeRelativePath($Layout, [string]$Rel) {
+    $prefix = "$($Layout.bridge_package_dir)/"
+    if (-not $Rel.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+        Fail "layout path $Rel is not inside $($Layout.bridge_package_dir)"
+    }
+    return $Rel.Substring($prefix.Length)
+}
+
 # Resolve-NodeDistRoot accepts an extracted Node distribution either directly or
 # under the single top-level directory an official archive unpacks into. The
 # Windows distribution keeps its runtime at the root, the POSIX one in bin/.
@@ -182,9 +201,11 @@ function Find-NodeLicense([string]$Executable) {
 }
 
 # Resolve-PrivateRuntimeSource decides which Node runtime to stage and returns its
-# executable, the license text that ships with it, a provenance label, and any
-# temporary directory the caller has to remove. The provenance label is recorded
-# in the release metadata, so an archive always says where its runtime came from.
+# executable, the license text that ships with it, a provenance label, the kind of
+# source it came from, and any temporary directory the caller has to remove. The kind
+# is recorded in the release metadata because the three sources are not the same claim:
+# only an official distribution is a copy of a distribution, and a runtime staged from
+# the build machine's PATH has to say so inside the archive.
 function Resolve-PrivateRuntimeSource([string]$Dist, [string]$Runtime, [string]$RuntimeFileName) {
     if ($Dist) {
         if (-not (Test-Path -LiteralPath $Dist)) { Fail "-NodeDist $Dist does not exist" }
@@ -195,6 +216,7 @@ function Resolve-PrivateRuntimeSource([string]$Dist, [string]$Runtime, [string]$
                 Executable = Resolve-NodeDistRuntime -Root $root -RuntimeFileName $RuntimeFileName
                 License    = Find-NodeLicense (Resolve-NodeDistRuntime -Root $root -RuntimeFileName $RuntimeFileName)
                 Label      = $label
+                Kind       = 'official-distribution'
                 TempDir    = ''
             }
         }
@@ -217,11 +239,13 @@ function Resolve-PrivateRuntimeSource([string]$Dist, [string]$Runtime, [string]$
             Executable = Resolve-NodeDistRuntime -Root $root -RuntimeFileName $RuntimeFileName
             License    = Find-NodeLicense (Resolve-NodeDistRuntime -Root $root -RuntimeFileName $RuntimeFileName)
             Label      = $label
+            Kind       = 'official-distribution'
             TempDir    = $scratch
         }
     }
 
     $candidate = $Runtime
+    $kind = 'supplied-runtime'
     if (-not $candidate) { $candidate = $env:LIP_PACKAGE_NODE_RUNTIME }
     if (-not $candidate) {
         $onPath = Get-Command -Name 'node' -CommandType Application -ErrorAction SilentlyContinue |
@@ -230,13 +254,15 @@ function Resolve-PrivateRuntimeSource([string]$Dist, [string]$Runtime, [string]$
             Fail 'no private Node runtime source: pass -NodeDist <distribution>, -NodeRuntime <executable>, or set LIP_PACKAGE_NODE_RUNTIME'
         }
         $candidate = $onPath.Source
+        $kind = 'path-fallback'
     }
     if (-not (Test-Path -LiteralPath $candidate)) { Fail "private Node runtime $candidate does not exist" }
     $resolved = (Resolve-Path -LiteralPath $candidate).Path
     return [pscustomobject]@{
         Executable = $resolved
         License    = Find-NodeLicense $resolved
-        Label      = 'path:' + (Split-Path -Leaf $resolved)
+        Label      = Split-Path -Leaf $resolved
+        Kind       = $kind
         TempDir    = ''
     }
 }
@@ -250,6 +276,7 @@ function Write-ThirdPartyNotices {
         [string]$ModulesDir,
         [string]$PrivateRuntime,
         [string]$NodeVersion,
+        [string]$NodeSourceKind,
         [string]$NodeSource,
         [string]$Platform
     )
@@ -262,10 +289,16 @@ function Write-ThirdPartyNotices {
     $lines.Add('declare, and no redistribution right is asserted here.')
     $lines.Add('')
     $lines.Add("Platform: $Platform")
-    $lines.Add("Private Node runtime: $NodeVersion (source: $NodeSource)")
+    $lines.Add("Private Node runtime: $NodeVersion (source kind: $NodeSourceKind, source: $NodeSource)")
     $lines.Add('')
     $lines.Add('## Private Node runtime')
     $lines.Add('')
+    if ($NodeSourceKind -ne 'official-distribution') {
+        $lines.Add("- This runtime was staged from the build machine's toolchain, not from an official")
+        $lines.Add('  Node distribution, and no distribution digest backs it. Re-stage with')
+        $lines.Add('  -NodeDist <official archive> before publishing so the provenance of the shipped')
+        $lines.Add('  runtime can be checked against the release SHASUMS256.txt.')
+    }
     $lines.Add('- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds')
     $lines.Add('  the Node.js license grant together with the notices for the components Node')
     $lines.Add('  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.')
@@ -366,7 +399,6 @@ try {
     $launcher = Join-Path $staging ($layout.launcher -replace '/', $sep)
     New-Item -ItemType Directory -Path (Split-Path -Parent $outerExe) -Force | Out-Null
     New-Item -ItemType Directory -Path (Split-Path -Parent $launcher) -Force | Out-Null
-    $env:GOWORK = 'off'
     $env:CGO_ENABLED = '0'
     $outerCommand = Get-ReleaseScalar $releaseFile 'command'
     if (-not $outerCommand) { Fail 'release.yaml has no command' }
@@ -390,13 +422,14 @@ try {
 
     $bridgeDist = Join-Path $staging ($layout.bridge_dist -replace '/', $sep)
     New-Item -ItemType Directory -Path $bridgeDist -Force | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $bridgeSource 'dist') |
+    $bridgeDistSource = Join-Path $bridgeSource ((Get-BridgeRelativePath $layout $layout.bridge_dist) -replace '/', $sep)
+    Get-ChildItem -LiteralPath $bridgeDistSource |
         Copy-Item -Destination $bridgeDist -Recurse -Force
     $bridgeEntry = Join-Path $staging ($layout.bridge_entry -replace '/', $sep)
-    $entryName = [string]$layout.bridge_entry
-    $entryName = $entryName.Substring($entryName.LastIndexOf('/') + 1)
     New-Item -ItemType Directory -Path (Split-Path -Parent $bridgeEntry) -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path (Join-Path $bridgeSource 'bin') $entryName) -Destination $bridgeEntry -Force
+    $bridgeEntrySource = Join-Path $bridgeSource ((Get-BridgeRelativePath $layout $layout.bridge_entry) -replace '/', $sep)
+    Copy-Item -LiteralPath $bridgeEntrySource -Destination $bridgeEntry -Force
+    $bridgeModulesDir = Join-Path $bridgeDir ((Get-BridgeRelativePath $layout $layout.bridge_modules) -replace '/', $sep)
 
     # 4. Private Node runtime plus the notices that have to travel with it.
     $licensesDir = Join-Path $staging $layout.licenses_dir
@@ -406,6 +439,17 @@ try {
     $privateRuntime = Join-Path $staging ($layout.private_runtime -replace '/', $sep)
     New-Item -ItemType Directory -Path (Split-Path -Parent $privateRuntime) -Force | Out-Null
     Copy-Item -LiteralPath $runtimeSource.Executable -Destination $privateRuntime -Force
+    # The launcher starts the staged runtime as a direct process, without a shell, so
+    # the execute bit is what makes the archive serve a request at all. Windows has no
+    # permission bit to grant and needs none; the same script runs under PowerShell on
+    # POSIX, where it does.
+    if (-not $IsWindows) {
+        [System.IO.File]::SetUnixFileMode($privateRuntime,
+            [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite -bor
+            [System.IO.UnixFileMode]::UserExecute -bor [System.IO.UnixFileMode]::GroupRead -bor
+            [System.IO.UnixFileMode]::GroupExecute -bor [System.IO.UnixFileMode]::OtherRead -bor
+            [System.IO.UnixFileMode]::OtherExecute)
+    }
     Copy-Item -LiteralPath $runtimeSource.License -Destination (Join-Path $licensesDir 'nodejs-LICENSE') -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'plugin-LICENSE') -Force
     $nodeVersion = (Invoke-Tool -Command $privateRuntime -Arguments @('--version')).Trim()
@@ -416,17 +460,25 @@ try {
     Invoke-Tool -Command 'go' -Arguments @(
         'run', './cmd/lip-cursor-sdk-packaging', 'render',
         '-repo', $RepoRoot, '-staging', $staging, '-platform', $layout.platform,
-        '-exe-sha256', $exeDigest, '-node-source', $runtimeSource.Label
+        '-exe-sha256', $exeDigest,
+        '-node-source-kind', $runtimeSource.Kind, '-node-source', $runtimeSource.Label
     ) -WorkingDirectory $RepoRoot | Out-Null
 
     Write-ThirdPartyNotices -Path (Join-Path $licensesDir 'THIRD-PARTY-NOTICES.md') `
-        -ModulesDir (Join-Path $bridgeDir 'node_modules') -PrivateRuntime $privateRuntime `
-        -NodeVersion $nodeVersion -NodeSource $runtimeSource.Label -Platform $layout.platform
+        -ModulesDir $bridgeModulesDir -PrivateRuntime $privateRuntime `
+        -NodeVersion $nodeVersion -NodeSourceKind $runtimeSource.Kind `
+        -NodeSource $runtimeSource.Label -Platform $layout.platform
 
     # 6. Checksums over every archive file, plugin-private files included. The
-    #    record cannot cover itself, so it is written last.
+    #    record cannot cover itself, so it is written last. The order is ordinal by
+    #    path, which is what LC_ALL=C sort produces in the shell packager: a
+    #    culture-aware sort would order the record differently on the two platforms
+    #    for the same tree.
     $digests = Get-FileSHA256Map -Root $staging -ExcludeRelative $layout.checksums
-    $checksumLines = foreach ($rel in @($digests.Keys | Sort-Object)) {
+    $orderedPaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($key in $digests.Keys) { $orderedPaths.Add($key) }
+    $orderedPaths.Sort([System.StringComparer]::Ordinal)
+    $checksumLines = foreach ($rel in $orderedPaths) {
         "$($digests[$rel])$($layout.checksum_separator)$rel"
     }
     Set-Content -LiteralPath (Join-Path $staging $layout.checksums) -Value ($checksumLines -join "`n") -Encoding utf8NoBOM
@@ -459,6 +511,7 @@ try {
     Write-Output "archive: $archivePath"
     Write-Output "archive_sha256: $archiveDigest"
     Write-Output "node_version: $nodeVersion"
+    Write-Output "node_source_kind: $($runtimeSource.Kind)"
     Write-Output "node_source: $($runtimeSource.Label)"
     Write-Output "file_count: $($digests.Count + 1)"
 } finally {

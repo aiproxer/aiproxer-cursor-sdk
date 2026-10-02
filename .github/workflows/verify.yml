@@ -120,14 +120,20 @@ jobs:
         run: npm run typecheck
 
   package:
-    name: package (native archive validation)
+    name: package (${{ matrix.os }})
     # The archive carries the plugin-private Node runtime, so it can only be trusted
-    # where it was assembled and actually run. This lane therefore validates exactly
-    # one platform - the runner's own - and the packager refuses to cross-compile a
-    # platform claim. A second platform needs its own native runner, not a matrix
-    # entry that no one has run the private runtime on.
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # where it was assembled and actually run. Each leg of this matrix therefore
+    # validates exactly one platform - its own - and the packager refuses to
+    # cross-compile a platform claim. Both legs are native runners, because a
+    # cross-compiled archive has never had its private runtime run: the matrix exists
+    # so the Windows/amd64 claim has enforced CI evidence of its own rather than a
+    # maintainer's word, not to multiply claims.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     env:
       GOWORK: "off"
       # The gate assembles a real archive (production JavaScript, production
@@ -163,4 +169,4 @@ jobs:
       # companion, an install root containing spaces, or any dependence on a global
       # Node for the private-runtime variant.
       - name: Native package platform validation
-        run: go test -run TestPackageArchive -v .
+        run: go test -count=1 -run TestPackageArchive -v .

@@ -20,19 +20,20 @@ import (
 // outer executable, the plugin-private launcher, the private runtime, the bridge
 // entry with its production dependency tree, and the release template.
 type stagedRelease struct {
-	root        string
-	release     string
-	template    string
-	exe         string
-	runtime     string
-	entry       string
-	bridgeJSON  string
-	sdkJSON     string
-	buildID     string
-	platform    string
-	exeSHA256   string
-	nodeSource  string
-	nodeVersion string
+	root           string
+	release        string
+	template       string
+	exe            string
+	runtime        string
+	entry          string
+	bridgeJSON     string
+	sdkJSON        string
+	buildID        string
+	platform       string
+	exeSHA256      string
+	nodeSource     string
+	nodeSourceKind string
+	nodeVersion    string
 }
 
 func TestRender_PreservesManifestIdentityAndNativePlatformClaim(t *testing.T) {
@@ -83,7 +84,7 @@ func TestRender_PreservesManifestIdentityAndNativePlatformClaim(t *testing.T) {
 	require.Equal(t, "io.golip.backend.cursorsdk", compatibility["plugin_id"])
 	require.Equal(t, "0.1.0", compatibility["plugin_version"])
 	require.Equal(t, lay.buildID, compatibility["build_id"])
-	require.Equal(t, "cursorsdk-v0.1.0", compatibility["release_tag"])
+	require.Equal(t, "cursorsdk-v0.1.0", compatibility["release_tag_declared"])
 	require.Equal(t, "github.com/matdev83/go-llm-interactive-proxy", compatibility["published_root_module"])
 	require.Equal(t, lay.platform, compatibility["platform"])
 	require.Equal(t, "private-runtime", compatibility["packaging_variant"])
@@ -97,25 +98,82 @@ func TestRender_PreservesManifestIdentityAndNativePlatformClaim(t *testing.T) {
 
 // TestRender_RecordsPrivateRuntimeAndSDKMetadataFromTheStagedTree keeps the
 // recorded runtime facts derived from the staged archive itself: the SDK version
-// has to resolve from the staged production tree, and the private runtime
-// version has to come from the shipped executable rather than from a caller
-// supplied string.
+// has to resolve from the staged production tree, and the private runtime version
+// has to come from the shipped executable rather than from a caller supplied
+// string.
+//
+// The recorded provenance has to name where the runtime actually came from. The
+// packager falls back to the node on PATH when it is given neither a distribution
+// archive nor a runtime, and a record that prefixed every source with
+// "nodejs-official-distribution" would state, about a copy of a build machine's
+// working installation, that it is a copy of an official distribution.
 func TestRender_RecordsPrivateRuntimeAndSDKMetadataFromTheStagedTree(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		kind  string
+		label string
+		wants string
+	}{
+		{kind: "official-distribution", label: "node-v22.22.3-dist", wants: "nodejs-official-distribution:node-v22.22.3-dist"},
+		{kind: "supplied-runtime", label: "node", wants: "nodejs-supplied-runtime:node"},
+		{kind: "path-fallback", label: "node.exe", wants: "nodejs-path-fallback:node.exe"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			t.Parallel()
+
+			lay := newStagedRelease(t)
+			lay.nodeSourceKind = tc.kind
+			lay.nodeSource = tc.label
+			_, compatibility := renderAndRead(t, lay)
+
+			require.Equal(t, "1.0.23", compatibility["cursor_sdk_version"])
+			require.Equal(t, "1.0.23", compatibility["cursor_sdk_pinned_version"])
+			require.Equal(t, "0.1.0", compatibility["bridge_version"])
+			require.Equal(t, ">=22.13", compatibility["bridge_node_engine"])
+			require.Equal(t, lay.nodeVersion, compatibility["private_runtime_version"])
+			require.Equal(t, tc.wants, compatibility["private_runtime_source"])
+			require.NotEmpty(t, compatibility["private_runtime_sha256"])
+			require.Equal(t, lay.platform, compatibility["native_platform_assembled"])
+			require.Equal(t, "", compatibility["tested_host_artifact_sha256"])
+			require.NotEmpty(t, compatibility["licensing_status"])
+		})
+	}
+}
+
+// TestRender_RefusesAnUnnamedRuntimeSourceKind keeps the recorded provenance from
+// drifting back into a single prefix for every source. An unknown or missing kind is
+// a packaging failure: the alternative is a runtime whose provenance the record
+// cannot state honestly.
+func TestRender_RefusesAnUnnamedRuntimeSourceKind(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []string{"", "official distribution", "path", "nodejs-official-distribution"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+
+			lay := newStagedRelease(t)
+			lay.nodeSourceKind = kind
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "node-source-kind")
+			require.Contains(t, err.Error(), "path-fallback")
+		})
+	}
+}
+
+// TestRender_DoesNotClaimAReleaseExists keeps the record from reading as a
+// publication. release.yaml declares the tag a future publication would carry, and
+// there is no such tag: a field named release_tag would be read as one that exists.
+func TestRender_DoesNotClaimAReleaseExists(t *testing.T) {
 	t.Parallel()
 
 	lay := newStagedRelease(t)
 	_, compatibility := renderAndRead(t, lay)
 
-	require.Equal(t, "1.0.23", compatibility["cursor_sdk_version"])
-	require.Equal(t, "1.0.23", compatibility["cursor_sdk_pinned_version"])
-	require.Equal(t, "0.1.0", compatibility["bridge_version"])
-	require.Equal(t, ">=22.13", compatibility["bridge_node_engine"])
-	require.Equal(t, lay.nodeVersion, compatibility["private_runtime_version"])
-	require.Equal(t, "nodejs-official-distribution:"+lay.nodeSource, compatibility["private_runtime_source"])
-	require.NotEmpty(t, compatibility["private_runtime_sha256"])
-	require.Equal(t, lay.platform, compatibility["native_platform_assembled"])
-	require.Equal(t, "", compatibility["tested_host_artifact_sha256"])
-	require.NotEmpty(t, compatibility["licensing_status"])
+	require.Equal(t, "cursorsdk-v0.1.0", compatibility["release_tag_declared"])
+	require.NotContains(t, compatibility, "release_tag")
 }
 
 // TestRender_RefusesStagedTreeThatDisagreesWithTheSDKPin keeps a staged
@@ -283,11 +341,12 @@ func newStagedRelease(tb testing.TB) *stagedRelease {
 
 	root := filepath.Join(tb.TempDir(), "staged install root with spaces")
 	lay := &stagedRelease{
-		root:        root,
-		platform:    goos + "/" + runtime.GOARCH,
-		buildID:     "localdev",
-		nodeSource:  "node-v22.22.3-dist",
-		nodeVersion: "v22.22.3",
+		root:           root,
+		platform:       goos + "/" + runtime.GOARCH,
+		buildID:        "localdev",
+		nodeSource:     "node-v22.22.3-dist",
+		nodeSourceKind: "official-distribution",
+		nodeVersion:    "v22.22.3",
 	}
 	lay.exeSHA256 = strings.Repeat("ab", 32)
 	lay.exe = writeFile(tb, filepath.Join(root, "bin", "lip-backend-cursorsdk"+exeSuffix), "outer executable")
@@ -370,6 +429,7 @@ func runRenderCmd(tb testing.TB, lay *stagedRelease) error {
 		"-platform", lay.platform,
 		"-exe-sha256", lay.exeSHA256,
 		"-node-source", lay.nodeSource,
+		"-node-source-kind", lay.nodeSourceKind,
 	)
 	cmd.Dir = thisFileDir(tb)
 	cmd.Env = append(cmd.Environ(), "GOWORK=off")
