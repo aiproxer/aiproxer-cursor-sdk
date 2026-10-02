@@ -66,9 +66,12 @@ LICENSES/
 
 That layout lives in exactly one place, [`internal/packagelayout`](internal/packagelayout), which the
 packaging scripts read through `cmd/lip-cursor-sdk-packaging` and the private launcher consumes directly.
-Neither script restates a layout name - not an archive file name and not a staging directory - and
-`TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout` fails if one does. That is why the launcher
-resolves the same files the archive stages instead of keeping a second copy of the layout.
+Neither packager spells out a layout name: every archive file name, the plugin-private prefix, and every
+staging directory - the bridge entry, the built `dist/`, and the production `node_modules/` - is read from
+the report. `TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout` fails when one of those literals appears
+in a packaging script, and it requires both packagers to derive their staging paths from the report; it is a
+guard over that fixed literal list, not a proof that no script could restate anything. That is why the
+launcher resolves the same files the archive stages instead of keeping a second copy of the layout.
 
 What the packager stages, and only this:
 
@@ -101,8 +104,12 @@ What the packager stages, and only this:
 Trust scope is stated rather than implied. `checksums.sha256` covers the manifest, the outer executable,
 and every plugin-private file, so a tampered or missing companion is detected. The host's manifest digest
 remains the authority for the outer process only; nothing here claims the host authenticates companion
-files. Install into a protected plugin root: the archive is only as trustworthy as the directory it is
-unpacked into.
+files. `compatibility.json` records the digest of the manifest and of the private runtime, and both
+verifiers compare those against the staged files rather than printing a provenance claim nothing has ever
+checked. Both verifiers read the layout contract from the repository they ship in (`--repo-root`), never
+from the directory they were started in: that one report decides what an install tree is, so a caller's
+working directory must not decide it. Install into a protected plugin root: the archive is only as
+trustworthy as the directory it is unpacked into.
 
 ### Verified platforms
 

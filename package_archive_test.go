@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -396,6 +397,68 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		})
 	})
 
+	t.Run("recorded_release_digests_are_cross_checked", func(t *testing.T) {
+		// compatibility.json records the digest of the manifest and of the private
+		// runtime, both taken from the staged tree. A recorded digest is only worth
+		// reading if something compares it, so each of them has to fail verification
+		// when it disagrees with the file it names.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		for _, tc := range []struct{ field, rel string }{
+			{field: "manifest_sha256", rel: archive.ManifestPath()},
+			{field: "private_runtime_sha256", rel: archive.PrivateRuntimePath()},
+		} {
+			t.Run(tc.field, func(t *testing.T) {
+				root := copyInstallRoot(t, built.installRoot)
+				recordPath := filepath.Join(root, filepath.FromSlash(archive.CompatibilityPath()))
+				record := decodeJSONObject(t, recordPath)
+				record[tc.field] = strings.Repeat("0", 64)
+				writeJSONFile(t, recordPath, record)
+				// The record is itself checksummed, so its record entry is recomputed:
+				// the case has to isolate the recorded-digest check instead of failing
+				// earlier on the checksum.
+				rewriteChecksum(t, root, archive.CompatibilityPath())
+
+				report, errCode := runVerifyScript(t, root, nil, nil)
+				require.NotEqual(t, 0, errCode,
+					"a recorded digest that matches nothing passed verification:\n%s", report)
+				require.Contains(t, report, "records "+tc.field,
+					"the finding has to name the recorded digest that disagreed:\n%s", report)
+				require.Contains(t, report, tc.rel,
+					"the finding has to name the file it disagrees with:\n%s", report)
+			})
+		}
+	})
+
+	t.Run("a_caller_chosen_layout_contract_does_not_reach_a_real_archive", func(t *testing.T) {
+		// The always-on half of this is
+		// TestPackageArchive_VerifierReadsTheLayoutContractFromTheVerifiedRepository.
+		// This is the same attack against an assembled archive rather than a synthetic
+		// tree: a payload appended to the plugin-private build output, the shipped
+		// checksum record removed, and a working directory carrying a contract that
+		// describes exactly what is left.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		for _, impl := range verifierImplementations(t) {
+			t.Run(impl, func(t *testing.T) {
+				root := copyInstallRoot(t, built.installRoot)
+				payload := filepath.Join(root, filepath.FromSlash(archive.BridgeDistPath()), "main.js")
+				require.NoError(t, os.WriteFile(payload,
+					[]byte(readFileText(t, payload)+"\n// appended payload\n"), 0o644))
+				require.NoError(t, os.Remove(filepath.Join(root, filepath.FromSlash(archive.ChecksumsPath()))))
+
+				decoy := foreignLayoutDir(t, callerLayoutContract(t, root, archive, true))
+				report, errCode := runVerifyScriptImplFrom(t, impl, "", decoy, root, nil, nil)
+				require.NotEqual(t, 0, errCode,
+					"the %s verifier accepted a tampered archive from a directory carrying its own layout contract:\n%s",
+					impl, report)
+				require.NotContains(t, report, "verify-package: ok")
+				require.Contains(t, report, "checksum record is missing: "+archive.ChecksumsPath(),
+					"the verifier has to decide against the shipped contract:\n%s", report)
+			})
+		}
+	})
+
 	t.Run("platform_overclaim_is_rejected", func(t *testing.T) {
 		root := copyInstallRoot(t, built.installRoot)
 		manifestPath := filepath.Join(root, "plugin.backendplugin.json")
@@ -451,6 +514,11 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 // that reads private/bridge/bin/lip-cursor-sdk-bridge.js from the report and then
 // re-derives the source path by hand has restated the layout just as much as one that
 // spelled out the archive name.
+//
+// What this guard enforces is exactly this literal set, on these four scripts. It is not
+// a proof that no script could restate anything: it cannot see a name the contract does
+// not carry, and it says nothing about a script it does not read. A layout row added to
+// the list below has to be spelled there by hand.
 func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 	t.Parallel()
 
@@ -482,20 +550,217 @@ func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 			require.NotContains(t, body, literal, "%s restates the archive layout", script)
 		}
 		require.Contains(t, body, "lip-cursor-sdk-packaging", "%s must read the layout contract", script)
+
+		// The built JavaScript directory gets a path-element check rather than the
+		// bare-word one above. "dist" is an ordinary word in these scripts: it is the
+		// --node-dist option and the -NodeDist parameter, it appears throughout the
+		// distribution provenance wording, and it is this repository's own default
+		// output directory, so forbidding it outright would forbid all three. What a
+		// packager that restated this row would have to write is a path element, and
+		// the word boundary keeps the derived variables ($bridge_dist, bridge_dist/)
+		// from reading as a restatement of it.
+		require.NotRegexp(t, distPathElement, body,
+			"%s restates the built-JavaScript staging directory", script)
 	}
 
-	// Both packagers have to read the entry and the dependency tree out of the report.
-	// The verifiers do not stage them and are not expected to.
+	// Both packagers have to read the entry, the built JavaScript, and the dependency
+	// tree out of the report, and both have to derive the source-tree path of each from
+	// the bridge package directory rather than from a name of their own. The verifiers
+	// do not stage them and are not expected to.
 	for _, script := range []string{
 		filepath.Join("scripts", "package-plugin.sh"),
 		filepath.Join("scripts", "package-plugin.ps1"),
 	} {
 		body := readFileText(t, filepath.Join(repo, script))
-		for _, field := range []string{"bridge_entry", "bridge_modules", "bridge_package_dir"} {
+		for _, field := range []string{"bridge_entry", "bridge_dist", "bridge_modules", "bridge_package_dir"} {
 			require.Contains(t, body, field, "%s must derive its staging paths from the layout report", script)
 		}
 	}
 }
+
+// TestPackageArchive_VerifierReadsTheLayoutContractFromTheVerifiedRepository keeps the
+// archive layout contract out of the caller's hands.
+//
+// One report decides what a verified tree is: the required-entry set, the
+// checksum-record path and separator, the manifest digest authority, the plugin-private
+// prefix count, and the runtime and launcher probes all come out of it. A verifier that
+// resolves that report through its own working directory lets whoever chose the working
+// directory decide the same, and a tree with a payload appended to a plugin-private
+// file and the shipped checksum record removed then verifies clean.
+//
+// So the contract has to come from the repository being verified, and every
+// implementation this machine can run has to agree. The decoy below is that: a
+// directory holding a cmd/lip-cursor-sdk-packaging that reports a contract describing
+// exactly the tampered tree, so a verifier that adopts it accepts the tree and one that
+// does not rejects it.
+func TestPackageArchive_VerifierReadsTheLayoutContractFromTheVerifiedRepository(t *testing.T) {
+	t.Parallel()
+
+	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+	require.NoError(t, err)
+
+	for _, impl := range verifierImplementations(t) {
+		t.Run(impl, func(t *testing.T) {
+			root := callerTamperedTree(t, archive)
+			decoy := foreignLayoutDir(t, callerLayoutContract(t, root, archive, false))
+
+			report, errCode := runVerifyScriptImplFrom(t, impl, "", decoy, root, nil, nil)
+			require.NotEqual(t, 0, errCode,
+				"the %s verifier accepted a tampered tree while running from a directory that carried its own layout contract:\n%s",
+				impl, report)
+			require.NotContains(t, report, "verify-package: ok")
+			// The contract that has to be read is the shipped one, and it is the
+			// shipped one that names the checksum record this tree no longer carries.
+			require.Contains(t, report, "checksum record is missing: "+archive.ChecksumsPath(),
+				"the verifier has to decide against the layout contract of the repository it verifies:\n%s", report)
+		})
+	}
+}
+
+// callerTamperedTree is the tree the defect let through: a payload appended to the
+// plugin-private build output, with the shipped checksum record removed so that nothing
+// in the tree has to account for the payload.
+func callerTamperedTree(tb testing.TB, archive packagelayout.Archive) string {
+	tb.Helper()
+
+	root := filepath.Join(tb.TempDir(), "caller install root with spaces")
+	staged := filepath.Join(root, filepath.FromSlash(archive.BridgeDistPath()))
+	require.NoError(tb, os.MkdirAll(staged, 0o755))
+	require.NoError(tb, os.WriteFile(filepath.Join(staged, "main.js"),
+		[]byte("// staged bridge build output\nexport const run = () => 'ok'\n// appended payload\n"), 0o644))
+	// The license directory has to exist: the report counts the notices in it on every
+	// run, including the run that fails, and the shipped contract requires the directory.
+	notices := filepath.Join(root, filepath.FromSlash(archive.LicensesDir()))
+	require.NoError(tb, os.MkdirAll(notices, 0o755))
+	require.NoError(tb, os.WriteFile(filepath.Join(notices, "THIRD-PARTY-NOTICES.md"),
+		[]byte("This file records what the plugin archive redistributes.\n"), 0o644))
+	return root
+}
+
+// callerLayoutContract writes the caller's own checksum record into a tree and returns
+// the layout report that describes exactly that tree: every entry it names is present,
+// and every file in it is checksummed.
+//
+// keepReleaseRecord decides whether the contract names the release metadata the tree
+// really carries or a file it does not. A synthetic tree names a file it does not carry,
+// because the release-metadata block is also where the verifier probes the private
+// runtime and the launcher, and a synthetic tree has no runtime to probe; an assembled
+// archive keeps its real record, which is the fidelity the package lane needs.
+func callerLayoutContract(tb testing.TB, root string, archive packagelayout.Archive, keepReleaseRecord bool) map[string]any {
+	tb.Helper()
+
+	const callerRecord = "private/checksums.sha256"
+	recordPath := filepath.Join(root, filepath.FromSlash(callerRecord))
+	require.NoError(tb, os.MkdirAll(filepath.Dir(recordPath), 0o755))
+
+	var lines []string
+	entries := []string{callerRecord}
+	for rel := range walkRelativeFiles(tb, root) {
+		if rel == callerRecord {
+			continue
+		}
+		entries = append(entries, rel)
+		lines = append(lines, fileSHA256(tb, filepath.Join(root, filepath.FromSlash(rel)))+
+			packagelayout.ChecksumSeparator+rel)
+	}
+	slices.Sort(lines)
+	require.NoError(tb, os.WriteFile(recordPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
+	slices.Sort(entries)
+
+	compatibility := "caller-compatibility.json"
+	if keepReleaseRecord {
+		compatibility = archive.CompatibilityPath()
+	}
+	return map[string]any{
+		"platform":           archive.Platform(),
+		"compatibility":      compatibility,
+		"manifest":           "caller-manifest.json",
+		"checksums":          callerRecord,
+		"checksum_separator": packagelayout.ChecksumSeparator,
+		"private_prefix":     packagelayout.PrivatePrefix,
+		"licenses_dir":       archive.LicensesDir(),
+		"outer_executable":   archive.OuterExecutablePath(),
+		"launcher":           archive.LauncherPath(),
+		"private_runtime":    archive.PrivateRuntimePath(),
+		"required_entries":   entries,
+	}
+}
+
+// foreignLayoutDir writes a directory outside this repository that answers the layout
+// report a verifier asks for: a cmd/lip-cursor-sdk-packaging that prints the contract the
+// caller chose and ignores the platform it is asked about. A verifier that resolves the
+// layout from its working directory adopts that answer.
+func foreignLayoutDir(tb testing.TB, layout map[string]any) string {
+	tb.Helper()
+
+	report, err := json.Marshal(layout)
+	require.NoError(tb, err)
+	dir := tb.TempDir()
+
+	// A standalone module with no dependencies, so `go run` answers for this directory
+	// alone. Its go directive is the repository's own, shortened to major.minor: a lower
+	// directive than the toolchain in use can never ask for a download.
+	require.NoError(tb, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module caller/layout\n\ngo "+repoGoMinorVersion(tb)+"\n"), 0o644))
+	source := "// Command lip-cursor-sdk-packaging is a decoy layout report. It answers with\n" +
+		"// a contract the caller chose, so a verifier that asks its working directory\n" +
+		"// instead of the repository it verifies adopts the caller's answer.\n" +
+		"package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\n" +
+		"func main() {\n\tif _, err := fmt.Print(" + strconv.Quote(string(report)) +
+		"); err != nil {\n\t\tfmt.Fprintln(os.Stderr, err)\n\t\tos.Exit(1)\n\t}\n}\n"
+	command := filepath.Join(dir, "cmd", "lip-cursor-sdk-packaging")
+	require.NoError(tb, os.MkdirAll(command, 0o755))
+	require.NoError(tb, os.WriteFile(filepath.Join(command, "main.go"), []byte(source), 0o644))
+	return dir
+}
+
+// repoGoMinorVersion is this repository's go directive as major.minor.
+func repoGoMinorVersion(tb testing.TB) string {
+	tb.Helper()
+
+	for _, line := range strings.Split(readFileText(tb, filepath.Join(repoRoot(tb), "go.mod")), "\n") {
+		version, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
+		if !ok {
+			continue
+		}
+		if major, minor, split := strings.Cut(version, "."); split {
+			return major + "." + minor
+		}
+		return version
+	}
+	tb.Fatalf("go.mod declares no go directive")
+	return ""
+}
+
+// TestPackageArchive_BothVerifiersCrossCheckTheRecordedReleaseDigests keeps one trust
+// check from existing in only one of the two verifiers.
+//
+// compatibility.json records the digest of the manifest and of the private runtime, and
+// a recorded digest that nothing compares is provenance decoration. The package lane
+// proves the behaviour on whichever platform it runs, which means the other platform's
+// script is only covered there; this static half holds everywhere, so the POSIX script
+// cannot silently lose a check the Windows one keeps.
+func TestPackageArchive_BothVerifiersCrossCheckTheRecordedReleaseDigests(t *testing.T) {
+	t.Parallel()
+
+	for _, script := range []string{
+		filepath.Join("scripts", "verify-package.sh"),
+		filepath.Join("scripts", "verify-package.ps1"),
+	} {
+		body := readFileText(t, filepath.Join(repoRoot(t), script))
+		for _, field := range []string{"manifest_sha256", "private_runtime_sha256"} {
+			require.Contains(t, body, field, "%s does not cross-check the recorded %s", script, field)
+		}
+		// Both implementations have to say the same thing about a disagreement, so an
+		// operator reading either report is reading the same verdict.
+		require.Contains(t, body, "the record does not describe this archive",
+			"%s has to report a recorded-digest disagreement the way its counterpart does", script)
+	}
+}
+
+// distPathElement is the layout's built-JavaScript directory name used as a path
+// element: the one shape a script that restates that row has to write.
+var distPathElement = regexp.MustCompile(`\b` + regexp.QuoteMeta(packagelayout.BridgeDistDirName) + `[/\\]`)
 
 // packageGateRequested reports whether this run opted into the native package gate.
 func packageGateRequested() bool {
@@ -604,8 +869,31 @@ func runVerifyScript(tb testing.TB, installRoot string, env, extra []string) (st
 func runVerifyScriptImpl(tb testing.TB, impl, installRoot string, env, extra []string) (string, int) {
 	tb.Helper()
 
-	return runPackagingScriptEnvImpl(tb, "verify-package", impl,
-		scriptArgsFor(impl, map[string]string{"package-root": installRoot}, extra), env)
+	return runVerifyScriptImplFrom(tb, impl, "", "", installRoot, env, extra)
+}
+
+// runVerifyScriptImplFrom verifies one install root with one named implementation
+// from a chosen working directory, and against a chosen copy of the script.
+//
+// workDir is the directory the script starts in. It is a parameter because a
+// verifier that asks its working directory for the layout contract answers for
+// whatever repository the caller happened to leave there instead of for the archive
+// it was asked to verify. scriptDir is the directory holding scripts/, so a case can
+// hand the verifier a substituted helper without touching the shipped one; the empty
+// string means this repository.
+func runVerifyScriptImplFrom(tb testing.TB, impl, scriptDir, workDir, installRoot string, env, extra []string) (string, int) {
+	tb.Helper()
+
+	if scriptDir == "" {
+		scriptDir = repoRoot(tb)
+	}
+	if workDir == "" {
+		workDir = repoRoot(tb)
+	}
+	script, shell, shellArgs := packagingScriptArgs(tb, scriptDir, "verify-package", impl)
+	argv := append(shellArgs, append([]string{script},
+		scriptArgsFor(impl, map[string]string{"package-root": installRoot}, extra)...)...)
+	return runScriptProcess(tb, shell, argv, workDir, env)
 }
 
 // verifierImplementations lists the verify-package implementations this machine can
@@ -672,6 +960,7 @@ func scriptOption(impl, name string) string {
 		"platform":        "Platform",
 		"report":          "ReportPath",
 		"expect-platform": "ExpectPlatform",
+		"repo-root":       "RepoRoot",
 	}[name]
 	if spelled == "" {
 		return "-" + name
@@ -689,10 +978,19 @@ func runPackagingScript(tb testing.TB, name string, args []string) (string, int)
 func runPackagingScriptEnvImpl(tb testing.TB, name, impl string, args, env []string) (string, int) {
 	tb.Helper()
 
-	script, shell, shellArgs := packagingScriptArgs(tb, name, impl)
-	argv := append(shellArgs, append([]string{script}, args...)...)
+	script, shell, shellArgs := packagingScriptArgs(tb, repoRoot(tb), name, impl)
+	return runScriptProcess(tb, shell, append(shellArgs, append([]string{script}, args...)...), repoRoot(tb), env)
+}
+
+// runScriptProcess runs one script interpreter with its arguments and returns the
+// combined output and the exit status. workDir is the directory the process starts
+// in, which is what a verifier that resolves its layout contract relative to the
+// working directory answers for instead of for the archive it was asked to verify.
+func runScriptProcess(tb testing.TB, shell string, argv []string, workDir string, env []string) (string, int) {
+	tb.Helper()
+
 	cmd := exec.Command(shell, argv...)
-	cmd.Dir = repoRoot(tb)
+	cmd.Dir = workDir
 	if env != nil {
 		cmd.Env = env
 	} else {
@@ -703,7 +1001,7 @@ func runPackagingScriptEnvImpl(tb testing.TB, name, impl string, args, env []str
 	var exitErr *exec.ExitError
 	if err != nil {
 		if !errors.As(err, &exitErr) {
-			tb.Fatalf("run %s: %v", script, err)
+			tb.Fatalf("run %s: %v", shell, err)
 		}
 		code = exitErr.ExitCode()
 	}
@@ -712,19 +1010,19 @@ func runPackagingScriptEnvImpl(tb testing.TB, name, impl string, args, env []str
 
 // packagingScriptArgs picks the script and the interpreter that runs it. The
 // PowerShell script is the Windows implementation and the shell script is the
-// POSIX one; each platform validates its own.
-func packagingScriptArgs(tb testing.TB, name, impl string) (script string, shell string, shellArgs []string) {
+// POSIX one; each platform validates its own. dir is the directory holding scripts/,
+// so a case can run a substituted copy of a script instead of the shipped one.
+func packagingScriptArgs(tb testing.TB, dir, name, impl string) (script string, shell string, shellArgs []string) {
 	tb.Helper()
 
-	repo := repoRoot(tb)
 	if impl == "ps1" {
 		pwsh, err := exec.LookPath("pwsh")
 		require.NoError(tb, err)
-		return filepath.Join(repo, "scripts", name+".ps1"), pwsh, []string{"-NoProfile", "-NonInteractive", "-File"}
+		return filepath.Join(dir, "scripts", name+".ps1"), pwsh, []string{"-NoProfile", "-NonInteractive", "-File"}
 	}
 	bash, err := exec.LookPath("bash")
 	require.NoError(tb, err)
-	return filepath.Join(repo, "scripts", name+".sh"), bash, nil
+	return filepath.Join(dir, "scripts", name+".sh"), bash, nil
 }
 
 // runPackagedExecutable runs one executable from an assembled install root.

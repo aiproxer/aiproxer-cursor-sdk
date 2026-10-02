@@ -304,7 +304,11 @@ run_in "$bridge_dir" npm ci --omit=dev --no-audit --no-fund >/dev/null
 rm -f "$bridge_dir/package-lock.json"
 
 mkdir -p "$staging/$bridge_dist"
-cp -R "$bridge_source/dist/." "$staging/$bridge_dist/"
+# The built JavaScript is copied out of the source tree by the same name the archive
+# contract gives it, reduced to the path relative to the bridge package directory, so
+# this script stages exactly the directory the launcher and the verifier will look in.
+dist_name="${bridge_dist#"$bridge_package_dir"/}"
+cp -R "$bridge_source/$dist_name/." "$staging/$bridge_dist/"
 entry_name="${bridge_entry#"$bridge_package_dir"/}"
 mkdir -p "$(dirname -- "$staging/$bridge_entry")"
 cp "$bridge_source/$entry_name" "$staging/$bridge_entry"

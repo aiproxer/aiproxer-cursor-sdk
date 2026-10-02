@@ -72,6 +72,19 @@ json_string() {
   printf '%s' "$2" | tr -d '\n' | sed "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/"
 }
 
+# json_digest reads one recorded sha256 field. json_string returns the whole document
+# when the field is absent, so a raw read of a digest nobody recorded would compare the
+# record against itself; anything that is not a digest reads as not recorded, which is
+# what the PowerShell verifier's field lookup decides too. A digest that is not recorded
+# is not cross-checked, and the checksum record still covers the record itself.
+json_digest() {
+  case "$(json_string "$1" "$2")" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *) return 0 ;;
+  esac
+  json_string "$1" "$2"
+}
+
 # json_scalar reads one scalar field, quoted or not. Booleans and numbers are not
 # quoted, and reading them with the string reader would return the whole document.
 json_scalar() {
@@ -317,6 +330,21 @@ if [ -f "$manifest_path" ]; then
       finding "manifest export $field is '$got' but the plugin declares '$want'"
   done
   line 'export posture: static, local_only, per_instance, agent_runtime'
+
+  # The release metadata records the digest of the manifest bytes this archive carries.
+  # It is recorded from the staged tree, so it is checked here rather than printed: a
+  # record that describes a different manifest than the one beside it is not evidence
+  # about this archive, and a recorded digest nothing ever compared is provenance
+  # decoration.
+  recorded_manifest_sha="$(json_digest manifest_sha256 "$record_json")"
+  if [ -n "$recorded_manifest_sha" ]; then
+    actual_manifest_sha="$(sha256_of "$manifest_path")"
+    if [ "$recorded_manifest_sha" != "$actual_manifest_sha" ]; then
+      finding "release metadata records manifest_sha256 $recorded_manifest_sha but the staged $manifest_name hashes to $actual_manifest_sha; the record does not describe this archive"
+    else
+      line "manifest sha256 (recorded, matches): $actual_manifest_sha"
+    fi
+  fi
 fi
 
 # 4. Release metadata, and the private runtime and bridge that actually run.
@@ -334,6 +362,19 @@ if [ -n "$record_json" ]; then
 
   private_runtime_path="$package_root/$private_runtime"
   launcher_path="$package_root/$launcher_rel"
+
+  # The same applies to the runtime digest: it is recorded from the staged executable,
+  # so it is compared against that executable rather than reported as provenance.
+  recorded_runtime_sha="$(json_digest private_runtime_sha256 "$record_json")"
+  if [ -n "$recorded_runtime_sha" ] && [ -f "$private_runtime_path" ]; then
+    actual_runtime_sha="$(sha256_of "$private_runtime_path")"
+    if [ "$recorded_runtime_sha" != "$actual_runtime_sha" ]; then
+      finding "release metadata records private_runtime_sha256 $recorded_runtime_sha but the staged $private_runtime hashes to $actual_runtime_sha; the record does not describe this archive"
+    else
+      line "private runtime sha256 (recorded, matches): $actual_runtime_sha"
+    fi
+  fi
+
   if [ -f "$private_runtime_path" ] && [ -f "$launcher_path" ]; then
     self_path="$(probe "$private_runtime_path" -p 'process.execPath')"
     resolved='no'

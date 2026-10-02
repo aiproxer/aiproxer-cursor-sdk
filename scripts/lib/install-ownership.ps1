@@ -64,11 +64,18 @@ function Format-UnixPermissionOctal([System.IO.UnixFileMode]$Mode) {
 # Get-InstallOwnershipVerdict classifies one install root: whether the permission
 # bits are machine-checkable here, how they read, and whether the root is writable
 # beyond its owner.
+#
+# WritableBeyondOwner is a tri-state. $true and $false are measured answers; $null is
+# "this platform cannot measure the root at all". Reporting an unmeasurable root as
+# $false would be a statement nobody measured: a caller reading the verdict would see a
+# checked-safe root where there was no check. The verifier therefore reads Checkable
+# first, and the platform with no permission bits says the requirement instead of
+# guessing at it.
 function Get-InstallOwnershipVerdict([string]$Path) {
     $mode = Get-UnixDirectoryMode $Path
     $checkable = $null -ne $mode
     $rendered = ''
-    $writable = $false
+    $writable = $null
     if ($checkable) {
         $rendered = Format-UnixPermissionOctal $mode
         $writable = -not (Test-InstallOwnerOnlyWrite $mode)

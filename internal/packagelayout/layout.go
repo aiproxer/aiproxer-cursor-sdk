@@ -59,11 +59,18 @@ const (
 	// reads it from this contract instead of restating it.
 	ModulesDirName = "node_modules"
 
+	// BridgeDistDirName is the built production JavaScript directory inside the bridge
+	// package directory. Both packagers have to name it in the source tree as well as
+	// in the archive, and the source-tree name is [Archive.BridgeDistPath] reduced to
+	// its last element, so it is exported here for the same reason ModulesDirName is:
+	// a script derives the path from this contract rather than spelling the
+	// directory out, and a static guard can then see that it did.
+	BridgeDistDirName = "dist"
+
 	binDirName            = "bin"
 	privateDirName        = "private"
 	bridgeDirName         = "bridge"
 	runtimeDirName        = "node"
-	bridgeDistDirName     = "dist"
 	bridgePackageJSONName = "package.json"
 )
 
@@ -173,7 +180,7 @@ func (a Archive) BridgePackageDirPath() string {
 func (a Archive) BridgeEntryPath() string { return entryRelPath }
 
 // BridgeDistPath is the built production JavaScript directory.
-func (a Archive) BridgeDistPath() string { return a.BridgePackageDirPath() + "/" + bridgeDistDirName }
+func (a Archive) BridgeDistPath() string { return a.BridgePackageDirPath() + "/" + BridgeDistDirName }
 
 // BridgeModulesPath is the staged production npm dependency tree.
 func (a Archive) BridgeModulesPath() string {

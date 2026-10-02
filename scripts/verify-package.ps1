@@ -153,7 +153,15 @@ $hostPlatform = "$($envParts[0])/$($envParts[1])"
 
 # The fixed metadata file names do not vary by platform, so the host layout report
 # locates them; the archive's own platform claim decides which report applies.
-$hostLayout = (& go run ./cmd/lip-cursor-sdk-packaging layout -platform $hostPlatform) | ConvertFrom-Json
+#
+# The report has to come from the repository being verified. Asking for it relative to
+# the current working directory would let the caller's directory decide what an install
+# tree is: one report names the required entries, the checksum record and its
+# separator, the manifest digest authority, the plugin-private prefix, and the runtime
+# and launcher probes, so a directory carrying its own cmd/lip-cursor-sdk-packaging
+# would make a tampered tree verify clean. -C is the switch the shell verifier's
+# `cd "$repo_root"` corresponds to.
+$hostLayout = (& go -C $RepoRoot run ./cmd/lip-cursor-sdk-packaging layout -platform $hostPlatform) | ConvertFrom-Json
 
 $recordPath = Join-Path $PackageRoot $hostLayout.compatibility
 $script:Record = $null
@@ -316,6 +324,22 @@ if (Test-Path -LiteralPath $manifestPath) {
         }
         Add-Line "export posture: $($posture.Values -join ', ')"
     }
+
+    # The release metadata records the digest of the manifest bytes this archive carries.
+    # It is recorded from the staged tree, so it is checked here rather than printed: a
+    # record that describes a different manifest than the one beside it is not evidence
+    # about this archive, and a recorded digest nothing ever compared is provenance
+    # decoration. A digest the record does not carry reads as not recorded, which is what
+    # the shell verifier's json_digest decides too.
+    $recordedManifest = if ($script:Record) { [string](Get-JsonField $script:Record 'manifest_sha256') } else { '' }
+    if ($recordedManifest -match '^[0-9a-f]{64}$') {
+        $actual = Read-FileSHA256 $manifestPath
+        if ($recordedManifest -ne $actual) {
+            Add-Finding "release metadata records manifest_sha256 $recordedManifest but the staged $($layout.manifest) hashes to $actual; the record does not describe this archive"
+        } else {
+            Add-Line "manifest sha256 (recorded, matches): $actual"
+        }
+    }
 }
 
 # 4. Release metadata, and the private runtime and bridge that actually run.
@@ -333,6 +357,19 @@ if ($script:Record) {
 
     $privateRuntime = Join-Path $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
     $launcher = Join-Path $PackageRoot ($layout.launcher -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+
+    # The same applies to the runtime digest: it is recorded from the staged executable,
+    # so it is compared against that executable rather than reported as provenance.
+    $recordedRuntime = [string](Get-JsonField $record 'private_runtime_sha256')
+    if ($recordedRuntime -match '^[0-9a-f]{64}$' -and (Test-Path -LiteralPath $privateRuntime)) {
+        $actual = Read-FileSHA256 $privateRuntime
+        if ($recordedRuntime -ne $actual) {
+            Add-Finding "release metadata records private_runtime_sha256 $recordedRuntime but the staged $($layout.private_runtime) hashes to $actual; the record does not describe this archive"
+        } else {
+            Add-Line "private runtime sha256 (recorded, matches): $actual"
+        }
+    }
+
     if ((Test-Path -LiteralPath $privateRuntime) -and (Test-Path -LiteralPath $launcher)) {
         $selfProbe = Invoke-Probe $privateRuntime @('-p', 'process.execPath')
         $resolved = if (Test-SamePath $selfProbe.Output.Trim() $privateRuntime) { 'yes' } else { 'no' }
@@ -366,7 +403,10 @@ if ($script:Record) {
     }
 }
 
-Add-Line "licenses: $((Get-ChildItem -LiteralPath (Join-Path $PackageRoot $layout.licenses_dir) -File -ErrorAction SilentlyContinue).Count) notices under $($layout.licenses_dir)/"
+# The notice count is a collection count: under Set-StrictMode a scalar result has no
+# Count property, so a license directory holding fewer than two notices threw here and
+# discarded the whole report, findings included.
+Add-Line "licenses: $(@(Get-ChildItem -LiteralPath (Join-Path $PackageRoot $layout.licenses_dir) -File -ErrorAction SilentlyContinue).Count) notices under $($layout.licenses_dir)/"
 Add-Line '--- files ---'
 foreach ($rel in $checksumOrder) {
     Add-Line "$($listed[$rel])$($layout.checksum_separator)$rel"

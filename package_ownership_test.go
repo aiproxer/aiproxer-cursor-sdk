@@ -1,6 +1,7 @@
 package cursorsdk_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// requirePowerShell skips a case that cannot run without the PowerShell host, rather
+// than failing on a machine that has none.
+func requirePowerShell(tb testing.TB) {
+	tb.Helper()
+
+	if _, err := exec.LookPath("pwsh"); err != nil {
+		tb.Skipf("this case needs the PowerShell host: %v", err)
+	}
+}
 
 // TestPackageArchive_PowerShellOwnershipCheckRejectsWritableInstallRoot keeps the
 // PowerShell verifier's install-ownership check load-bearing.
@@ -37,7 +48,8 @@ func TestPackageArchive_PowerShellOwnershipCheckRejectsWritableInstallRoot(t *te
 	for _, tc := range installOwnershipModes {
 		got, ok := verdicts[tc.mode]
 		require.True(t, ok, "the PowerShell ownership check never evaluated mode %s", tc.mode)
-		require.Equal(t, tc.writableBeyondOwner, got.writableBeyondOwner,
+		require.NotNil(t, got.writableBeyondOwner, "mode %s was evaluated, so it has an answer", tc.mode)
+		require.Equal(t, tc.writableBeyondOwner, *got.writableBeyondOwner,
 			"mode %s: the check has to agree with %v", tc.mode, tc.writableBeyondOwner)
 		// The reported mode is what an operator reads, so it has to be the octal
 		// permission bits rather than an enum rendering or a decimal number.
@@ -47,6 +59,16 @@ func TestPackageArchive_PowerShellOwnershipCheckRejectsWritableInstallRoot(t *te
 	// The verdict the verifier acts on has to come from reading the real directory,
 	// not only from a mode value the test supplies.
 	if runtime.GOOS == "windows" {
+		// Windows exposes ownership through the directory ACL, which the host owns, so
+		// there is nothing to measure. "Not machine-checkable" has to read as that:
+		// reporting it as owner-only-write would be a statement no check produced.
+		unmeasurable := pwshOwnershipVerdict(t, filepath.Join(t.TempDir(), "plugin root"))
+		require.False(t, unmeasurable.checkable,
+			"a Windows install root has no POSIX permission bits to read")
+		require.Nil(t, unmeasurable.writableBeyondOwner,
+			"an unmeasurable root must not report itself as checked and safe")
+		require.Empty(t, unmeasurable.rendered,
+			"an unmeasurable root has no permission bits to render")
 		return
 	}
 	for _, tc := range installOwnershipModes {
@@ -60,9 +82,93 @@ func TestPackageArchive_PowerShellOwnershipCheckRejectsWritableInstallRoot(t *te
 		verdict := pwshOwnershipVerdict(t, root)
 		require.True(t, verdict.checkable, "POSIX permission bits have to be readable for %s", root)
 		require.Equal(t, tc.mode, verdict.rendered)
-		require.Equal(t, tc.writableBeyondOwner, verdict.writableBeyondOwner,
+		require.NotNil(t, verdict.writableBeyondOwner, "a measurable root has an answer")
+		require.Equal(t, tc.writableBeyondOwner, *verdict.writableBeyondOwner,
 			"a plugin root with mode %s was classified as owner-only writable", tc.mode)
 	}
+}
+
+// TestPackageArchive_VerifierFailsOnAWritableBeyondOwnerInstallRoot keeps the
+// load-bearing half of the ownership fix under test.
+//
+// The check above evaluates the helper; it never runs the verifier. Deleting the FAIL
+// branch in scripts/verify-package.ps1 therefore left every Windows test green, and a
+// Windows-only checkout proved nothing about the wiring. What has to hold is that the
+// verifier reads the verdict at all: a root that is writable beyond its owner becomes a
+// finding that names the remedy, and a root that is owner-only writable is reported as
+// such instead.
+//
+// Only the verdict is substituted. The verifier is the shipped script, copied verbatim;
+// what it dot-sources is replaced by a stub. No option and no environment variable can
+// reach the shipped verifier's decision, because none exists.
+func TestPackageArchive_VerifierFailsOnAWritableBeyondOwnerInstallRoot(t *testing.T) {
+	t.Parallel()
+	requirePowerShell(t)
+
+	for _, tc := range []struct {
+		name     string
+		mode     string
+		writable bool
+	}{
+		{name: "writable_beyond_owner", mode: "0777", writable: true},
+		{name: "owner_only_write", mode: "0700"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "plugin install root with spaces")
+			require.NoError(t, os.MkdirAll(root, 0o755))
+
+			report, errCode := runVerifyScriptImplFrom(t, "ps1", substitutedVerifierDir(t, tc.mode, tc.writable),
+				"", root, nil, []string{"--repo-root", repoRoot(t)})
+
+			// The report has to carry the verdict in both directions, so the case that
+			// passes proves the branch is driven by the verdict rather than always
+			// firing.
+			require.Contains(t, report, "install ownership: "+tc.mode,
+				"the verifier has to report the verdict it read:\n%s", report)
+			if !tc.writable {
+				require.Contains(t, report, "owner-only write required",
+					"an owner-only writable root is not a finding:\n%s", report)
+				require.NotContains(t, report, "writable beyond its owner",
+					"an owner-only writable root must not fail:\n%s", report)
+				return
+			}
+			require.NotEqual(t, 0, errCode,
+				"a plugin root writable beyond its owner passed verification:\n%s", report)
+			require.Contains(t, report, "FAILED: writable beyond its owner",
+				"the verifier has to fail the install on the verdict it read:\n%s", report)
+			require.Contains(t, report, "is writable beyond its owner",
+				"the finding has to name the verdict:\n%s", report)
+			require.Contains(t, report, "protected plugin root",
+				"the finding has to name the operator remedy:\n%s", report)
+		})
+	}
+}
+
+// substitutedVerifierDir copies the shipped PowerShell verifier and replaces only the
+// install-ownership library it dot-sources, so a case can decide what the verifier reads
+// without giving the shipped script an option that could bypass its own check.
+func substitutedVerifierDir(tb testing.TB, mode string, writableBeyondOwner bool) string {
+	tb.Helper()
+
+	dir := tb.TempDir()
+	scripts := filepath.Join(dir, "scripts")
+	require.NoError(tb, os.MkdirAll(filepath.Join(scripts, "lib"), 0o755))
+
+	shipped := readFileText(tb, filepath.Join(repoRoot(tb), "scripts", "verify-package.ps1"))
+	require.NoError(tb, os.WriteFile(filepath.Join(scripts, "verify-package.ps1"), []byte(shipped), 0o644))
+	stub := fmt.Sprintf(`# Substituted by TestPackageArchive_VerifierFailsOnAWritableBeyondOwnerInstallRoot.
+# The verifier script is the shipped one; only the verdict it reads changes here.
+function Get-InstallOwnershipVerdict([string]$Path) {
+    return [pscustomobject]@{
+        Checkable = $true
+        Mode = $null
+        Rendered = %s
+        WritableBeyondOwner = $%s
+    }
+}
+`, psq(mode), boolPowerShellLiteral(writableBeyondOwner))
+	require.NoError(tb, os.WriteFile(filepath.Join(scripts, "lib", "install-ownership.ps1"), []byte(stub), 0o644))
+	return dir
 }
 
 // installOwnershipModes is the table of permission bits the ownership check has to
@@ -85,9 +191,12 @@ var installOwnershipModes = []struct {
 }
 
 // ownershipVerdict is one classification the PowerShell ownership check reported.
+//
+// writableBeyondOwner is a tri-state, because the helper's is: nil is "not
+// machine-checkable here", which is a different statement from a measured false.
 type ownershipVerdict struct {
 	rendered            string
-	writableBeyondOwner bool
+	writableBeyondOwner *bool
 	checkable           bool
 }
 
@@ -117,7 +226,7 @@ foreach ($octal in $octals) {
 		require.NoError(tb, convErr, "unexpected ownership verdict %q", row)
 		verdicts[strings.TrimSpace(fields[0])] = ownershipVerdict{
 			rendered:            strings.TrimSpace(fields[0]),
-			writableBeyondOwner: writable,
+			writableBeyondOwner: &writable,
 			checkable:           true,
 		}
 	}
@@ -130,7 +239,10 @@ func pwshOwnershipVerdict(tb testing.TB, path string) ownershipVerdict {
 
 	out, err := runPowerShell(tb, ownershipProbeScript(tb, `
 $verdict = Get-InstallOwnershipVerdict -Path `+psq(filepath.ToSlash(path))+`
-'{0}|{1}|{2}' -f $verdict.Checkable, $verdict.Rendered, $verdict.WritableBeyondOwner`))
+# The helper reports an unmeasurable root as $null, which has to survive as its own
+# answer rather than arriving as a measured false.
+$writable = if ($null -eq $verdict.WritableBeyondOwner) { 'unknown' } else { "$($verdict.WritableBeyondOwner)" }
+'{0}|{1}|{2}' -f $verdict.Checkable, $verdict.Rendered, $writable`))
 	if err != nil {
 		tb.Fatalf("the PowerShell install-ownership check failed for %s:\n%s\n%s", path, out, err)
 	}
@@ -138,8 +250,18 @@ $verdict = Get-InstallOwnershipVerdict -Path `+psq(filepath.ToSlash(path))+`
 	require.Len(tb, fields, 3, "unexpected ownership verdict %q", out)
 	checkable, convErr := strconv.ParseBool(strings.TrimSpace(fields[0]))
 	require.NoError(tb, convErr, "unexpected ownership verdict %q", out)
-	writable, convErr := strconv.ParseBool(strings.TrimSpace(fields[2]))
-	require.NoError(tb, convErr, "unexpected ownership verdict %q", out)
+
+	var writable *bool
+	switch token := strings.TrimSpace(fields[2]); token {
+	case "unknown":
+		// No measurement, so no answer.
+	case "True", "False":
+		measured, parseErr := strconv.ParseBool(token)
+		require.NoError(tb, parseErr, "unexpected ownership verdict %q", out)
+		writable = &measured
+	default:
+		tb.Fatalf("unexpected ownership verdict %q", out)
+	}
 	return ownershipVerdict{
 		rendered:            strings.TrimSpace(fields[1]),
 		writableBeyondOwner: writable,
@@ -217,4 +339,14 @@ func runPowerShell(tb testing.TB, body string) (string, error) {
 // psq quotes one path as a PowerShell single-quoted literal.
 func psq(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", "''") + "'"
+}
+
+// boolPowerShellLiteral spells a Go boolean the way PowerShell spells one. PowerShell has
+// no bareword boolean: an expression that reads `true` yields null rather than a verdict,
+// so a substituted library that wanted a measured answer would hand the verifier none.
+func boolPowerShellLiteral(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
