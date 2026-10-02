@@ -40,7 +40,10 @@ func TestPackageArchive_ScriptsReportUsageErrorsWithTheSameExitCode(t *testing.T
 		t.Run(impl, func(t *testing.T) {
 			out, code := runPackagingScriptEnvImpl(t, "verify-package", impl, nil, nil)
 			require.Equal(t, 2, code, "verify-package (%s) usage error exit code:\n%s", impl, out)
-			require.Contains(t, strings.ToLower(out), "packageroot",
+			// The two scripts spell the option in their own syntax, so the check
+			// compares the name without the punctuation that introduces it.
+			named := strings.NewReplacer("-", "", " ", "").Replace(strings.ToLower(out))
+			require.Contains(t, named, "packageroot",
 				"the usage error has to name the missing option:\n%s", out)
 		})
 	}
