@@ -73,7 +73,7 @@ notices to `LICENSES/`, so the artifact carries its own attribution:
 | --- | --- | --- |
 | Node.js private runtime (`private/node/node[.exe]`) | MIT, with the notices for the components Node bundles (ICU, OpenSSL, c-ares, libuv, ...) in the distribution `LICENSE` | `LICENSES/nodejs-LICENSE` |
 | The runtime's own bundled npm (`private/node/{lib/,}node_modules/npm/`) | **Not** under the Node.js MIT grant. npm's own `LICENSE` licenses the npm application under the Artistic License 2.0 and states that its bundled Node package dependencies are licensed on their respective license terms | `private/node/{lib/,}node_modules/npm/LICENSE`, shipped inside the tree |
-| The packages npm bundles inside its own npm tree (`private/node/{lib/,}node_modules/npm/node_modules/`) | Each package on its own terms: every bundled package ships its own license text in its own package directory, and `LICENSES/THIRD-PARTY-NOTICES.md` names any bundled package that ships none, with the license its own `package.json` declares | the per-package license file in each package directory, or the generated notice |
+| The packages npm bundles inside its own npm tree (`private/node/{lib/,}node_modules/npm/node_modules/`) | Each package on its own terms, as its own `package.json` declares. A package that ships its own license text ships it in its own package directory; `LICENSES/THIRD-PARTY-NOTICES.md` names every bundled package that ships none, with the license it declares, and counts the whole tree, nested `node_modules` included | the per-package license file where the package ships one, or the generated notice |
 | This repository's plugin sources | MIT | `LICENSES/plugin-LICENSE` |
 | `@cursor/sdk` and its dependency closure | Proprietary and **not redistributed**. `LICENSE.md` states that use is subject to [Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right. The platform package additionally ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package does not redistribute. No archive ships the Cursor SDK or any package that exists only to satisfy it; the third-party package code an archive does ship is the runtime's own bundled npm, listed above. | `LICENSES/THIRD-PARTY-NOTICES.md` (the pinned closure is listed from the shipped lockfile; the packages themselves are absent) |
 
@@ -82,7 +82,8 @@ volume: the runtime's bundled npm and the dependencies npm bundles with it are t
 an archive carries. That is deliberate — it is what lets an operator provision the SDK with no global Node and
 no global package manager — and it is attributed to the license text each component actually ships, not to a
 single distribution-wide grant: npm's own license is its own, and each package it bundles is licensed on its
-own terms by the text in its own package directory. The distribution `LICENSE` collected into `LICENSES/`
+own terms by the text in its own package directory where the package ships one. The distribution `LICENSE`
+collected into `LICENSES/`
 carries Node's grant and Node's component notices; it does not carry those per-package texts, and nothing
 here claims it does. What an archive never ships is the Cursor SDK or its dependency closure. Neither
 statement is a claim about the other, and no artifact in this repository claims that an archive is free of

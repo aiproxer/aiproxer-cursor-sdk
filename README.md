@@ -124,8 +124,9 @@ What the packager stages, and only this:
   MIT grant. npm is separately licensed: its own `LICENSE` ships inside the staged tree at
   `private/node/{lib/,}node_modules/npm/LICENSE` and licenses the npm application under the Artistic
   License 2.0 while stating that npm's bundled Node package dependencies are licensed on their
-  respective license terms, and each bundled package carries its own license text in its own package
-  directory under `private/node/{lib/,}node_modules/npm/node_modules/`. They ship for exactly the
+  respective license terms. Each bundled package under `private/node/{lib/,}node_modules/npm/node_modules/`
+  carries its own license text in its own package directory where it ships one, and where it ships none,
+  the generated notice says so by name instead of implying coverage. They ship for exactly the
   reason above. No artifact here claims an archive is free of third-party package code; it is not.
 - **License and provenance notices** under `LICENSES/`: the Node distribution `LICENSE` (which contains
   the Node grant together with the notices for the components Node bundles, npm's Artistic-2.0 notice
@@ -217,9 +218,10 @@ The claim is scoped to the Cursor SDK on purpose. The archive **does** ship thir
 private runtime's own bundled npm and the packages npm bundles inside it, staged whole from the pinned Node
 distribution. npm is licensed separately from Node.js — its own `LICENSE` ships inside the staged tree and
 licenses the npm application under the Artistic License 2.0 — and each package npm bundles is licensed on its
-own terms by a license text in its own package directory, so each is attributed to the license that package
-declares. `LICENSES/THIRD-PARTY-NOTICES.md` is generated from the staged tree and names every bundled
-package that ships no license text of its own, so the notice never implies coverage the archive does not
+own terms by the license that package declares. Where such a package ships its own license text, it ships it
+in its own package directory. `LICENSES/THIRD-PARTY-NOTICES.md` is generated from the staged tree, reads
+every dependency directory in it including the nested ones, and names every bundled package that ships no
+license text of its own, so the notice never implies coverage the archive does not
 carry. By file count that npm tree is the bulk of an archive, and it is what makes operator provisioning
 work without a global toolchain. "This archive ships no third-party package code" is false of the archive
 these scripts build, so no document here says it; what each artifact states instead is which third-party
@@ -263,8 +265,9 @@ Stated rather than left to be discovered:
 The private Node runtime is MIT and its notices ship with it in `LICENSES/nodejs-LICENSE`. The npm it bundles
 and the packages npm bundles inside that npm are shipped too, and they are **not** under that MIT grant: npm
 licenses its own application under the Artistic License 2.0 in a `LICENSE` inside the staged npm tree, and each
-package npm bundles is licensed on its own terms by the license text in its own package directory. That npm
-tree is the third-party package code this archive redistributes. The Cursor SDK is proprietary and is **not**
+package npm bundles is licensed on its own terms by the license its own manifest declares, which it ships in
+its own package directory where it has one. That npm tree is the third-party package code this archive
+redistributes. The Cursor SDK is proprietary and is **not**
 shipped; see [Redistribution posture](#redistribution-posture) for the decision, the command, and where the
 position is recorded inside every archive.
 

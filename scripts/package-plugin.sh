@@ -17,9 +17,10 @@
 # and the dependencies npm bundles with it - because the provisioning command has to run
 # without a global Node or a global package manager. That code is NOT covered by the
 # Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
-# package npm bundles carries its own license text in its own package directory, so the
-# generated notice attributes each bundled component to the license that package declares
-# and names any bundled package that ships none.
+# package npm bundles is licensed on the terms its own manifest declares. So the
+# generated notice attributes each bundled component to that declared license, counts
+# every bundled package in the tree, and names any bundled package that ships no
+# license text of its own.
 #
 # The archive layout is not restated here. It is read from
 # cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the packager,
@@ -227,10 +228,12 @@ write_third_party_notices() {
     printf '  license terms.\n'
     printf -- '- The packages npm bundles under\n'
     printf '  %s\n' "$npm_modules"
-    printf '  each ship their own license text in their own package directory, so each bundled\n'
-    printf '  component is attributed to the license that package declares. The Node\n'
-    printf '  distribution license does not carry those texts, and no coverage by it is\n'
-    printf '  claimed here. What the staged tree actually contains:\n'
+    printf '  are each licensed on the terms their own package.json declares. Where such a\n'
+    printf '  package ships its own license text, it ships in that package directory; where it\n'
+    printf '  ships none, this archive redistributes none for it, and the coverage statement\n'
+    printf '  below names it rather than leaving it implied. The Node distribution license does\n'
+    printf '  not carry those texts, and no coverage by it is claimed here. What the staged tree\n'
+    printf '  actually contains, read from every dependency directory in it, nested ones included:\n'
     write_npm_license_coverage "$runtime" "$npm_staged" "$npm_root" "$npm_modules"
     printf '\n'
     printf -- '- Components the staged runtime reports about itself:\n'
@@ -279,7 +282,10 @@ write_third_party_notices() {
 # must not make.
 #
 # The inventory is read with the runtime this archive stages, the same way the locked
-# inventory below is, so both packagers print the same rows from the same tree.
+# inventory below is, so both packagers print the same rows from the same tree. It reaches
+# every dependency directory the tree has, not only the one npm bundles directly: a bundled
+# package may bundle packages of its own, and those ship in this archive too, so an
+# inventory that stopped at the top level would describe less than the archive carries.
 write_npm_license_coverage() {
   local runtime="$1" npm_staged="$2" npm_root="$3" npm_modules="$4"
   # The two archive-relative paths share the npm root prefix, so the dependency directory
@@ -287,26 +293,52 @@ write_npm_license_coverage() {
   "$runtime" -e '
     const fs = require("fs");
     const path = require("path");
-    const modules = path.join(process.argv[1], process.argv[2]);
+    const depDir = process.argv[2];
+    const modules = path.join(process.argv[1], depDir);
     const licenseText = /^licen[sc]e/i;
 
-    // npm bundles its dependencies as ordinary package directories, scoped names one
-    // level down. The enumeration is the staged filesystem rather than a list carried
-    // here, because a runtime staging a different npm ships a different tree.
-    const names = [];
-    let entries = [];
-    try { entries = fs.readdirSync(modules, { withFileTypes: true }); } catch { entries = []; }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith("@")) {
-        let scoped = [];
-        try { scoped = fs.readdirSync(path.join(modules, entry.name), { withFileTypes: true }); } catch { scoped = []; }
-        for (const inner of scoped) {
-          if (inner.isDirectory()) names.push(entry.name + "/" + inner.name);
-        }
-        continue;
+    // A symlinked dependency directory is a link into a tree staged elsewhere rather than
+    // code this archive ships here, and following one could reach a directory the walk has
+    // already inventoried. The directory name is the one the layout contract reported, for
+    // the same reason the walk starts where it does: spelling the name out here would stage
+    // the dependency directory of some other layout.
+    function nestedDependencyDir(packageDir) {
+      const nested = path.join(packageDir, depDir);
+      try {
+        return fs.lstatSync(nested).isDirectory() ? nested : null;
+      } catch {
+        return null;
       }
-      names.push(entry.name);
+    }
+
+    // npm bundles its dependencies as ordinary package directories, scoped names one level
+    // down. The enumeration is the staged filesystem rather than a list carried here,
+    // because a runtime staging a different npm ships a different tree. The walk is breadth
+    // first over the dependency directories it finds, so a dependency directory nested
+    // inside a bundled package is inventoried under the package that bundles it and
+    // reported by a path that says which one.
+    const names = [];
+    const pending = [modules];
+    while (pending.length > 0) {
+      const dir = pending.shift();
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries = []; }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const scoped = entry.name.startsWith("@");
+        let children = [entry];
+        if (scoped) {
+          let inner = [];
+          try { inner = fs.readdirSync(path.join(dir, entry.name), { withFileTypes: true }); } catch { inner = []; }
+          children = inner.filter((child) => child.isDirectory());
+        }
+        for (const child of children) {
+          const packageDir = scoped ? path.join(dir, entry.name, child.name) : path.join(dir, child.name);
+          names.push(path.relative(modules, packageDir).split(path.sep).join("/"));
+          const nested = nestedDependencyDir(packageDir);
+          if (nested) pending.push(nested);
+        }
+      }
     }
 
     const rows = names.sort().map((name) => {
@@ -332,9 +364,9 @@ write_npm_license_coverage() {
       console.log("  no bundled package depends on a notice this archive does not carry.");
     } else {
       console.log(`  ${rows.length} bundled packages, ${rows.length - uncovered.length} of them shipping a license text in their own package directory.`);
-      console.log(`  The ${uncovered.length} below ship NO license text anywhere in this archive. They are`);
-      console.log("  named here rather than left to be assumed covered. The license column is what");
-      console.log("  each package.json declares; this archive redistributes no license text for them:");
+      console.log(`  The ${uncovered.length} below ship no license text in their own package directory,`);
+      console.log("  and this archive redistributes none for them. They are named here rather than");
+      console.log("  left to be assumed covered. The license column is what each package.json declares:");
       console.log("");
       console.log("| bundled package | bundled version | declared license | license text shipped |");
       console.log("| --- | --- | --- | --- |");

@@ -269,12 +269,62 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			require.Contains(t, words, "bundled packages, all of them shipping a license text")
 			return
 		}
-		require.Contains(t, words, fmt.Sprintf("The %d below ship NO license text anywhere in this archive", len(uncovered)),
+		require.Contains(t, words, fmt.Sprintf("The %d below ship no license text in their own package directory", len(uncovered)),
 			"the notice has to state the uncovered set plainly rather than leave it implied")
 		for _, name := range uncovered {
 			require.Contains(t, words, "| "+name+" |",
 				"bundled package %s ships no license text and the notice has to name it", name)
 		}
+	})
+
+	t.Run("license_coverage_walks_every_dependency_tree_the_archive_ships", func(t *testing.T) {
+		// A bundled package can bundle packages of its own, in a node_modules of its own
+		// inside the tree npm bundles. Those directories ship in the archive, so a
+		// coverage statement derived from the top level of the tree alone describes less
+		// than the archive carries and names fewer packages than it redistributes code
+		// for. The notice presents this inventory as what the staged tree actually
+		// contains, so it has to be the whole tree.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := built.installRoot
+		notices := readFileText(t, filepath.Join(root,
+			filepath.FromSlash(archive.LicensesDir()), "THIRD-PARTY-NOTICES.md"))
+		words := strings.Join(strings.Fields(notices), " ")
+
+		bundled := filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMModulesPath()))
+		// Two derivations of the same number: one by descending from the dependency
+		// directories, the way the packagers enumerate, and one by counting the package
+		// manifests anywhere in the staged tree. A walk that stopped short cannot match
+		// both.
+		packages := bundledPackages(t, bundled)
+		total := bundledPackageManifestCount(t, bundled)
+		require.Equal(t, total, len(packages),
+			"the staged tree holds %d package manifests, so the enumeration has to name %d packages:\n%s",
+			total, total, strings.Join(packages, "\n"))
+
+		var uncovered []string
+		for _, name := range packages {
+			if !shipsLicenseText(t, filepath.Join(bundled, filepath.FromSlash(name))) {
+				uncovered = append(uncovered, name)
+			}
+		}
+		require.Contains(t, words, fmt.Sprintf("%d bundled packages, %d of them shipping a license text",
+			total, total-len(uncovered)),
+			"the notice has to count every package the staged tree ships, nested trees included")
+		if len(uncovered) == 0 {
+			require.Contains(t, words, "bundled packages, all of them shipping a license text")
+			return
+		}
+		// The rows have to be exactly the packages the staged tree leaves uncovered. A
+		// package reached only through a nested tree that ships no license text is
+		// named by its full path, or the disclosure misses the very packages a
+		// top-level walk leaves out.
+		var named []string
+		for _, row := range uncoveredNoticeRow.FindAllStringSubmatch(notices, -1) {
+			named = append(named, row[1])
+		}
+		require.ElementsMatch(t, uncovered, named,
+			"the notice has to name exactly the bundled packages the staged tree leaves without a license text")
 	})
 
 	t.Run("checksums_cover_every_file_including_plugin_private_ones", func(t *testing.T) {
@@ -1030,6 +1080,11 @@ func TestPackageArchive_BothVerifiersCrossCheckTheRecordedReleaseDigests(t *test
 // element: the one shape a script that restates that row has to write.
 var distPathElement = regexp.MustCompile(`\b` + regexp.QuoteMeta(packagelayout.BridgeDistDirName) + `[/\\]`)
 
+// uncoveredNoticeRow matches one row of the shipped notice's license-coverage table: the
+// four columns it prints for a bundled package that ships no license text of its own. The
+// capture is the package name, which is the column the disclosure turns on.
+var uncoveredNoticeRow = regexp.MustCompile(`(?m)^\| ([^|\n]+) \| [^|\n]* \| [^|\n]* \| no \|$`)
+
 // packageGateRequested reports whether this run opted into the native package gate.
 func packageGateRequested() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(packageGateEnv))) {
@@ -1708,34 +1763,112 @@ func mapsWithout(set map[string]struct{}, drop string) map[string]struct{} {
 	return out
 }
 
-// bundledPackages names the packages npm bundles inside its own tree, scoped names
-// included, read from the staged tree rather than from a list the test carries: the
-// runtime decides which packages it bundles, not this file.
+// bundledPackages names every package directory the staged npm tree holds, scoped names
+// included and nested trees included, as slash-separated paths relative to that tree:
+// the runtime decides which packages it bundles and where, not this file.
+//
+// The walk is breadth first over every dependency directory it reaches rather than over
+// the one npm bundles directly, because a bundled package may bundle packages of its own
+// in a nested node_modules. Those ship in the archive exactly as the top-level ones do, so
+// an inventory that stopped at the top level would describe less than the archive carries.
 func bundledPackages(tb testing.TB, modulesDir string) []string {
 	tb.Helper()
 
 	var out []string
-	entries, err := os.ReadDir(modulesDir)
-	require.NoError(tb, err)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if !strings.HasPrefix(entry.Name(), "@") {
-			out = append(out, entry.Name())
-			continue
-		}
-		scoped, scopeErr := os.ReadDir(filepath.Join(modulesDir, entry.Name()))
-		require.NoError(tb, scopeErr)
-		for _, inner := range scoped {
-			if inner.IsDir() {
-				out = append(out, entry.Name()+"/"+inner.Name())
-			}
-		}
+	for _, packageDir := range bundledPackageDirs(tb, modulesDir) {
+		rel, err := filepath.Rel(modulesDir, packageDir)
+		require.NoError(tb, err)
+		out = append(out, filepath.ToSlash(rel))
 	}
 	slices.Sort(out)
 	require.NotEmpty(tb, out, "the staged npm tree bundles no packages")
 	return out
+}
+
+// bundledPackageDirs returns the directories in a staged npm tree that hold a bundled
+// package, starting at the tree's own dependency directory and descending into each
+// package's nested dependency directory.
+func bundledPackageDirs(tb testing.TB, modulesDir string) []string {
+	tb.Helper()
+
+	var out []string
+	pending := []string{modulesDir}
+	for len(pending) > 0 {
+		dir := pending[0]
+		pending = pending[1:]
+		entries, err := os.ReadDir(dir)
+		require.NoError(tb, err)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			// A scope directory is not a package itself; the packages it holds are one
+			// level down.
+			children := []string{filepath.Join(dir, entry.Name())}
+			if strings.HasPrefix(entry.Name(), "@") {
+				scoped, scopeErr := os.ReadDir(filepath.Join(dir, entry.Name()))
+				require.NoError(tb, scopeErr)
+				children = nil
+				for _, inner := range scoped {
+					if inner.IsDir() {
+						children = append(children, filepath.Join(dir, entry.Name(), inner.Name()))
+					}
+				}
+			}
+			for _, child := range children {
+				out = append(out, child)
+				if nested := nestedDependencyDir(child); nested != "" {
+					pending = append(pending, nested)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// bundledPackageManifestCount counts the same package directories a second, independent
+// way: every directory in package position that carries a package.json, found by walking
+// the whole staged tree rather than by descending from its dependency directories.
+//
+// The notice's counts come from the packagers' own enumeration, so deriving the total
+// here is what makes a packager that stopped short of a nested tree fail instead of
+// agreeing with itself.
+func bundledPackageManifestCount(tb testing.TB, modulesDir string) int {
+	tb.Helper()
+
+	count := 0
+	require.NoError(tb, filepath.WalkDir(modulesDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() || path == modulesDir {
+			return nil
+		}
+		parent := filepath.Base(filepath.Dir(path))
+		scoped := strings.HasPrefix(parent, "@") &&
+			filepath.Base(filepath.Dir(filepath.Dir(path))) == "node_modules"
+		if parent != "node_modules" && !scoped {
+			return nil
+		}
+		if _, statErr := os.Stat(filepath.Join(path, "package.json")); statErr == nil {
+			count++
+		}
+		return nil
+	}))
+	return count
+}
+
+// nestedDependencyDir reports the dependency directory a bundled package carries inside
+// itself, or the empty string when it has none. A symlinked one is a link into a tree
+// staged elsewhere rather than bundled code shipped here, and following it could revisit
+// a directory this walk has already read.
+func nestedDependencyDir(packageDir string) string {
+	nested := filepath.Join(packageDir, "node_modules")
+	info, err := os.Lstat(nested)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return nested
 }
 
 // shipsLicenseText reports whether one bundled package carries a license text in its

@@ -47,8 +47,9 @@ manager. They are **not** covered by the Node.js MIT grant: npm ships its own li
 inside the tree at `private/node/{lib/,}node_modules/npm/LICENSE`, which licenses the npm
 application under the Artistic License 2.0 and states that npm's bundled Node package
 dependencies are licensed on their respective license terms, and each bundled package
-carries its own license text in its own package directory.
-`LICENSES/THIRD-PARTY-NOTICES.md` is generated from the staged tree and names any bundled
+carries its own license text in its own package directory where it ships one.
+`LICENSES/THIRD-PARTY-NOTICES.md` is generated from the staged tree, reads every
+dependency directory in it including the nested ones, and names any bundled
 package that ships no license text of its own, so the notice never claims coverage the
 archive does not carry. The archive is not free of third-party package code; it ships
 exactly that, and no notice in it claims otherwise.

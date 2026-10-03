@@ -18,9 +18,10 @@
     and the dependencies npm bundles with it - because the provisioning command has to run
     without a global Node or a global package manager. That code is NOT covered by the
     Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
-    package npm bundles carries its own license text in its own package directory, so the
-    generated notice attributes each bundled component to the license that package
-    declares and names any bundled package that ships none.
+    package npm bundles is licensed on the terms its own manifest declares. So the
+    generated notice attributes each bundled component to that declared license, counts
+    every bundled package in the tree, and names any bundled package that ships no
+    license text of its own.
 
     The archive layout is not restated here. It is read from
     cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the
@@ -415,9 +416,12 @@ function Resolve-LockEntry {
 # must not make.
 #
 # The enumeration is the staged filesystem rather than a list carried here, because a
-# runtime staging a different npm ships a different tree. Names are ordered with an
-# ordinal comparison because Sort-Object would collate case-insensitively and disagree
-# with the shell packager's row order for the same tree.
+# runtime staging a different npm ships a different tree. It reaches every dependency
+# directory the tree has, not only the one npm bundles directly: a bundled package may
+# bundle packages of its own, and those ship in this archive too, so an inventory that
+# stopped at the top level would describe less than the archive carries. Names are ordered
+# with an ordinal comparison because Sort-Object would collate case-insensitively and
+# disagree with the shell packager's row order for the same tree.
 function Write-NPMLicenseCoverage {
     param(
         [string]$StagedNPMRoot,
@@ -429,30 +433,41 @@ function Write-NPMLicenseCoverage {
     # The two archive-relative paths share the npm root prefix, so the dependency directory
     # name is read out of the layout contract rather than written into this script.
     $modulesRel = $NPMModules.Substring($NPMRoot.Length + 1)
-    $modulesPath = Join-Path $StagedNPMRoot ($modulesRel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $separator = [string][System.IO.Path]::DirectorySeparatorChar
+    $modulesPath = Join-Path $StagedNPMRoot ($modulesRel -replace '/', $separator)
     if (-not (Test-Path -LiteralPath $modulesPath -PathType Container)) {
         $Lines.Add('  (this npm tree bundles no third-party packages)')
         return
     }
 
     # npm bundles its dependencies as ordinary package directories, scoped names one level
-    # down.
+    # down. The walk is breadth first over the dependency directories it finds, so a
+    # dependency directory nested inside a bundled package is inventoried under the package
+    # that bundles it and reported by a path that says which one.
     $names = [System.Collections.Generic.List[string]]::new()
-    foreach ($entry in Get-ChildItem -LiteralPath $modulesPath -Directory -Force) {
-        if ($entry.Name.StartsWith('@')) {
-            foreach ($scoped in Get-ChildItem -LiteralPath $entry.FullName -Directory -Force) {
-                $names.Add("$($entry.Name)/$($scoped.Name)")
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue('')
+    while ($pending.Count -gt 0) {
+        $prefix = $pending.Dequeue()
+        $dir = if ($prefix) { Join-Path $modulesPath ($prefix -replace '/', $separator) } else { $modulesPath }
+        foreach ($entry in Get-ChildItem -LiteralPath $dir -Directory -Force) {
+            $scoped = $entry.Name.StartsWith('@')
+            $packages = if ($scoped) { @(Get-ChildItem -LiteralPath $entry.FullName -Directory -Force) } else { @($entry) }
+            foreach ($package in $packages) {
+                $leaf = if ($scoped) { "$($entry.Name)/$($package.Name)" } else { $package.Name }
+                $name = if ($prefix) { "$prefix/$leaf" } else { $leaf }
+                $names.Add($name)
+                $nested = Get-NestedDependencyDir $package.FullName $modulesRel
+                if ($nested) { $pending.Enqueue("$name/$modulesRel") }
             }
-            continue
         }
-        $names.Add($entry.Name)
     }
     $names.Sort([System.StringComparer]::Ordinal)
 
     $uncovered = [System.Collections.Generic.List[string]]::new()
     $shippedCount = 0
     foreach ($name in $names) {
-        $dir = Join-Path $modulesPath ($name -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+        $dir = Join-Path $modulesPath ($name -replace '/', $separator)
         $manifest = Read-Manifest $dir
         $hasText = @(Get-ChildItem -LiteralPath $dir -File -Force |
             Where-Object { $_.Name -match '(?i)^licen[sc]e' }).Count -gt 0
@@ -472,14 +487,28 @@ function Write-NPMLicenseCoverage {
         $Lines.Add('  no bundled package depends on a notice this archive does not carry.')
     } else {
         $Lines.Add("  $($names.Count) bundled packages, $shippedCount of them shipping a license text in their own package directory.")
-        $Lines.Add("  The $($uncovered.Count) below ship NO license text anywhere in this archive. They are")
-        $Lines.Add('  named here rather than left to be assumed covered. The license column is what')
-        $Lines.Add('  each package.json declares; this archive redistributes no license text for them:')
+        $Lines.Add("  The $($uncovered.Count) below ship no license text in their own package directory,")
+        $Lines.Add('  and this archive redistributes none for them. They are named here rather than')
+        $Lines.Add('  left to be assumed covered. The license column is what each package.json declares:')
         $Lines.Add('')
         $Lines.Add('| bundled package | bundled version | declared license | license text shipped |')
         $Lines.Add('| --- | --- | --- | --- |')
         foreach ($row in $uncovered) { $Lines.Add($row) }
     }
+}
+
+# Get-NestedDependencyDir reports the dependency directory a bundled package carries inside
+# itself, or nothing when it has none. The directory name comes from the layout contract for
+# the same reason the walk's starting point does: a script that spelled it out could stage
+# the previous layout's tree. A reparse point is a link into a tree staged elsewhere rather
+# than code this archive ships here, and following one could reach a directory the walk has
+# already inventoried.
+function Get-NestedDependencyDir([string]$PackageDir, [string]$ModulesDir) {
+    $nested = Join-Path $PackageDir $ModulesDir
+    $item = Get-Item -LiteralPath $nested -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.PSIsContainer) { return '' }
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return '' }
+    return $nested
 }
 
 # Read-Manifest reads one staged package.json, answering an empty result for a package
@@ -556,10 +585,12 @@ function Write-ThirdPartyNotices {
     $lines.Add('  license terms.')
     $lines.Add('- The packages npm bundles under')
     $lines.Add("  $PrivateNPMModules")
-    $lines.Add('  each ship their own license text in their own package directory, so each bundled')
-    $lines.Add('  component is attributed to the license that package declares. The Node')
-    $lines.Add('  distribution license does not carry those texts, and no coverage by it is')
-    $lines.Add('  claimed here. What the staged tree actually contains:')
+    $lines.Add('  are each licensed on the terms their own package.json declares. Where such a')
+    $lines.Add('  package ships its own license text, it ships in that package directory; where it')
+    $lines.Add('  ships none, this archive redistributes none for it, and the coverage statement')
+    $lines.Add('  below names it rather than leaving it implied. The Node distribution license does')
+    $lines.Add('  not carry those texts, and no coverage by it is claimed here. What the staged tree')
+    $lines.Add('  actually contains, read from every dependency directory in it, nested ones included:')
     Write-NPMLicenseCoverage -StagedNPMRoot $StagedNPMRoot `
         -NPMRoot $PrivateNPMRoot -NPMModules $PrivateNPMModules -Lines $lines
     $lines.Add('')
