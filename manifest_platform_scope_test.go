@@ -57,8 +57,9 @@ func TestManifestScope_TemplateDeclaresExactlyThePlatformsThePipelineAssembles(t
 		contract, assembled)
 }
 
-// TestManifestScope_RendererRefusesAPlatformThePipelineCannotAssemble keeps the
-// renderer from emitting a manifest for a platform no archive exists for.
+// TestManifestScope_RendererRefusesAPlatformThePipelineCannotAssemble holds the
+// renderer's own acceptance behaviour to the platforms the pipeline natively
+// assembles.
 //
 // The packaging scripts refuse to cross-compile, but the renderer is a separate
 // entry point a maintainer can invoke directly with a hand-built staged tree. It has
@@ -66,11 +67,24 @@ func TestManifestScope_TemplateDeclaresExactlyThePlatformsThePipelineAssembles(t
 // nothing else, in both directions: accepting one it cannot assemble lets a rendered
 // manifest advertise support that no artifact and no native run ever backed, and
 // refusing one it can assemble breaks the pipeline on its own platform.
+//
+// The expected set is read from the `package` runner matrix, not from
+// packagelayout.SupportedPlatforms(). Reading the contract under test would make this
+// test agree with whatever that contract says: widening it to a platform the matrix
+// has no runner for would move the expectation to match the renderer and the test
+// would stay green on exactly the overclaim it exists to catch. The matrix is the
+// authoritative evidence - a platform is assemblable only if some native runner
+// assembles it - so it is what the renderer's acceptance is compared against.
+//
+// This test guards the renderer's behaviour and nothing else. Whether the template
+// and internal/packagelayout declare the same set as the matrix is
+// TestManifestScope_TemplateDeclaresExactlyThePlatformsThePipelineAssembles, which
+// compares those two declarations to the matrix directly.
 func TestManifestScope_RendererRefusesAPlatformThePipelineCannotAssemble(t *testing.T) {
 	t.Parallel()
 
-	assembled := packagelayout.SupportedPlatforms()
-	require.NotEmpty(t, assembled, "no platform is declared assemblable")
+	assembled := nativePackageMatrixPlatforms(t)
+	require.NotEmpty(t, assembled, "no platform has a native runner in the package matrix")
 
 	for _, goos := range []string{"windows", "linux", "darwin"} {
 		for _, goarch := range []string{"amd64", "arm64", "386"} {
