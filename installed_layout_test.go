@@ -115,6 +115,28 @@ func TestInstalledLayout_PrivateCompanionResolution(t *testing.T) {
 		require.Equal(t, privateNode, strings.TrimSpace(string(selfRaw)))
 	})
 
+	t.Run("unprovisioned_sdk_is_an_explicit_prerequisite_for_the_connector", func(t *testing.T) {
+		// The Cursor SDK is not redistributed, so an installed tree only serves
+		// requests once the operator has provisioned it. The connector has to report
+		// that as a missing prerequisite carrying the exact command, not as a provider
+		// error and not by installing anything itself.
+		layout, _, _ := newInstalledLauncherLayoutWithSDK(t, false)
+		decoys := newBridgeDecoys(t, false)
+
+		instanceID := "installed-unprovisioned-sdk"
+		pluginProc := startInstalledPlugin(t, layout, decoys.workDir, childEnvWithPathOnly(decoys.pathDir))
+
+		token := negotiateToken(t, pluginProc)
+		require.NoError(t, configureInstance(t, pluginProc, token, instanceID, instanceConfigYAML("", t.TempDir())))
+
+		_, err := pluginProc.listModels(t, instanceID)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not provisioned")
+		require.Contains(t, err.Error(), pinnedSDKVersion)
+		require.Contains(t, err.Error(), "ci --omit=dev")
+		require.NotContains(t, err.Error(), installedPluginAPIKey)
+	})
+
 	t.Run("explicit_override_is_honored_without_packaged_companion", func(t *testing.T) {
 		layout := newInstalledLayout(t, false)
 		decoys := newBridgeDecoys(t, false)
@@ -407,12 +429,25 @@ func exeSuffix() string {
 	return ""
 }
 
+// pinnedSDKVersion is the SDK version the bridge manifest in this test's installed
+// layout pins, and the version an operator has to provision for it.
+const pinnedSDKVersion = "1.0.23"
+
 // newInstalledLauncherLayout installs the packaged private runtime layout around
 // the real launcher executable: the launcher at private/bridge, the private Node
 // runtime at private/node, and the bridge entry at private/bridge/bin. The
 // private runtime is the deterministic fake Node binary, which records the path
-// of the runtime binary that actually served a request.
+// of the runtime binary that actually served a request. The tree is provisioned,
+// because the launcher refuses to serve one that is not.
 func newInstalledLauncherLayout(t *testing.T) (installedLayout, string, string) {
+	t.Helper()
+	return newInstalledLauncherLayoutWithSDK(t, true)
+}
+
+// newInstalledLauncherLayoutWithSDK builds the same layout with or without the
+// operator-provisioned SDK tree, so both the serving path and the missing-prerequisite
+// path can be exercised through the connector.
+func newInstalledLauncherLayoutWithSDK(t *testing.T, provisioned bool) (installedLayout, string, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "plugin root with spaces")
 	outer := installBinary(t, filepath.Join(root, "bin", installedOuterName+exeSuffix()), buildOuterPluginExe(t))
@@ -427,6 +462,21 @@ func newInstalledLauncherLayout(t *testing.T) (installedLayout, string, string) 
 	require.NoError(t, os.MkdirAll(filepath.Dir(entry), 0o755))
 	script := fmt.Sprintf(`{"mode":"bridge","selfLog":%s}`, strconv.Quote(runtimeSelfLog))
 	require.NoError(t, os.WriteFile(entry, []byte(script), 0o644))
+
+	// The launcher checks the operator-provisioned SDK tree before it starts the
+	// runtime, so an installed tree here is a provisioned one: the shipped bridge
+	// manifest pins the SDK and the provisioned package metadata resolves to that pin.
+	// What this layout proves is which runtime served the request, not the SDK's
+	// presence; the provisioning preflight has its own tests.
+	require.NoError(t, os.WriteFile(filepath.Join(bridgeDir, "package.json"),
+		[]byte(`{"name":"lip-cursor-sdk-bridge","version":"0.1.0","dependencies":{"@cursor/sdk":"`+
+			pinnedSDKVersion+`"}}`), 0o644))
+	if provisioned {
+		sdkMetadata := filepath.Join(bridgeDir, "node_modules", "@cursor", "sdk", "package.json")
+		require.NoError(t, os.MkdirAll(filepath.Dir(sdkMetadata), 0o755))
+		require.NoError(t, os.WriteFile(sdkMetadata,
+			[]byte(`{"name":"@cursor/sdk","version":"`+pinnedSDKVersion+`"}`), 0o644))
+	}
 
 	return installedLayout{root: root, outer: outer}, privateNode, runtimeSelfLog
 }

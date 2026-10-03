@@ -3,15 +3,29 @@
     Verify an assembled Cursor SDK plugin install tree.
 
 .DESCRIPTION
-    Reports the exact files of an install tree, the checksum of every one of them,
-    and the private runtime metadata, and fails when the tree does not match what
-    the release claims. It checks that every required archive entry exists, that
-    the file set and the checksum record agree in both directions, that every
-    digest matches including the plugin-private files, that the closed host
+    Reports the exact files of an install tree, the checksum of every shipped one of
+    them, and the private runtime metadata, and fails when the tree does not match
+    what the release claims. It checks that every required archive entry exists, that
+    the shipped file set and the checksum record agree in both directions, that every
+    shipped digest matches including the plugin-private files, that the closed host
     manifest carries the plugin's identity and export posture and claims only the
-    platform the archive was assembled on, and that the shipped private runtime
-    and the plugin-private bridge launcher actually run and report the SDK version
-    the bridge pins.
+    platform the archive was assembled on, and that the shipped private runtime and
+    the plugin-private bridge launcher actually run.
+
+    The Cursor SDK is proprietary and is not redistributed, so an installed tree
+    carries it only after the operator provisions it against the runtime the archive
+    ships. Two tree states decide what a run means, and both are checked in full:
+
+      -TreeState installed (default) an installed tree. The operator-provisioned
+        dependency tree is outside the shipped checksum record - the plugin
+        authenticates what it ships, the operator authenticates what they provisioned -
+        so its files are neither "present but not listed" nor digested here. What has
+        to hold instead is the SDK requirement: the tree resolves the pinned SDK
+        version, or the run fails with the exact provisioning command.
+
+      -TreeState shipped a released archive nobody has provisioned yet. It must contain
+        no third-party package code at all, because shipping the SDK or its dependency
+        closure would assert a redistribution right nobody has verified.
 
     The archive layout is not restated here. It is read from
     cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout.
@@ -21,8 +35,8 @@
     verification that needed a global Node would prove the opposite of what it
     claims.
 
-    The checksums cover plugin-private files, but nothing here claims the host
-    authenticates them: the host's manifest digest stays the authority for the
+    The checksums cover the shipped plugin-private files, but nothing here claims the
+    host authenticates them: the host's manifest digest stays the authority for the
     outer executable only.
 
 .PARAMETER PackageRoot
@@ -35,12 +49,16 @@
     Platform the install tree must have been assembled for. Defaults to the
     platform recorded in the tree; a tree for another platform cannot be verified
     here because its private runtime cannot be run natively.
+
+.PARAMETER TreeState
+    installed (default) or shipped. See the description above.
 #>
 [CmdletBinding()]
 param(
     [string]$PackageRoot = '',
     [string]$ReportPath = '',
-    [string]$ExpectPlatform = ''
+    [string]$ExpectPlatform = '',
+    [string]$TreeState = ''
 )
 
 Set-StrictMode -Version Latest
@@ -127,6 +145,26 @@ function Get-JsonField($Record, [string]$Name) {
     return $property.Value
 }
 
+# Get-PackageVersion reads the version one package manifest declares. It reads the file
+# rather than importing the package: the fact is the metadata, and importing the SDK is
+# the thing the provisioning check exists to avoid.
+function Get-PackageVersion([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try {
+        return [string](Get-JsonField (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) 'version')
+    } catch {
+        return ''
+    }
+}
+
+# Get-PinnedSDKVersion reads the exact SDK version the shipped bridge manifest pins.
+function Get-PinnedSDKVersion([string]$Path, [string]$PackageName) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $dependencies = Get-JsonField (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) 'dependencies'
+    if (-not $dependencies) { return '' }
+    return [string](Get-JsonField $dependencies $PackageName)
+}
+
 # Get-SamePath compares two filesystem paths without caring about case or the
 # Windows extended-length prefix.
 function Test-SamePath([string]$Left, [string]$Right) {
@@ -179,7 +217,18 @@ if ($archivePlatform -ne $hostPlatform) {
 }
 $layout = $hostLayout
 
+# The tree states are part of the layout contract too, so this script does not spell a
+# state of its own: an unrecognized request is a usage error naming the states the
+# archive contract knows, so automation can tell it from a verification failure.
+if (-not $TreeState) { $TreeState = 'installed' }
+$knownStates = @($hostLayout.tree_states)
+if ($knownStates -notcontains $TreeState) {
+    UsageError "-TreeState $TreeState is not one of: $($knownStates -join ', ')"
+}
+$shippedTree = $TreeState -eq 'shipped'
+
 Add-Line "install root: $PackageRoot"
+Add-Line "tree state: $TreeState"
 
 # Protected install ownership: a plugin root any local user can write lets that user
 # replace a checksummed companion after verification, which is exactly the mutation
@@ -208,12 +257,16 @@ foreach ($rel in $layout.required_entries) {
     Add-Finding "required archive entry is missing: $rel; reinstall the Cursor plugin package from a complete archive"
 }
 
-# 2. Checksum record and file set. The record has to describe exactly the files
-#    present: an unlisted file is unaccounted-for content, a listed file that is
-#    gone is a broken install.
+# 2. Checksum record and file set. The record covers shipped files only, so the shipped
+#    side still has to agree in both directions - an unlisted shipped file is
+#    unaccounted-for content, a listed file that is gone is a broken install - while the
+#    operator-provisioned tree is explicitly outside it: the plugin authenticates what
+#    it ships and the operator authenticates what they provisioned. The provisioned
+#    prefix is the whole of that scope, and it comes from the layout contract.
 $checksumsPath = Join-Path $PackageRoot $layout.checksums
 $listed = [ordered]@{}
 $checksumOrder = [System.Collections.Generic.List[string]]::new()
+$provisionedPrefix = [string]$layout.provisioned_prefix
 if (-not (Test-Path -LiteralPath $checksumsPath)) {
     Add-Finding "checksum record is missing: $($layout.checksums); reinstall the Cursor plugin package from a complete archive"
 } else {
@@ -234,6 +287,12 @@ if (-not (Test-Path -LiteralPath $checksumsPath)) {
             Add-Finding "duplicate checksum line for $rel"
             continue
         }
+        # A record line for a provisioned file would claim the plugin authenticated the
+        # operator's own npm resolution, which is the one claim the record scope does
+        # not make.
+        if ($rel.StartsWith($provisionedPrefix, [System.StringComparison]::Ordinal)) {
+            Add-Finding "checksum record lists the operator-provisioned ${rel}: $($layout.checksums) covers shipped files only; the plugin authenticates what it ships, the operator authenticates what they provisioned"
+        }
         $listed[$rel] = $digest
         $checksumOrder.Add($rel)
     }
@@ -241,8 +300,19 @@ if (-not (Test-Path -LiteralPath $checksumsPath)) {
 
 $onDisk = @(Get-RelativeFiles $PackageRoot)
 $mismatched = 0
+$provisionedCount = 0
 foreach ($rel in $onDisk) {
     if ($rel -eq $layout.checksums) { continue }
+    if ($rel.StartsWith($provisionedPrefix, [System.StringComparison]::Ordinal)) {
+        # Outside the shipped record by design, so it is counted and reported rather
+        # than digested. In a shipped archive its presence at all is the finding: the
+        # archive must contain no third-party package code.
+        $provisionedCount++
+        if ($shippedTree) {
+            Add-Finding "shipped archive contains the third-party package code ${rel}: the Cursor SDK is not redistributed, so the archive ships no $($layout.bridge_modules); the operator provisions it against the shipped runtime with: $($layout.sdk_provision_command)"
+        }
+        continue
+    }
     if (-not $listed.Contains($rel)) {
         Add-Finding "file is present but not listed in $($layout.checksums): $rel; the archive does not account for this file"
         continue
@@ -254,6 +324,7 @@ foreach ($rel in $onDisk) {
     }
 }
 foreach ($rel in $checksumOrder) {
+    if ($rel.StartsWith($provisionedPrefix, [System.StringComparison]::Ordinal)) { continue }
     if ($onDisk -notcontains $rel) {
         Add-Finding "file listed in $($layout.checksums) is missing: ${rel}; reinstall the Cursor plugin package"
     }
@@ -267,9 +338,10 @@ Add-Line "platform: $($layout.platform) (natively assembled and validated)"
 Add-Line "packaging variant: $(if ($variant) { $variant } else { '(no release metadata)' })"
 Add-Line "external node required: $(if ($null -eq $externalNode) { 'unknown' } elseif ($externalNode) { 'yes' } else { 'no' })"
 Add-Line "node on PATH: not required; $($layout.private_runtime) is the only runtime this tree starts"
-Add-Line "files: $($onDisk.Count) present, $($listed.Count) checksummed, $mismatched checksum mismatch(es)"
+Add-Line "files: $($onDisk.Count) present ($($onDisk.Count - $provisionedCount) shipped, $provisionedCount operator-provisioned), $($listed.Count) checksummed, $mismatched checksum mismatch(es)"
 Add-Line "plugin-private files checksummed: $privateCount of $($listed.Count) under $($layout.private_prefix)"
 Add-Line ('checksums: {0} (sha256, <digest>{1}<install-root-relative path>)' -f $layout.checksums, $layout.checksum_separator)
+Add-Line "checksum record scope: shipped files only; $provisionedPrefix is operator-provisioned and outside the record, so the plugin authenticates what it ships and the operator authenticates what they provisioned"
 Add-Line "host digest authority: $($layout.manifest) sha256 covers $($layout.outer_executable) only; nothing here claims the host authenticates companion files"
 
 # 3. Closed host manifest: identity, export posture, and the platform claim.
@@ -344,19 +416,48 @@ if (Test-Path -LiteralPath $manifestPath) {
     }
 }
 
-# 4. Release metadata, and the private runtime and bridge that actually run.
+# 4. The SDK requirement, the release metadata, and the private runtime and bridge that
+#    actually run.
+#
+#    The shipped bridge manifest is the authority for the pinned SDK version: the
+#    release metadata is cross-checked against it rather than trusted on its own, because
+#    the manifest is a shipped file the record cannot contradict. What the tree has to
+#    resolve is the operator's own installation, which is outside the shipped record, so
+#    it is checked as a requirement and never as a digest.
+$sdkPackageName = [string]$layout.sdk_package_name
+$requiredVersion = Get-PinnedSDKVersion (Join-Path $PackageRoot $layout.bridge_package_json) $sdkPackageName
+if (-not $requiredVersion) {
+    Add-Finding "the shipped $($layout.bridge_package_json) pins no $sdkPackageName version, so no SDK requirement can be verified; reinstall the Cursor plugin package from a complete archive"
+    $requiredVersion = '(unknown)'
+}
+$provisionedVersion = Get-PackageVersion (Join-Path $PackageRoot $layout.sdk_package_json)
+
 if ($script:Record) {
     $record = $script:Record
-    $sdkVersion = [string](Get-JsonField $record 'cursor_sdk_version')
-    $pinnedVersion = [string](Get-JsonField $record 'cursor_sdk_pinned_version')
-    if ($pinnedVersion -and $sdkVersion -and $sdkVersion -ne $pinnedVersion) {
-        Add-Finding "release metadata records SDK $sdkVersion but the bridge pins $pinnedVersion"
+    $recordedRequired = [string](Get-JsonField $record 'cursor_sdk_required_version')
+    if ($recordedRequired -and $recordedRequired -ne $requiredVersion) {
+        Add-Finding "release metadata records cursor_sdk_required_version $recordedRequired but the shipped $($layout.bridge_package_json) pins $requiredVersion; the record does not describe this archive"
     }
-    Add-Line "sdk version (staged production tree): $sdkVersion (pinned $pinnedVersion)"
+    if ([bool](Get-JsonField $record 'cursor_sdk_bundled')) {
+        Add-Finding "release metadata records cursor_sdk_bundled true: the Cursor SDK is proprietary and is not redistributed, so no archive bundles it"
+    }
     Add-Line "node engine required: $(Get-JsonField $record 'bridge_node_engine')"
     Add-Line "private runtime source: $(Get-JsonField $record 'private_runtime_source')"
     Add-Line "tested host artifact sha256: $(if (Get-JsonField $record 'tested_host_artifact_sha256') { Get-JsonField $record 'tested_host_artifact_sha256' } else { '(not certified in this archive)' })"
+}
 
+Add-Line "sdk provisioning command: $($layout.sdk_provision_command)"
+if ($shippedTree) {
+    Add-Line "sdk: not redistributed, required $requiredVersion at run time, provisioned: no (operator-provisioned; $($layout.private_npm_cli) ships so the command above needs no global npm)"
+} elseif (-not $provisionedVersion) {
+    Add-Finding "the Cursor SDK is not provisioned: $($layout.sdk_package_json) not found in this installed tree, and this archive ships no $sdkPackageName; required version $requiredVersion. Provision it once with: $($layout.sdk_provision_command)"
+} elseif ($provisionedVersion -ne $requiredVersion) {
+    Add-Finding "the provisioned Cursor SDK is $provisionedVersion but the shipped $($layout.bridge_package_json) pins $requiredVersion; provision the pinned version with: $($layout.sdk_provision_command)"
+} else {
+    Add-Line "sdk: required $requiredVersion, provisioned $provisionedVersion"
+}
+
+if ($script:Record) {
     $privateRuntime = Join-Path $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
     $launcher = Join-Path $PackageRoot ($layout.launcher -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
 
@@ -394,12 +495,18 @@ if ($script:Record) {
         }
 
         # The launcher starts the packaged runtime and runs the bridge's own doctor,
-        # which resolves the SDK version from the staged production dependency tree.
-        $doctor = Invoke-Probe $launcher @('doctor')
-        if ($doctor.ExitCode -ne 0) {
-            Add-Finding "the private bridge launcher did not pass doctor through the private runtime: $($doctor.Output)"
+        # which resolves the installed SDK. That is an installed-tree question: on a
+        # shipped archive the bridge cannot serve a request until the operator provisions
+        # it, and the SDK requirement above is the finding that says so.
+        if ($shippedTree) {
+            Add-Line "bridge doctor: not run; a shipped archive cannot serve a request until the operator provisions $($layout.bridge_modules)"
+        } else {
+            $doctor = Invoke-Probe $launcher @('doctor')
+            if ($doctor.ExitCode -ne 0) {
+                Add-Finding "the private bridge launcher did not pass doctor through the private runtime: $($doctor.Output)"
+            }
+            Add-Line "bridge doctor (launcher -> private runtime -> bridge entry): $($doctor.Output.Trim())"
         }
-        Add-Line "bridge doctor (launcher -> private runtime -> bridge entry): $($doctor.Output.Trim())"
     } else {
         Add-Finding "the private runtime or the private bridge launcher is missing, so no runtime metadata could be probed"
     }

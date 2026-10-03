@@ -41,14 +41,29 @@ The plugin-private bridge launcher exists as source in `cmd/lip-cursor-sdk-bridg
 Native archive assembly exists as tooling in this repository; see
 [Native archives](#native-archives). **No plugin release has been published and none is published from
 this branch:** there is no tag and no GitHub release, `compatibility.json` in a built archive records no
-tested host artifact, and the redistribution rights for the proprietary Cursor SDK tree are still
-unconfirmed - see [Licensing status](#licensing-status).
+tested host artifact, and no redistribution right is claimed for the proprietary Cursor SDK, because the
+archive does not ship it at all - see [Redistribution posture](#redistribution-posture).
+
+## Installing and provisioning (operators)
+
+Start at [`docs/installation.md`](docs/installation.md). In short:
+
+1. Unpack the released archive's single directory into the Go-LIP plugin root and install
+   it through Go-LIP's existing trusted plugin mechanism. The host binary is unchanged.
+2. Provision the Cursor SDK once, out of band, with the runtime the archive ships:
+   `cd <plugin-root>/private/bridge && ../node/node[.exe] ../node/<npm-root>/bin/npm-cli.js ci --omit=dev`.
+
+**A system Node is not required, and neither is a global npm.** The archive carries the
+runtime *and* that runtime's own npm, and the command above needs neither from `PATH`.
+npm specifically, not any package manager: the bridge pins `undici` to the security-fixed
+`6.28.1` through npm `overrides`, whose semantics other package managers resolve
+differently.
 
 ## Native archives
 
 `scripts/package-plugin.{sh,ps1}` assembles one install tree and one per-platform archive for the machine
-it runs on, and `scripts/verify-package.{sh,ps1}` verifies an install tree and reports its exact files,
-their checksums, and its private runtime metadata.
+it runs on, and `scripts/verify-package.{sh,ps1}` verifies an install tree and reports its exact shipped
+files, their checksums, its private runtime metadata, and its SDK provisioning state.
 
 ```text
 plugin.backendplugin.json
@@ -56,66 +71,80 @@ bin/lip-backend-cursorsdk[.exe]
 private/bridge/lip-cursor-sdk-bridge[.exe]
 private/bridge/bin/lip-cursor-sdk-bridge.js
 private/bridge/dist/
-private/bridge/node_modules/
 private/bridge/package.json
+private/bridge/package-lock.json
 private/node/node[.exe]
+private/node/{lib/,}node_modules/npm/          that runtime's own bundled npm
 compatibility.json
 checksums.sha256
 LICENSES/
 ```
 
+There is no `private/bridge/node_modules/` in an archive: the Cursor SDK is not
+redistributed, and the operator provisions it against the shipped runtime. See
+[Redistribution posture](#redistribution-posture).
+
 That layout lives in exactly one place, [`internal/packagelayout`](internal/packagelayout), which the
 packaging scripts read through `cmd/lip-cursor-sdk-packaging` and the private launcher consumes directly.
 Neither packager spells out a layout name: every archive file name, the plugin-private prefix, and every
-staging directory - the bridge entry, the built `dist/`, and the production `node_modules/` - is read from
-the report. `TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout` fails when one of those literals appears
-in a packaging script, and it requires both packagers to derive their staging paths from the report; it is a
-guard over that fixed literal list, not a proof that no script could restate anything. That is why the
-launcher resolves the same files the archive stages instead of keeping a second copy of the layout.
+staging directory - the bridge entry, the built `dist/`, the lockfile that pins the SDK, and the runtime's
+bundled npm - is read from the report, as is the operator-provisioned prefix the verifier keeps out of the
+checksum record. `TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout` fails when one of those literals
+appears in a packaging script, and it requires both packagers to derive their staging paths from the report
+and both verifiers to read the provisioning contract from it; it is a guard over that fixed literal list,
+not a proof that no script could restate anything. That is why the launcher resolves the same files the
+archive stages instead of keeping a second copy of the layout.
 
 What the packager stages, and only this:
 
 - **Production JavaScript only.** `npm ci` and `npm run build` run in `bridge-node/`; the dev toolchain
   (TypeScript, tsx, esbuild) never enters the archive. `TestPackageArchive` fails if any dev dependency is
   staged.
-- **Production npm dependencies only.** `npm ci --omit=dev` runs against the bridge's own
-  `package.json` and `package-lock.json` in the staging directory, and the lockfile is removed afterwards:
-  nothing in the archive needs a package manager at run time.
-- **SDK-version metadata.** `private/bridge/package.json` and the staged
-  `node_modules/@cursor/sdk/package.json` are what the bridge entry reads to resolve its own version and
-  to verify the pinned SDK. `cmd/lip-cursor-sdk-packaging render` refuses to describe a tree whose staged
-  SDK version does not match the bridge's pin.
-- **The private Node runtime**, taken from an official Node distribution when one is supplied
-  (`--node-dist <zip|tar.gz|dir>`, digest-checked against `nodejs.org/dist/<version>/SHASUMS256.txt` by
-  the release operator), otherwise from `--node-runtime`/`LIP_PACKAGE_NODE_RUNTIME`, otherwise from the
-  `node` on `PATH` at build time. `compatibility.json` records which of the three it was, in
-  `private_runtime_source`: `nodejs-official-distribution:<artifact>` only for a distribution, and
+- **The bridge manifest and the lockfile, and no dependency closure.** `private/bridge/package.json` pins
+  the SDK version the bridge verifies at run time, and `private/bridge/package-lock.json` pins the exact
+  closure and the `undici` override, so an operator's `npm ci` resolves the versions this release was built
+  against. `cmd/lip-cursor-sdk-packaging render` refuses to describe a staged tree that carries third-party
+  package code, so a packager that staged one fails instead of publishing a bundle it must not ship.
+- **The private Node runtime together with its own bundled npm**, taken from an official Node
+  distribution when one is supplied (`--node-dist <zip|tar.gz|dir>`, digest-checked against
+  `nodejs.org/dist/<version>/SHASUMS256.txt` by the release operator), otherwise from
+  `--node-runtime`/`LIP_PACKAGE_NODE_RUNTIME`, otherwise from the `node` on `PATH` at build time.
+  `compatibility.json` records which of the three it was, in `private_runtime_source`:
+  `nodejs-official-distribution:<artifact>` only for a distribution, and
   `nodejs-supplied-runtime:<file>` or `nodejs-path-fallback:<file>` otherwise. An archive whose runtime
   came from a `PATH` fallback says so in its own `LICENSES/THIRD-PARTY-NOTICES.md` too, because no
-  distribution digest backs that runtime; re-stage it with `--node-dist` before publishing.
+  distribution digest backs that runtime; re-stage it with `--node-dist` before publishing. The bundled npm
+  is staged at the path its own distribution keeps it (`lib/node_modules/npm` on POSIX,
+  `node_modules/npm` on Windows), so nothing inside it is renamed and the entry point the provisioning
+  command names is the real one. A runtime staged with no npm beside it is a packaging failure naming
+  `--node-dist`, because without it the documented command would need a global package manager.
 - **License and provenance notices** under `LICENSES/`: the Node distribution `LICENSE` (which contains
-  the Node grant together with the notices for the components Node bundles), this repository's `LICENSE`,
-  and a generated `THIRD-PARTY-NOTICES.md` recording the staged production dependency inventory, the
-  components the private runtime reports about itself, and the unresolved Cursor SDK question. Staging a
-  runtime without its license notices is a packaging failure, not a warning, and both verifiers fail an
-  install tree whose `LICENSES/` carries no notice rather than reporting a count of zero as evidence that
-  they looked.
+  the Node grant together with the notices for the components Node bundles, npm included), this
+  repository's `LICENSE`, and a generated `THIRD-PARTY-NOTICES.md` recording what the runtime reports
+  about itself, the locked dependency closure the operator will provision, and the non-redistribution
+  position on the Cursor SDK. Staging a runtime without its license notices is a packaging failure, not a
+  warning, and both verifiers fail an install tree whose `LICENSES/` carries no notice rather than
+  reporting a count of zero as evidence that they looked.
 - **Checksums over every archive file**, plugin-private files included, in `sha256sum` line order so an
   operator can check them with the platform tool of their choice.
 
-Trust scope is stated rather than implied. `checksums.sha256` covers the manifest, the outer executable,
-and every plugin-private file, so a tampered or missing companion is detected. The host's manifest digest
-remains the authority for the outer process only; nothing here claims the host authenticates companion
-files. `compatibility.json` records the digest of the manifest and of the private runtime, and both
-verifiers compare those against the staged files rather than printing a provenance claim nothing has ever
-checked. Both verifiers read the layout contract and `release.yaml` from the repository they ship in - the
-parent of their own `scripts/` directory - and there is no option to substitute another one: one report
-decides what an install tree is, so a caller-supplied one would let the caller decide it, which is the
-same hole as asking the working directory with a switch. Verifying a tree that lives outside a checkout is
-what `--package-root` is for; it was verified on both implementations from a working directory that is
-neither the repository nor the install tree. The scripts also assemble and verify from any working
-directory, because every `go` invocation in them runs in the repository rather than in the caller's. Install
-into a protected plugin root: the archive is only as trustworthy as the directory it is unpacked into.
+Trust scope is stated rather than implied, and the split is the point. `checksums.sha256` covers every
+**shipped** file - the manifest, the outer executable, and every plugin-private file - so a tampered or
+missing companion is detected. It deliberately does not cover `private/bridge/node_modules/`: the plugin
+authenticates what it ships, and the operator authenticates what they provisioned. Both verifiers print
+that split in their report. The host's manifest digest remains the authority for the outer process only;
+nothing here claims the host authenticates companion files. `compatibility.json` records the SDK as
+**required, not bundled**, with the exact provisioning command and an explicit non-redistribution
+statement, and records the digest of the manifest and of the private runtime, which both verifiers compare
+against the staged files rather than printing a provenance claim nothing has ever checked. Both verifiers
+read the layout contract and `release.yaml` from the repository they ship in - the parent of their own
+`scripts/` directory - and there is no option to substitute another one: one report decides what an install
+tree is, so a caller-supplied one would let the caller decide it, which is the same hole as asking the
+working directory with a switch. Verifying a tree that lives outside a checkout is what `--package-root` is
+for; it was verified on both implementations from a working directory that is neither the repository nor the
+install tree. The scripts also assemble and verify from any working directory, because every `go` invocation
+in them runs in the repository rather than in the caller's. Install into a protected plugin root: the
+archive is only as trustworthy as the directory it is unpacked into.
 
 ### Verified platforms
 
@@ -137,13 +166,15 @@ Both assembled platforms have enforced evidence rather than a maintainer's word:
 platform claim is a fact about a native run, so a new platform needs a new native runner.
 
 Each natively validated platform's evidence is `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`,
-which covers checksum coverage of private files, a tampered private file, a missing companion, a missing
-private runtime (in the verifier and in the launcher, which exits 78), unlisted and missing files, a
-platform overclaim, install roots containing spaces, extracted-archive round trips, deterministic
-checksum-record ordering, the staged runtime starting as a direct process, and verification with no
-`node` reachable on `PATH`. On a POSIX runner that lane also drives the PowerShell verifier over the same
-tree, so both verifier implementations reach the same verdicts. The public Linux/Windows claims in the
-manifest survive only for the platforms in the table above.
+which covers an archive content audit (no third-party package code anywhere in it), checksum coverage of
+shipped private files, a tampered shipped file, a missing companion, a missing private runtime (in the
+verifier and in the launcher, which exits 78), an installed tree that was never provisioned, a tree
+provisioned with the shipped runtime and verified end to end, a provisioned tree at the wrong SDK version,
+unlisted and missing shipped files, a platform overclaim, install roots containing spaces, extracted-archive
+round trips, deterministic checksum-record ordering, the staged runtime starting as a direct process, and
+verification with no `node` reachable on `PATH`. On a POSIX runner that lane also drives the PowerShell
+verifier over the same tree, so both verifier implementations reach the same verdicts. The public
+Linux/Windows claims in the manifest survive only for the platforms in the table above.
 
 The always-on half runs in the default unit lane and holds on every platform, whichever script this host
 happens to use: the layout contract comes from the repository the verifier ships in rather than from the
@@ -151,7 +182,32 @@ caller's working directory, and it comes from the repository with no override; t
 install-ownership predicate classifies every permission mode; the PowerShell verifier turns a
 writable-beyond-owner verdict into exactly one finding more than an owner-only root does; a tree with an
 empty `LICENSES/` is a finding and one with notices is not; both verifiers cross-check the recorded
-release digests; and no script restates the archive layout or reaches a global Node.
+release digests; both verifiers reject a shipped archive that carries the SDK, fail an unprovisioned
+installed tree with the provisioning command, fail a provisioned tree at the wrong version, keep
+operator-provisioned files out of the "present but not listed" finding, and reject a checksum record that
+covers them; and no script restates the archive layout or reaches a global Node.
+
+### Redistribution posture
+
+**The Cursor SDK is not redistributed, so the archive ships no third-party package code.** `@cursor/sdk` is
+proprietary: its `LICENSE.md` states that use is subject to
+[Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right, and its
+platform package ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package does not
+redistribute. No redistribution right could be verified, so the decision is not to ship it: an archive that
+staged the dependency closure would assert a right nobody has confirmed. The archive ships
+`private/bridge/package.json` and `private/bridge/package-lock.json` - the manifest and the lockfile that pin
+the SDK at `1.0.23` and `undici` at `6.28.1` - and the operator resolves the tree themselves, accepting
+Cursor's terms. `cmd/lip-cursor-sdk-packaging render` refuses to describe a staged tree that carries
+third-party package code, `scripts/verify-package --tree-state shipped` fails an archive that contains it, and
+`compatibility.json` records `cursor_sdk_bundled: false` next to an explicit non-redistribution statement and
+`LICENSES/THIRD-PARTY-NOTICES.md` restates it.
+
+Because the tree is the operator's, it is also **outside the shipped checksum record**: the plugin
+authenticates what it ships, the operator authenticates what they provisioned, and both verifiers say so in
+their report.
+
+**No plugin release has been published and none may be published from this branch:** there is no tag and no
+GitHub release, and `compatibility.json` in a built archive records no tested host artifact.
 
 ### Verification limitations
 
@@ -177,15 +233,10 @@ Stated rather than left to be discovered:
 
 ### Licensing status
 
-**This is a release blocker, and nothing may be published until it is resolved.** The private Node
-runtime is MIT and its notices ship with it. `@cursor/sdk` is proprietary: its `LICENSE.md` states that
-use is subject to
-[Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right, and
-its platform package ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package
-does not redistribute and which are absent from the staged tree. A maintainer has to confirm the
-redistribution rights for the SDK and its bundled binaries before any archive is published.
-`compatibility.json` records that status inside every archive, and `LICENSES/THIRD-PARTY-NOTICES.md`
-restates it.
+The private Node runtime, including the npm it bundles, is MIT and its notices ship with it in
+`LICENSES/nodejs-LICENSE`. The Cursor SDK is proprietary and is **not** shipped; see
+[Redistribution posture](#redistribution-posture) for the decision, the command, and where the position is
+recorded inside every archive.
 
 ### Building and verifying an archive
 
@@ -193,13 +244,21 @@ restates it.
 # assemble for this machine (Node 22.22.3 recommended; npm and Node are build-time only)
 scripts/package-plugin.sh --out-dir dist --node-dist node-v22.22.3-linux-x64.tar.gz   # or .ps1 on Windows
 
-# verify an install tree: reports exact files, checksums, and runtime metadata
+# audit the archive as released: it must contain no third-party package code
+scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64 --tree-state shipped   # or .ps1
+
+# provision the SDK exactly as an operator does, then verify the installed tree
+cd dist/cursorsdk-0.1.0-linux-amd64/private/bridge
+../node/node ../node/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev
+cd -
 scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64             # or .ps1 on Windows
 ```
 
 `GOWORK=off` is set by the scripts themselves. The archive is written to
 `<out-dir>/cursorsdk-<version>-<os>-<arch>.{zip,tar.gz}` with its own `.sha256`, next to the unpacked
-install tree of the same name; unpack exactly that one directory into the host plugin root.
+install tree of the same name; unpack exactly that one directory into the host plugin root. The
+provisioning step is the operator's, exactly as [`docs/installation.md`](docs/installation.md) documents it,
+and it is the only download the plugin ever performs.
 
 ## Default bridge resolution
 
@@ -234,7 +293,7 @@ private/bridge/lip-cursor-sdk-bridge[.exe]   go build ./cmd/lip-cursor-sdk-bridg
 private/bridge/bin/lip-cursor-sdk-bridge.js  bridge-node/bin/lip-cursor-sdk-bridge.js
 private/bridge/package.json                 bridge-node/package.json
 private/bridge/dist/                        bridge-node/dist/
-private/bridge/node_modules/                bridge-node/node_modules/
+private/bridge/node_modules/                bridge-node/node_modules/  (bridge-node's own `npm ci`)
 private/node/node[.exe]                     the private Node runtime
 ```
 
@@ -245,8 +304,13 @@ The bridge entry is the bridge package's `bin/lip-cursor-sdk-bridge.js` rather t
 NDJSON server invocation all behave as they do under `node`.
 
 A missing private runtime or bridge entry is an explicit prerequisite failure: the launcher exits
-with status 78 (`EX_CONFIG`) and names the expected archive location. It falls back to nothing -
-no `PATH` lookup, no system-wide Node, and no other Cursor integration.
+with status 78 (`EX_CONFIG`) and names the expected archive location. An unprovisioned SDK is
+the same kind of failure, and it prints the provisioning command rather than letting the bridge
+fail later with a module-resolution stack: the launcher reads the pinned version from the
+shipped bridge manifest, compares it against the operator-provisioned package metadata, and
+starts nothing when they disagree or the tree is absent. It falls back to nothing in either
+case - no `PATH` lookup, no system-wide Node, no npm invocation, and no other Cursor
+integration. The bridge's own `doctor` and SDK loader keep the same check as defense in depth.
 
 Cleanup is owned and bounded. The launcher closes the runtime's stdin first, escalates to the
 platform's process-tree termination when the runtime does not exit, always reaps what it started,
@@ -330,20 +394,23 @@ A third lane validates the archive natively on its runner - the same gate as
 LIP_PACKAGE_GATE=1 GOWORK=off go test -run TestPackageArchive .
 ```
 
-It assembles a real archive (production JavaScript, the production dependency tree over the network, a
-private Node runtime), so it needs the build-time toolchain (`go`, `npm`, `node`), network access, and
-several minutes; it is opt-in through `LIP_PACKAGE_GATE=1` rather than part of the default unit lane, and
-it skips itself in `-short` mode. Running `scripts/package-plugin` and `scripts/verify-package` by hand
-proves the same things.
+It assembles a real archive (production JavaScript, the private Node runtime) and resolves the Cursor SDK
+over the network exactly as an operator does, so it needs the build-time toolchain (`go`, `npm`, `node`),
+network access, and several minutes; it is opt-in through `LIP_PACKAGE_GATE=1` rather than part of the
+default unit lane, and it skips itself in `-short` mode. Running `scripts/package-plugin` and
+`scripts/verify-package` by hand proves the same things.
 
-Budget for it accordingly. The gate verifies one assembled tree about fifteen times, and each verification
-walks and digests the whole staged tree, so on a POSIX host it takes roughly seven to eight minutes -
-past Go's 10m default is not a comfortable margin on a loaded runner. CI runs it as
-`go test -count=1 -timeout 25m -run TestPackageArchive -v .`, which stays inside the package job's own 30m
-ceiling; pass `-timeout` yourself if you run the gate locally and it panics on the default.
+Budget for it accordingly. The gate verifies an assembled tree about twenty times, and each verification
+walks and digests the whole staged tree; it resolves the SDK once over the network and copies the
+provisioned tree for the cases that need one. On `windows-latest` that is a couple of minutes, and on a
+slow POSIX host it can run to fifteen minutes or more - well past Go's 10m default, which is not a
+comfortable margin. CI runs it as `go test -count=1 -timeout 40m -run TestPackageArchive -v .` inside a
+45-minute job, so a slow run is a failure with a real report rather than a kill; pass `-timeout` yourself
+if you run the gate locally and it panics on the default.
 
 ## Documentation
 
+- Operator installation and provisioning: [`docs/installation.md`](docs/installation.md).
 - Plugin authoring and the executable backend-plugin ABI: Go-LIP
   [`docs/backend-plugins/authoring.md`](https://github.com/matdev83/go-llm-interactive-proxy/blob/main/docs/backend-plugins/authoring.md).
 - Go-LIP host repository: [`matdev83/go-llm-interactive-proxy`](https://github.com/matdev83/go-llm-interactive-proxy).

@@ -3,16 +3,22 @@
 # Assemble the plugin's native release archive and its installable tree.
 #
 # Builds the outer plugin executable and the plugin-private bridge launcher for
-# the host platform, builds the production JavaScript, stages only the production
-# npm dependencies plus the metadata the bridge needs to resolve and verify the SDK
-# version, stages the private Node runtime with its license and provenance notices,
-# renders the closed host manifest and the release metadata, records a checksum
-# over every archive file including the plugin-private ones, and emits a
-# per-platform archive with its own digest.
+# the host platform, builds the production JavaScript out of the source tree, stages
+# the metadata the bridge needs to resolve and verify the SDK version - the package
+# manifest and the lockfile that pins it - plus the private Node runtime together with
+# that runtime's own bundled npm, renders the closed host manifest and the release
+# metadata, records a checksum over every archive file including the plugin-private
+# ones, and emits a per-platform archive with its own digest.
+#
+# The archive stages NO third-party package code. The Cursor SDK is proprietary and is
+# not redistributed, so neither @cursor/sdk nor its dependency closure is shipped: the
+# operator provisions that tree once, out of band, with the runtime this archive carries.
+# The runtime's own npm is staged because the provisioning command has to run without a
+# global Node or a global package manager.
 #
 # The archive layout is not restated here. It is read from
-# cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the
-# packager, the verifier, and the private launcher cannot disagree about it.
+# cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the packager,
+# the verifier, and the private launcher cannot disagree about it.
 #
 # npm, Node, and Go are build-time tools here. Nothing the archive needs at run
 # time is looked up on PATH, through a shell, or through a package manager.
@@ -174,12 +180,14 @@ find_node_license() {
   fail "no Node LICENSE found next to $1 or its parents; a staged private runtime must ship its license notices"
 }
 
-# write_third_party_notices records, factually, what the archive redistributes and
-# what is unresolved. It states the licenses the components declare and it does not
-# assert a redistribution right nobody has confirmed.
+# write_third_party_notices records, factually, what the archive redistributes, what it
+# deliberately does not, and who owns what. It states the licenses the redistributed
+# components declare, it asserts no redistribution right nobody has confirmed, and it
+# says plainly that the provisioned dependency tree is the operator's own resolution
+# rather than this project's artifact.
 write_third_party_notices() {
-  local path="$1" modules="$2" runtime="$3" node_version="$4" node_kind="$5" node_label="$6" platform_tag="$7"
-  local manifest pkg_name pkg_version pkg_license rel
+  local path="$1" lockfile="$2" bridge_manifest="$3" runtime="$4" node_version="$5" node_kind="$6"
+  local node_label="$7" platform_tag="$8" provision_command="$9" sdk_package="${10}"
 
   {
     printf '# Third-party notices\n\n'
@@ -198,36 +206,131 @@ write_third_party_notices() {
     printf -- '- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds\n'
     printf '  the Node.js license grant together with the notices for the components Node\n'
     printf '  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.\n'
+    printf -- '- The runtime ships with its own bundled npm, and so does this archive: that is\n'
+    printf '  what the provisioning command below runs, so an operator needs neither a global\n'
+    printf '  Node nor a global package manager. npm is MIT licensed under the same Node\n'
+    printf '  distribution license staged here.\n'
     printf -- '- Components the staged runtime reports about itself:\n'
     "$runtime" -p 'Object.entries(process.versions).map(([k,v])=>`  - ${k} ${v}`).join("\n")' | LC_ALL=C sort
-    printf '\n## Production npm dependencies\n\n'
-    printf '| package | version | declared license | staged at |\n'
-    printf '| --- | --- | --- | --- |\n'
-    while IFS= read -r manifest; do
-      [ -n "$manifest" ] || continue
-      pkg_name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
-      [ -n "$pkg_name" ] || continue
-      pkg_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
-      pkg_license="$(sed -n 's/.*"license"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
-      rel="${manifest#"$modules"/}"
-      printf '| %s | %s | %s | %s |\n' "$pkg_name" "${pkg_version:-(not declared)}" \
-        "${pkg_license:-(not declared in package.json)}" "$rel"
-    done < <(find "$modules" -name package.json -type f | LC_ALL=C sort)
-    printf '\n## Cursor SDK\n\n'
-    printf -- '- @cursor/sdk is proprietary. Its staged LICENSE.md states that use is subject to\n'
+    printf '\n## Cursor SDK: not redistributed, operator-provisioned\n\n'
+    printf -- '- $sdk_package is proprietary. Its LICENSE.md states that use is subject to\n'
     printf "  Cursor's Terms of Service (https://cursor.com/terms-of-service) and it grants no\n"
-    printf '  redistribution right. It is staged because the bridge cannot resolve it otherwise.\n'
-    printf -- '- The platform package ships bundled native binaries (rg and cursandbox). Their\n'
-    printf '  license texts are not redistributed by the package, and no ripgrep license text\n'
-    printf '  is present in the staged tree.\n'
-    printf -- '- ACTION REQUIRED before any publication: a maintainer has to confirm the\n'
-    printf '  redistribution rights for @cursor/sdk and for its bundled binaries. Until that\n'
-    printf '  confirmation exists this archive is release-blocked.\n\n'
-    printf '## Plugin\n\n'
+    printf '  redistribution right. Its platform package additionally ships bundled native\n'
+    printf '  binaries (rg and cursandbox) whose own license texts the package does not\n'
+    printf '  redistribute.\n'
+    printf -- '- This archive therefore contains no $sdk_package and no dependency closure of\n'
+    printf '  any kind. The checksums in this archive cover the shipped files only.\n'
+    printf -- '- The operator obtains the SDK themselves, accepting Cursor'"'"'s terms, and\n'
+    printf '  provisions it once with the runtime this archive ships:\n\n'
+    printf '      %s\n\n' "$provision_command"
+    printf -- '- npm specifically, not any package manager: `overrides` semantics differ\n'
+    printf '  across package managers and the security baseline below depends on that\n'
+    printf '  override being honored. A tree provisioned with another package manager is\n'
+    printf '  unsupported.\n'
+    printf -- '- Provisioning is an install-time operator step. The plugin never installs\n'
+    printf '  anything, runs no package manager, and downloads nothing.\n'
+    printf -- '- The provisioned tree is operator-attributable: it is resolved by the\n'
+    printf "  operator's npm from the shipped lockfile, it is outside this project's\n"
+    printf '  checksum record, and no notice in this archive covers it.\n\n'
+    printf '## Locked dependency closure (pinned, not shipped)\n\n'
+    printf -- '- What the shipped lockfile pins for the operator to provision:\n\n'
+    write_locked_inventory "$runtime" "$lockfile" "$bridge_manifest"
+    printf '\n\n## Plugin\n\n'
     printf -- '- The plugin sources are MIT licensed (see the staged plugin LICENSE). Derived\n'
     printf '  connector code originates from an Apache-2.0 project; see PROVENANCE.md in the\n'
     printf '  source repository.\n'
   } >"$path"
+}
+
+# write_locked_inventory records what the shipped lockfile pins and which half of it the
+# provisioning command actually installs. The archive stages no third-party package code,
+# so this is the inventory of what the operator's npm will resolve rather than of what
+# the archive carries: naming the pinned versions is still evidence, and stating the
+# attribution next to it is what keeps it honest.
+#
+# The inventory is read with the runtime this archive stages rather than by parsing JSON
+# in the shell, so both packagers print the same rows from the same lockfile.
+write_locked_inventory() {
+  local runtime="$1" lockfile="$2" manifest="$3"
+  "$runtime" -e '
+    const fs = require("fs");
+    const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+    const packages = lock.packages || {};
+    const root = packages[""] || {};
+    const pinned = Object.keys(packages).filter((key) => key !== "");
+    if (pinned.length === 0) throw new Error("the lockfile pins no packages");
+
+    // The dependency directory name is read out of the lockfile keys rather than
+    // written here, so this script never carries a second copy of the layout it
+    // stages. Every non-root key starts with it.
+    const depDir = pinned[0].split("/")[0];
+
+    // npm resolves a dependency from the dependents own directory and then from each
+    // enclosing one, so the installed set is the closure of the root dependencies under
+    // that rule. Everything else the lockfile pins is development-only and --omit=dev
+    // leaves it out of an install tree.
+    const prefixes = (key) => {
+      const out = [];
+      for (let rest = key; ; ) {
+        out.push(rest);
+        const cut = rest.lastIndexOf("/" + depDir + "/");
+        if (cut < 0) break;
+        rest = rest.slice(0, cut);
+      }
+      out.push("");
+      return out;
+    };
+    const resolveFrom = (key, name) => {
+      for (const base of prefixes(key)) {
+        const candidate = base ? base + "/" + depDir + "/" + name : depDir + "/" + name;
+        if (packages[candidate]) return candidate;
+      }
+      return "";
+    };
+
+    const installed = new Set();
+    const queue = Object.keys({
+      ...(root.dependencies || {}),
+      ...(root.optionalDependencies || {}),
+    }).map((name) => ["", name]);
+    while (queue.length > 0) {
+      const [from, name] = queue.pop();
+      const key = resolveFrom(from, name);
+      if (!key || installed.has(key)) continue;
+      installed.add(key);
+      const entry = packages[key] || {};
+      const next = { ...(entry.dependencies || {}), ...(entry.optionalDependencies || {}) };
+      for (const dependency of Object.keys(next)) queue.push([key, dependency]);
+    }
+
+    const table = (keys) => [
+      "| package | pinned version |",
+      "| --- | --- |",
+      ...[...keys].sort().map((key) =>
+        `| ${key} | ${(packages[key] && packages[key].version) || "(not declared)"} |`),
+    ].join("\n");
+
+    console.log(table([...installed].filter((key) => packages[key])));
+    const devOnly = pinned.filter((key) => !installed.has(key));
+    if (devOnly.length > 0) {
+      console.log("");
+      console.log("- Development-only packages the lockfile pins and `--omit=dev` leaves out:");
+      console.log("");
+      console.log(table(devOnly));
+    }
+
+    const overrides = manifest.overrides || {};
+    const names = Object.keys(overrides).sort();
+    console.log("");
+    console.log(
+      names.length
+        ? "- Security overrides the shipped bridge manifest declares, honored through npm " +
+          "`overrides`" +
+          `: ${names.map((name) => `${name} ${overrides[name]}`).join(", ")}.`
+        : "- The shipped bridge manifest declares no npm overrides.",
+    );
+  ' "$lockfile" "$manifest"
 }
 
 host_os="$(GOWORK=off go env GOOS)"
@@ -252,11 +355,22 @@ launcher_rel="$(layout_report launcher)"
 bridge_package_dir="$(layout_report bridge_package_dir)"
 bridge_entry="$(layout_report bridge_entry)"
 bridge_dist="$(layout_report bridge_dist)"
-bridge_modules="$(layout_report bridge_modules)"
+sdk_package_name="$(layout_report sdk_package_name)"
+bridge_package_json="$(layout_report bridge_package_json)"
+bridge_package_lock="$(layout_report bridge_package_lock)"
+private_npm_root="$(layout_report private_npm_root)"
+private_npm_cli="$(layout_report private_npm_cli)"
+sdk_provision_command="$(layout_report sdk_provision_command)"
 private_runtime="$(layout_report private_runtime)"
+private_runtime_dir="$(layout_report private_runtime_dir)"
 # The private runtime file name comes from the archive contract, so the staged
 # runtime is whatever the launcher will look for on this platform.
 runtime_file_name="${private_runtime##*/}"
+# Where the platform's own Node distribution keeps its bundled npm, relative to the
+# runtime executable's installation directory. It is the same relative path the archive
+# stages it at, so nothing inside the npm tree is renamed and the entry point the
+# provisioning command names is the real one.
+npm_rel="${private_npm_root#"$private_runtime_dir"/}"
 
 
 plugin_id="$(release_scalar plugin_id)"
@@ -297,20 +411,22 @@ outer_command="$(release_scalar command)"
 (cd "$repo_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$outer_exe" "$outer_command")
 (cd "$repo_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$launcher" "./cmd/$launcher_name")
 
-# 2. Production JavaScript. The dev toolchain stays in the source tree; only the
-#    built output and the production dependency tree are staged.
+# 2. Production JavaScript. The dev toolchain stays in the source tree and never enters
+#    the archive; only the built output does.
 bridge_source="$repo_root/bridge-node"
 run_in "$bridge_source" npm ci --no-audit --no-fund >/dev/null
 run_in "$bridge_source" npm run build >/dev/null
 
-# 3. Plugin-private bridge tree. The lockfile is present only so npm can resolve the
-#    production tree; the archive itself needs no package manager.
+# 3. Plugin-private bridge tree. The manifest and the lockfile ship because they are
+#    what the operator provisions against: the manifest pins the SDK version the bridge
+#    verifies at run time, and the lockfile pins the exact closure and the undici
+#    security override. The dependency closure itself is NOT staged - the Cursor SDK is
+#    proprietary and is not redistributed - so the archive needs no package manager of
+#    its own to run.
 bridge_dir="$staging/$bridge_package_dir"
 mkdir -p "$bridge_dir"
-cp "$bridge_source/package.json" "$bridge_dir/package.json"
-cp "$bridge_source/package-lock.json" "$bridge_dir/package-lock.json"
-run_in "$bridge_dir" npm ci --omit=dev --no-audit --no-fund >/dev/null
-rm -f "$bridge_dir/package-lock.json"
+cp "$bridge_source/${bridge_package_json##*/}" "$staging/$bridge_package_json"
+cp "$bridge_source/${bridge_package_lock##*/}" "$staging/$bridge_package_lock"
 
 mkdir -p "$staging/$bridge_dist"
 # The built JavaScript is copied out of the source tree by the same name the archive
@@ -377,16 +493,36 @@ cp "$runtime_license" "$staging/$licenses_dir/nodejs-LICENSE"
 cp "$repo_root/LICENSE" "$staging/$licenses_dir/plugin-LICENSE"
 node_version="$("$private_runtime_path" --version)"
 
+# The runtime ships with its own npm, and so does this archive. Without it the
+# provisioning command would need a global package manager, which is the prerequisite
+# the private runtime exists to remove. It is resolved from the same installation the
+# runtime came from, so an archive carries the npm that belongs to its runtime rather
+# than whatever npm happens to be nearest on the build machine.
+npm_source=""
+for npm_root in "$(dirname -- "$runtime_source")" "$(dirname -- "$(dirname -- "$runtime_source")")"; do
+  if [ -d "$npm_root/$npm_rel" ]; then
+    npm_source="$npm_root/$npm_rel"
+    break
+  fi
+done
+[ -n "$npm_source" ] ||
+  fail "no bundled npm found at $npm_rel beside $runtime_source; stage an official Node distribution with --node-dist so the archive ships the npm that provisions the Cursor SDK"
+mkdir -p "$(dirname -- "$staging/$private_npm_root")"
+cp -R "$npm_source" "$staging/$private_npm_root"
+
 # 5. Closed host manifest and release metadata, both derived from the staged tree
-#    rather than described independently of it.
+#    rather than described independently of it. The renderer refuses to describe a tree
+#    carrying third-party package code, so a packager that staged one fails here rather
+#    than publishing a bundle it must not ship.
 exe_digest="$(sha256_of "$outer_exe")"
 (cd "$repo_root" && GOWORK=off go run ./cmd/lip-cursor-sdk-packaging render \
   -repo "$repo_root" -staging "$staging" -platform "$layout_platform" \
   -exe-sha256 "$exe_digest" -node-source-kind "$runtime_kind" -node-source "$runtime_label" >/dev/null)
 
 write_third_party_notices "$staging/$licenses_dir/THIRD-PARTY-NOTICES.md" \
-  "$staging/$bridge_modules" "$private_runtime_path" "$node_version" "$runtime_kind" \
-  "$runtime_label" "$layout_platform"
+  "$staging/$bridge_package_lock" "$staging/$bridge_package_json" "$private_runtime_path" \
+  "$node_version" "$runtime_kind" "$runtime_label" "$layout_platform" \
+  "$sdk_provision_command" "$sdk_package_name"
 
 # 6. Checksums over every archive file, plugin-private files included. The record
 #    cannot cover itself, so it is written last.
@@ -422,4 +558,6 @@ printf 'archive_sha256: %s\n' "$archive_digest"
 printf 'node_version: %s\n' "$node_version"
 printf 'node_source_kind: %s\n' "$runtime_kind"
 printf 'node_source: %s\n' "$runtime_label"
+printf 'cursor_sdk_bundled: no (operator-provisioned; %s is not redistributed)\n' "${sdk_package_name:-the Cursor SDK}"
+printf 'sdk_provision_command: %s\n' "$sdk_provision_command"
 printf 'file_count: %s\n' "$file_count"

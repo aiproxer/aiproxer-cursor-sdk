@@ -17,8 +17,10 @@ import (
 )
 
 // stagedRelease is a minimal staged install root the renderer can read: the
-// outer executable, the plugin-private launcher, the private runtime, the bridge
-// entry with its production dependency tree, and the release template.
+// outer executable, the plugin-private launcher, the private runtime with its
+// bundled npm, the bridge entry, the bridge manifest and lockfile, and the
+// release template. The operator-provisioned dependency tree is deliberately
+// absent: the renderer refuses to describe a tree that carries one.
 type stagedRelease struct {
 	root           string
 	release        string
@@ -26,8 +28,9 @@ type stagedRelease struct {
 	exe            string
 	runtime        string
 	entry          string
+	npmCLI         string
 	bridgeJSON     string
-	sdkJSON        string
+	bridgeLock     string
 	buildID        string
 	platform       string
 	exeSHA256      string
@@ -127,8 +130,8 @@ func TestRender_RecordsPrivateRuntimeAndSDKMetadataFromTheStagedTree(t *testing.
 			lay.nodeSource = tc.label
 			_, compatibility := renderAndRead(t, lay)
 
-			require.Equal(t, "1.0.23", compatibility["cursor_sdk_version"])
-			require.Equal(t, "1.0.23", compatibility["cursor_sdk_pinned_version"])
+			require.Equal(t, "1.0.23", compatibility["cursor_sdk_required_version"])
+			require.Equal(t, false, compatibility["cursor_sdk_bundled"])
 			require.Equal(t, "0.1.0", compatibility["bridge_version"])
 			require.Equal(t, ">=22.13", compatibility["bridge_node_engine"])
 			require.Equal(t, lay.nodeVersion, compatibility["private_runtime_version"])
@@ -176,20 +179,112 @@ func TestRender_DoesNotClaimAReleaseExists(t *testing.T) {
 	require.NotContains(t, compatibility, "release_tag")
 }
 
-// TestRender_RefusesStagedTreeThatDisagreesWithTheSDKPin keeps a staged
-// production dependency tree that does not match the bridge's pinned SDK an
-// explicit packaging failure: a released archive must never ship an SDK version
-// that differs from the pin the bridge verifies at run time.
-func TestRender_RefusesStagedTreeThatDisagreeWithTheSDKPin(t *testing.T) {
+// TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled keeps the non-redistribution
+// decision legible in the record every archive carries.
+//
+// The SDK is proprietary and no redistribution right for it or for the native binaries
+// its platform package bundles has been verified, so the archive ships the manifest and
+// the lockfile that pin the SDK and no third-party code at all. A record that only
+// named a version would read as "this is what the archive ships"; the record has to say
+// the SDK is required at run time, not bundled, give the one command that provisions
+// it, and state the non-redistribution position explicitly.
+func TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled(t *testing.T) {
 	t.Parallel()
 
 	lay := newStagedRelease(t)
-	writeFile(t, lay.sdkJSON, `{"name":"@cursor/sdk","version":"9.9.9"}`)
+	_, compatibility := renderAndRead(t, lay)
 
-	err := runRenderCmd(t, lay)
+	archive, err := packagelayout.ForPlatform(lay.goos(), lay.goarch())
+	require.NoError(t, err)
+
+	require.Equal(t, "1.0.23", compatibility["cursor_sdk_required_version"],
+		"the required version is the pin the bridge verifies at run time")
+	require.Equal(t, false, compatibility["cursor_sdk_bundled"],
+		"the archive ships no third-party package code, so the SDK is not bundled")
+	require.Equal(t, archive.ProvisionCommand(""), compatibility["cursor_sdk_provisioning_command"],
+		"the record has to carry the exact provisioning command an operator runs")
+	require.NotContains(t, compatibility, "cursor_sdk_version",
+		"a recorded installed version would read as a claim about what the archive ships")
+
+	redistribution := stringField(compatibility, "cursor_sdk_redistribution")
+	require.Contains(t, redistribution, "not redistributed")
+	require.Contains(t, redistribution, "operator")
+
+	// The licensing statement has to agree: it may not keep claiming the SDK's
+	// redistribution rights are unresolved inside an archive that ships no SDK.
+	licensing := stringField(compatibility, "licensing_status")
+	require.NotContains(t, licensing, "confirm redistribution rights")
+	require.Contains(t, licensing, "not redistributed")
+
+	// The record describes an archive that provisions itself, so the staged tree has
+	// to carry the two files that make the recorded command runnable.
+	require.FileExists(t, filepath.Join(lay.root, filepath.FromSlash(archive.BridgePackageLockPath())))
+	require.FileExists(t, filepath.Join(lay.root, filepath.FromSlash(archive.PrivateRuntimeNPMCLIPath())))
+}
+
+// TestRender_RefusesAStagedOperatorProvisionedTree keeps a staged dependency tree an
+// explicit packaging failure.
+//
+// The archive must not ship third-party package code: @cursor/sdk is proprietary and
+// its platform package bundles native binaries whose license texts it does not
+// redistribute, so staging the closure would assert a redistribution right nobody has
+// verified. A renderer that described such a tree anyway would produce release metadata
+// that reads as a redistributable bundle, which is the exact thing the archive must not
+// be.
+func TestRender_RefusesAStagedOperatorProvisionedTree(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	archive, err := packagelayout.ForPlatform(lay.goos(), lay.goarch())
+	require.NoError(t, err)
+
+	staged := filepath.Join(lay.root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
+	writeFile(t, staged, `{"name":"@cursor/sdk","version":"1.0.23"}`)
+
+	err = runRenderCmd(t, lay)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "9.9.9")
-	require.Contains(t, err.Error(), "1.0.23")
+	require.Contains(t, err.Error(), archive.BridgeModulesPath())
+	require.Contains(t, err.Error(), "not redistributed")
+}
+
+// TestRender_RefusesStagedTreeWithoutTheProvisioningPrerequisites keeps a tree an
+// operator could not provision an explicit packaging failure: without the shipped
+// lockfile the SDK version is not pinned, and without the shipped runtime's own npm
+// the recorded provisioning command cannot run without a global package manager.
+func TestRender_RefusesStagedTreeWithoutTheProvisioningPrerequisites(t *testing.T) {
+	t.Parallel()
+
+	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name  string
+		drop  func(t *testing.T, lay *stagedRelease)
+		wants string
+	}{
+		{
+			name:  "shipped lockfile",
+			drop:  func(t *testing.T, lay *stagedRelease) { require.NoError(t, os.Remove(lay.bridgeLock)) },
+			wants: archive.BridgePackageLockPath(),
+		},
+		{
+			name:  "shipped bundled npm",
+			drop:  func(t *testing.T, lay *stagedRelease) { require.NoError(t, os.Remove(lay.npmCLI)) },
+			wants: archive.PrivateRuntimeNPMCLIPath(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			lay := newStagedRelease(t)
+			tc.drop(t, lay)
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wants)
+			require.Contains(t, err.Error(), "reinstall")
+		})
+	}
 }
 
 // TestRender_RefusesMissingPrivateRuntimeOrBridgeEntry keeps an incomplete staged
@@ -214,11 +309,11 @@ func TestRender_RefusesMissingPrivateRuntimeOrBridgeEntry(t *testing.T) {
 			wants: "private/bridge/bin/lip-cursor-sdk-bridge.js",
 		},
 		{
-			name: "staged sdk metadata",
+			name: "staged bridge manifest",
 			drop: func(t *testing.T, lay *stagedRelease) {
-				require.NoError(t, os.Remove(lay.sdkJSON))
+				require.NoError(t, os.Remove(lay.bridgeJSON))
 			},
-			wants: "@cursor/sdk",
+			wants: "private/bridge/package.json",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -326,6 +421,16 @@ func (lay *stagedRelease) suffix() string {
 	return ""
 }
 
+// npmRelPath is where the platform's own Node distribution keeps its bundled npm, read
+// from the archive contract so the staged tree mirrors the real distribution layout.
+func npmRelPath(goos string) string {
+	a, err := packagelayout.ForPlatform(goos, runtime.GOARCH)
+	if err != nil {
+		panic("npmRelPath: " + err.Error())
+	}
+	return filepath.FromSlash(a.PrivateRuntimeNPMRel())
+}
+
 // newStagedRelease builds a staged install root whose private runtime is a
 // compiled stand-in reporting one fixed Node version. The renderer records the
 // version the shipped executable reports, so the stand-in has to be a real
@@ -351,13 +456,15 @@ func newStagedRelease(tb testing.TB) *stagedRelease {
 	lay.exeSHA256 = strings.Repeat("ab", 32)
 	lay.exe = writeFile(tb, filepath.Join(root, "bin", "lip-backend-cursorsdk"+exeSuffix), "outer executable")
 	lay.runtime = installBinaryFile(tb, filepath.Join(root, "private", "node", "node"+exeSuffix), buildRuntimeStub(tb, lay.nodeVersion))
+	lay.npmCLI = writeFile(tb, filepath.Join(root, "private", "node", npmRelPath(goos), "bin", "npm-cli.js"),
+		"// shipped bundled npm entry point\n")
 	lay.entry = writeFile(tb, filepath.Join(root, "private", "bridge", "bin", "lip-cursor-sdk-bridge.js"), "// bridge entry\n")
 	writeFile(tb, filepath.Join(root, "private", "bridge", "lip-cursor-sdk-bridge"+exeSuffix), "launcher")
 	writeFile(tb, filepath.Join(root, "private", "bridge", "dist", "main.js"), "// built\n")
 	lay.bridgeJSON = writeFile(tb, filepath.Join(root, "private", "bridge", "package.json"),
 		`{"name":"lip-cursor-sdk-bridge","version":"0.1.0","engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.0.23"}}`)
-	lay.sdkJSON = writeFile(tb, filepath.Join(root, "private", "bridge", "node_modules", "@cursor", "sdk", "package.json"),
-		`{"name":"@cursor/sdk","version":"1.0.23"}`)
+	lay.bridgeLock = writeFile(tb, filepath.Join(root, "private", "bridge", "package-lock.json"),
+		`{"name":"lip-cursor-sdk-bridge","lockfileVersion":3,"packages":{}}`)
 
 	repo := filepath.Join(tb.TempDir(), "repo")
 	lay.release = writeFile(tb, filepath.Join(repo, "release.yaml"), strings.Join([]string{

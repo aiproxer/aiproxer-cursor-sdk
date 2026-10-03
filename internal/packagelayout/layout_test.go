@@ -41,8 +41,8 @@ func TestArchive_MatchesDesignLayoutBlock(t *testing.T) {
 			require.Equal(t, "private/bridge/lip-cursor-sdk-bridge"+tc.exe, a.LauncherPath())
 			require.Equal(t, "private/bridge/bin/lip-cursor-sdk-bridge.js", a.BridgeEntryPath())
 			require.Equal(t, "private/bridge/dist", a.BridgeDistPath())
-			require.Equal(t, "private/bridge/node_modules", a.BridgeModulesPath())
 			require.Equal(t, "private/bridge/package.json", a.BridgePackageJSONPath())
+			require.Equal(t, "private/bridge/package-lock.json", a.BridgePackageLockPath())
 			require.Equal(t, "private/node/node"+tc.exe, a.PrivateRuntimePath())
 			require.Equal(t, "compatibility.json", a.CompatibilityPath())
 			require.Equal(t, "checksums.sha256", a.ChecksumsPath())
@@ -51,10 +51,145 @@ func TestArchive_MatchesDesignLayoutBlock(t *testing.T) {
 	}
 }
 
+// TestArchive_ResolvesTheOperatorProvisionedSDKTree pins where the SDK the plugin
+// does not redistribute lands. The archive stages no third-party package code, so
+// this tree exists only after the operator provisions it, and every consumer that
+// has to talk about it - the verifier, the launcher preflight, the metadata, and
+// the checksum scope - resolves it here rather than spelling it out.
+func TestArchive_ResolvesTheOperatorProvisionedSDKTree(t *testing.T) {
+	t.Parallel()
+
+	a, err := packagelayout.ForPlatform("linux", "amd64")
+	require.NoError(t, err)
+
+	require.Equal(t, "private/bridge/node_modules", a.BridgeModulesPath())
+	require.Equal(t, a.BridgeModulesPath()+"/", packagelayout.ProvisionedPrefix)
+	require.Equal(t, "private/bridge/node_modules/@cursor/sdk", a.ProvisionedSDKDirPath())
+	require.Equal(t, "private/bridge/node_modules/@cursor/sdk/package.json", a.ProvisionedSDKPackageJSONPath())
+	require.Equal(t, "@cursor/sdk", packagelayout.SDKPackageName)
+}
+
+// TestArchive_ShipsNoThirdPartyPackageCode is the archive content rule: the
+// Cursor SDK is proprietary and is not redistributed, so the dependency closure
+// is not in the archive either. What the archive does ship is the pair the
+// operator provisions against - the bridge manifest and the lockfile that pins the
+// SDK - plus the private runtime's own bundled npm, without which the documented
+// provisioning command could not run without a global package manager.
+func TestArchive_ShipsNoThirdPartyPackageCode(t *testing.T) {
+	t.Parallel()
+
+	for _, platform := range packagelayout.SupportedPlatforms() {
+		t.Run(platform, func(t *testing.T) {
+			t.Parallel()
+
+			goos, goarch, ok := strings.Cut(platform, "/")
+			require.True(t, ok, platform)
+			a, err := packagelayout.ForPlatform(goos, goarch)
+			require.NoError(t, err)
+
+			entries := a.RequiredEntries()
+			require.NotContains(t, entries, a.BridgeModulesPath(),
+				"the provisioned dependency tree is not archive content")
+			for _, rel := range entries {
+				require.False(t, strings.HasPrefix(rel, packagelayout.ProvisionedPrefix),
+					"required archive entry %s is inside the operator-provisioned tree", rel)
+			}
+
+			require.Contains(t, entries, a.BridgePackageJSONPath())
+			require.Contains(t, entries, a.BridgePackageLockPath(),
+				"the lockfile that pins the SDK has to ship: it is what the operator provisions against")
+			require.Contains(t, entries, a.PrivateRuntimeNPMCLIPath(),
+				"provisioning has to run on the shipped runtime's own npm, not a global one")
+		})
+	}
+}
+
+// TestPrivateRuntimeNPMCLIPath_MatchesTheOfficialDistribution pins the npm entry
+// point the provisioning command names to where npm actually lives inside a Node
+// distribution: the POSIX distribution keeps the runtime in bin/ and npm under
+// lib/, and the Windows distribution keeps both at the root. A documented path
+// that does not exist is not documentation, and the packager stages the tree this
+// path names.
+func TestPrivateRuntimeNPMCLIPath_MatchesTheOfficialDistribution(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		goos, runtime, npmRoot, npmCLI string
+	}{
+		{
+			goos:    "linux",
+			runtime: "private/node/node",
+			// node-v22.22.3-linux-x64/bin/node and
+			// node-v22.22.3-linux-x64/lib/node_modules/npm/bin/npm-cli.js.
+			npmRoot: "private/node/lib/node_modules/npm",
+			npmCLI:  "private/node/lib/node_modules/npm/bin/npm-cli.js",
+		},
+		{
+			goos:    "windows",
+			runtime: "private/node/node.exe",
+			// node-v22.22.3-win-x64/node.exe and
+			// node-v22.22.3-win-x64/node_modules/npm/bin/npm-cli.js.
+			npmRoot: "private/node/node_modules/npm",
+			npmCLI:  "private/node/node_modules/npm/bin/npm-cli.js",
+		},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			t.Parallel()
+
+			a, err := packagelayout.ForPlatform(tc.goos, "amd64")
+			require.NoError(t, err)
+			require.Equal(t, tc.runtime, a.PrivateRuntimePath())
+			require.Equal(t, tc.npmRoot, a.PrivateRuntimeNPMRootPath())
+			require.Equal(t, tc.npmCLI, a.PrivateRuntimeNPMCLIPath())
+
+			// The staging target is the distribution's own layout, so a packager
+			// copies the npm tree without renaming anything inside it.
+			require.Equal(t, strings.TrimPrefix(tc.npmRoot, a.PrivateRuntimeDirPath()+"/"), a.PrivateRuntimeNPMRel())
+		})
+	}
+}
+
+// TestProvisionCommand_IsTheOneOperatorCommand pins the single command an operator
+// runs. It has to use the shipped runtime and the shipped runtime's own npm: a
+// command that needed a globally installed Node or npm would put back exactly the
+// prerequisite the private runtime exists to remove.
+func TestProvisionCommand_IsTheOneOperatorCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ goos, wants string }{
+		{
+			goos:  "linux",
+			wants: "cd <plugin-root>/private/bridge && ../node/node ../node/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev",
+		},
+		{
+			goos:  "windows",
+			wants: "cd <plugin-root>/private/bridge && ../node/node.exe ../node/node_modules/npm/bin/npm-cli.js ci --omit=dev",
+		},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			t.Parallel()
+
+			a, err := packagelayout.ForPlatform(tc.goos, "amd64")
+			require.NoError(t, err)
+			require.Equal(t, tc.wants, a.ProvisionCommand(""))
+			require.Equal(t,
+				strings.Replace(tc.wants, "<plugin-root>", "/opt/lip/plugins/cursorsdk", 1),
+				a.ProvisionCommand("/opt/lip/plugins/cursorsdk"))
+
+			// Both operands stay inside the archive, relative to the directory the
+			// command changes into, so the command cannot reach a global toolchain.
+			require.Contains(t, a.ProvisionCommand(""), "../node/")
+			require.Contains(t, a.ProvisionCommand(""), " ci --omit=dev")
+			require.NotContains(t, a.ProvisionCommand(""), "PATH")
+		})
+	}
+}
+
 // TestArchive_ExposesThePathsAPackagerMustStage pins the layout rows a packaging
 // script cannot restate. The scripts have to copy the bridge entry out of the source
-// tree and enumerate the staged dependency tree, and both paths exist here for exactly
-// that reason: a script that spelled them out would be a second copy of the layout.
+// tree, stage the lockfile that pins the SDK, and stage the private runtime's own
+// npm, and all three paths exist here for exactly that reason: a script that spelled
+// them out would be a second copy of the layout.
 func TestArchive_ExposesThePathsAPackagerMustStage(t *testing.T) {
 	t.Parallel()
 
@@ -65,6 +200,7 @@ func TestArchive_ExposesThePathsAPackagerMustStage(t *testing.T) {
 	require.Equal(t, a.BridgePackageDirPath()+"/"+packagelayout.BridgeEntrySourceRel(), a.BridgeEntryPath())
 	require.Equal(t, "node_modules", packagelayout.ModulesDirName)
 	require.Equal(t, a.BridgePackageDirPath()+"/"+packagelayout.ModulesDirName, a.BridgeModulesPath())
+	require.Equal(t, a.BridgePackageDirPath()+"/"+packagelayout.BridgeLockFileName, a.BridgePackageLockPath())
 
 	// The source-relative rows the packager derives have to stay inside the bridge
 	// package directory: a script joins them onto the source tree, and a row that
@@ -109,8 +245,9 @@ func TestArchive_RequiredEntries_AreInstallRootRelativeCleanSlashPaths(t *testin
 		a.BridgeEntryPath(),
 		a.PrivateRuntimePath(),
 		a.BridgeDistPath(),
-		a.BridgeModulesPath(),
 		a.BridgePackageJSONPath(),
+		a.BridgePackageLockPath(),
+		a.PrivateRuntimeNPMCLIPath(),
 		a.CompatibilityPath(),
 		a.ChecksumsPath(),
 		a.LicensesDir(),
@@ -172,6 +309,47 @@ func TestPrivateFor_CorrespondsToArchiveLayout(t *testing.T) {
 
 		require.Equal(t, a.PrivateRuntimePath(), priv.RuntimeRel)
 		require.Equal(t, a.BridgeEntryPath(), priv.EntryRel)
+	}
+}
+
+// TestPrivateFor_ResolvesTheProvisioningSlots keeps the launcher's run-time
+// preflight reading the same files the archive contract names.
+//
+// The launcher has to tell an operator that the SDK is not provisioned, and to
+// print the command that provisions it. Both answers come from resolved slots, so
+// this is the correspondence between the two consumers of the layout: a launcher
+// installed at the archive location has to find the bridge manifest, the
+// operator-provisioned SDK metadata, and the shipped npm entry point exactly where
+// the archive stages them.
+func TestPrivateFor_ResolvesTheProvisioningSlots(t *testing.T) {
+	t.Parallel()
+
+	for _, goos := range []string{"windows", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+
+			a, err := packagelayout.ForPlatform(goos, "amd64")
+			require.NoError(t, err)
+			root := filepath.Join(t.TempDir(), "install root with spaces")
+			launcher := filepath.Join(root, filepath.FromSlash(a.LauncherPath()))
+
+			priv, err := packagelayout.PrivateFor(launcher, goos)
+			require.NoError(t, err)
+
+			rel := func(path string) string {
+				out, relErr := filepath.Rel(root, path)
+				require.NoError(t, relErr)
+				return filepath.ToSlash(out)
+			}
+			require.Equal(t, a.BridgePackageDirPath(), rel(priv.PackageDir))
+			require.Equal(t, a.ProvisionedSDKPackageJSONPath(), rel(priv.SDKPackageJSON))
+			require.Equal(t, a.PrivateRuntimeNPMCLIPath(), rel(priv.NPMCLI))
+			require.Equal(t, a.BridgeModulesPath()+"/", priv.ProvisionedPrefix)
+			require.Contains(t, priv.ProvisionCommand, "cd ")
+			require.Contains(t, priv.ProvisionCommand, " ci --omit=dev")
+			require.Contains(t, priv.ProvisionCommand, filepath.ToSlash(priv.PackageDir),
+				"the command changes into the directory it provisions")
+		})
 	}
 }
 

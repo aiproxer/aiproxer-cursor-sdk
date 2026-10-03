@@ -30,12 +30,12 @@ import (
 
 // packageGateEnv opts a checkout into the native package gate.
 //
-// The gate assembles a real archive: it builds production JavaScript, resolves the
-// production dependency tree over the network, and copies a private Node runtime,
-// which takes minutes and needs the build-time toolchain. That is deliberate work,
-// not a unit test, so it runs only where it is asked for - the packaging lane, or a
-// maintainer running scripts/package-plugin by hand. The static half of this file
-// (the layout-parity check) always runs.
+// The gate assembles a real archive: it builds production JavaScript, copies a private
+// Node runtime with that runtime's own bundled npm, and resolves the Cursor SDK over
+// the network exactly as an operator does. That takes minutes and needs the build-time
+// toolchain. That is deliberate work, not a unit test, so it runs only where it is asked
+// for - the packaging lane, or a maintainer running scripts/package-plugin by hand. The
+// static half of this file (the layout-parity check) always runs.
 const packageGateEnv = "LIP_PACKAGE_GATE"
 
 // TestPackageArchive_NativeArchiveIsInstallableAndVerifiable is the native package
@@ -43,13 +43,14 @@ const packageGateEnv = "LIP_PACKAGE_GATE"
 // verify, and run its private runtime, and every way a package can lie about its
 // contents has to fail verification rather than pass silently.
 //
-// Nothing here is hermetic: packaging builds production JavaScript and stages the
-// production dependency tree with npm, and the gate validates exactly one platform:
-// the one it runs on. Cross-compiling another platform's archive and claiming it
-// would be the failure mode this gate exists to prevent.
+// Nothing here is hermetic: packaging builds production JavaScript, and the gate
+// provisions the SDK from the registry with the runtime the archive ships. It
+// validates exactly one platform: the one it runs on. Cross-compiling another
+// platform's archive and claiming it would be the failure mode this gate exists to
+// prevent.
 func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 	if testing.Short() {
-		t.Skip("native package platform validation builds production JavaScript and stages the dependency tree")
+		t.Skip("native package platform validation builds production JavaScript and resolves the Cursor SDK")
 	}
 	if !packageGateRequested() {
 		t.Skipf("set %s=1, or run scripts/package-plugin and scripts/verify-package, to assemble and validate a native archive",
@@ -62,6 +63,9 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 	}
 
 	built := builtPackage(t)
+	// One provisioned tree for the whole gate: the SDK is resolved over the network
+	// exactly as an operator resolves it, and each case that needs one copies it.
+	provisioned := provisionedInstallRoot(t, built.installRoot)
 
 	t.Run("staged_tree_is_the_design_layout_block", func(t *testing.T) {
 		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
@@ -80,15 +84,23 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, entry, "runDoctor")
 		require.FileExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgeDistPath()), "main.js"))
 
-		// Only production dependencies are staged. A dev dependency in the archive
-		// is a larger, more attackable run-time surface than the bridge needs.
-		for _, dev := range []string{"typescript", "tsx", "esbuild", "@types", ".bin/tsc", ".bin/tsx"} {
-			require.NoFileExists(t, filepath.Join(built.installRoot,
-				filepath.FromSlash(archive.BridgeModulesPath()), filepath.FromSlash(dev)), dev)
+		// The archive ships no third-party package code at all. The Cursor SDK is
+		// proprietary and is not redistributed, so neither it nor its dependency
+		// closure may appear; what ships is the manifest and the lockfile that pin it,
+		// plus the runtime's own npm so the provisioning command needs no global
+		// package manager.
+		require.NoDirExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgeModulesPath())),
+			"the archive must not ship the operator-provisioned dependency tree")
+		for rel := range walkRelativeFiles(t, built.installRoot) {
+			require.False(t, strings.HasPrefix(rel, packagelayout.ProvisionedPrefix),
+				"the archive must not ship %s: the SDK is not redistributed", rel)
+			require.NotContains(t, rel, packagelayout.SDKPackageName+"/",
+				"the archive must not ship the SDK")
 		}
-		// No npm is required to run the archive, so its lockfile has no place in it.
-		require.NoFileExists(t, filepath.Join(built.installRoot,
-			filepath.FromSlash(archive.BridgePackageDirPath()), "package-lock.json"))
+		require.FileExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgePackageJSONPath())))
+		require.FileExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgePackageLockPath())))
+		require.FileExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.PrivateRuntimeNPMCLIPath())),
+			"the shipped runtime's own npm is what the provisioning command runs")
 
 		info, err := os.Stat(filepath.Join(built.installRoot, filepath.FromSlash(archive.PrivateRuntimePath())))
 		require.NoError(t, err)
@@ -122,20 +134,31 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 
 	t.Run("compatibility_records_runtime_and_sdk_metadata", func(t *testing.T) {
 		record := decodeJSONObject(t, filepath.Join(built.installRoot, "compatibility.json"))
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
 
 		require.Equal(t, "golip.cursorsdk.compatibility/v1", record["schema"])
 		require.Equal(t, runtime.GOOS+"/"+runtime.GOARCH, record["platform"])
 		require.Equal(t, runtime.GOOS+"/"+runtime.GOARCH, record["native_platform_assembled"])
 		require.Equal(t, "private-runtime", record["packaging_variant"])
 		require.Equal(t, false, record["external_node_required"])
-		require.Equal(t, "1.0.23", record["cursor_sdk_version"])
-		require.Equal(t, "1.0.23", record["cursor_sdk_pinned_version"])
 		require.Equal(t, built.pluginVersion, record["bridge_version"])
 		require.Equal(t, ">=22.13", record["bridge_node_engine"])
 		require.Equal(t, float64(1), record["protocol_major"])
 		require.NotEmpty(t, record["private_runtime_version"])
 		require.NotEmpty(t, record["private_runtime_sha256"])
 		require.NotEmpty(t, record["licensing_status"])
+
+		// The SDK is required at run time and not shipped, and the record has to say
+		// so with the command that provides it. A record that only named a version
+		// would read as a claim about what the archive carries.
+		require.Equal(t, "1.0.23", record["cursor_sdk_required_version"])
+		require.Equal(t, false, record["cursor_sdk_bundled"])
+		require.Equal(t, archive.ProvisionCommand(""), record["cursor_sdk_provisioning_command"])
+		require.NotContains(t, record, "cursor_sdk_version",
+			"a recorded installed version would read as a claim about what the archive ships")
+		require.Contains(t, recordString(record, "cursor_sdk_redistribution"), "not redistributed")
+		require.NotContains(t, recordString(record, "licensing_status"), "confirm redistribution rights")
 
 		// Nothing in this task certified a host artifact, so the record says so
 		// instead of naming a host it never ran against.
@@ -156,7 +179,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.NotContains(t, record["private_runtime_source"], "official-distribution")
 	})
 
-	t.Run("third_party_notices_state_the_runtime_source_honestly", func(t *testing.T) {
+	t.Run("third_party_notices_state_the_runtime_source_and_the_non_redistribution", func(t *testing.T) {
 		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
 		require.NoError(t, err)
 		notices := readFileText(t, filepath.Join(built.installRoot,
@@ -175,6 +198,15 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			require.Contains(t, remedy, "nodedist",
 				"the notice has to name the option that re-stages an official distribution")
 		}
+
+		// The provenance split has to be stated where an operator reads it: the SDK is
+		// not redistributed, the operator provisions it with the command below, and the
+		// resulting tree is theirs rather than this project's.
+		require.Contains(t, words, "not redistributed, operator-provisioned")
+		require.Contains(t, words, "operator-attributable")
+		require.Contains(t, words, archive.ProvisionCommand(""),
+			"the notice has to print the provisioning command an operator runs")
+		require.Contains(t, words, "Locked dependency closure (pinned, not shipped)")
 	})
 
 	t.Run("checksums_cover_every_file_including_plugin_private_ones", func(t *testing.T) {
@@ -254,19 +286,26 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Equal(t, built.nodeVersion, strings.TrimSpace(out))
 	})
 
-	t.Run("verification_reports_files_checksums_and_runtime_metadata", func(t *testing.T) {
-		report, errCode := runVerifyScript(t, built.installRoot, nil, nil)
+	t.Run("shipped_archive_audit_reports_files_checksums_and_runtime_metadata", func(t *testing.T) {
+		report, errCode := runVerifyScript(t, built.installRoot, nil, []string{"--tree-state", "shipped"})
 		require.Equal(t, 0, errCode, "verify-package failed:\n%s", report)
 
+		require.Contains(t, report, "tree state: shipped")
 		require.Contains(t, report, "platform: "+runtime.GOOS+"/"+runtime.GOARCH)
 		require.Contains(t, report, "packaging variant: private-runtime")
 		require.Contains(t, report, "external node required: no")
 		require.Contains(t, report, "node on PATH: not required")
 		require.Contains(t, report, "plugin-private files checksummed:")
 		require.Contains(t, report, "host digest authority:")
-		require.Contains(t, report, "sdk version (staged production tree): 1.0.23")
+		require.Contains(t, report, "sdk: not redistributed, required 1.0.23 at run time")
 		require.Contains(t, report, "node engine required: >=22.13")
 		require.Contains(t, report, "private runtime resolves to itself: yes")
+
+		// The trust split is stated in the report itself, not only in prose: the record
+		// covers what the plugin ships, and the operator owns what they provisioned.
+		require.Contains(t, report, "checksum record scope: shipped files only")
+		require.Contains(t, report, "the plugin authenticates what it ships and the operator authenticates what they provisioned")
+		require.Contains(t, report, "0 operator-provisioned")
 
 		// Exact files and checksums: the report enumerates the archive, not a
 		// summary of it.
@@ -282,13 +321,102 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		}
 	})
 
+	t.Run("shipped_archive_audit_rejects_a_tree_carrying_the_sdk", func(t *testing.T) {
+		// The archive-content rule has to be checkable on the bytes an operator
+		// receives, not merely asserted by the packager: a tree that claims a bundle
+		// the plugin must not ship is a finding in the shipped-state audit.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := copyInstallRoot(t, built.installRoot)
+		stagedSDK := filepath.Join(root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
+		require.NoError(t, os.MkdirAll(filepath.Dir(stagedSDK), 0o755))
+		require.NoError(t, os.WriteFile(stagedSDK, []byte(`{"name":"@cursor/sdk","version":"1.0.23"}`), 0o644))
+
+		report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
+		require.NotEqual(t, 0, errCode,
+			"a shipped archive carrying the SDK passed the archive-content audit:\n%s", report)
+		require.Contains(t, report, archive.BridgeModulesPath())
+		require.Contains(t, report, "not redistributed")
+	})
+
+	t.Run("unprovisioned_installed_tree_fails_with_the_provisioning_command", func(t *testing.T) {
+		// Nothing installs the SDK for an operator, so an unpacked archive cannot serve
+		// a request until they provision it. Verification has to say so and print the
+		// command, and the launcher has to refuse with the same one rather than a
+		// module-resolution stack from inside the runtime.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := copyInstallRoot(t, built.installRoot)
+
+		report, errCode := runVerifyScript(t, root, nil, nil)
+		require.NotEqual(t, 0, errCode,
+			"an installed tree with no provisioned SDK passed verification:\n%s", report)
+		require.Contains(t, report, "not provisioned")
+		require.Contains(t, report, "1.0.23")
+		require.Contains(t, report, "ci --omit=dev")
+		require.NotContains(t, report, "verify-package: ok")
+
+		launcher := filepath.Join(root, filepath.FromSlash(archive.LauncherPath()))
+		out, launchErr := runPackagedExecutable(t, launcher, "doctor")
+		require.Error(t, launchErr, "the launcher served an unprovisioned tree:\n%s", out)
+		require.Contains(t, out, "not provisioned")
+		require.Contains(t, out, "1.0.23")
+		require.Contains(t, out, "ci --omit=dev")
+		require.NotContains(t, strings.ToLower(out), "cannot find module",
+			"the launcher has to answer with the prerequisite, not with a resolution stack")
+	})
+
+	t.Run("provisioned_installed_tree_verifies_and_doctor_passes", func(t *testing.T) {
+		// The end-to-end claim: provisioning the tree with the shipped runtime, then
+		// verifying it and running doctor, all on the operator's terms - the command
+		// from the release metadata, run through the runtime the archive ships, with
+		// no global Node and no global package manager involved.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := copyProvisionedInstallRoot(t, provisioned)
+
+		report, errCode := runVerifyScript(t, root, nil, nil)
+		require.Equal(t, 0, errCode, "a provisioned install tree failed verification:\n%s", report)
+		require.Contains(t, report, "sdk: required 1.0.23, provisioned 1.0.23")
+		require.Contains(t, report, "doctor: ok")
+		require.NotContains(t, report, "present but not listed",
+			"operator-provisioned files are outside the shipped record, not unaccounted for")
+
+		launcher := filepath.Join(root, filepath.FromSlash(archive.LauncherPath()))
+		out, launchErr := runPackagedExecutable(t, launcher, "doctor")
+		require.NoError(t, launchErr, "doctor failed on a provisioned tree:\n%s", out)
+		require.Contains(t, out, "doctor: ok")
+	})
+
+	t.Run("provisioned_installed_tree_at_the_wrong_version_fails", func(t *testing.T) {
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := copyProvisionedInstallRoot(t, provisioned)
+
+		// A tree the operator provisioned against a different pin, or one an operator
+		// edited, is a finding rather than a warning: the bridge refuses it anyway,
+		// and refusing it there surfaces as a provider error an operator reads as a
+		// Cursor problem.
+		sdkMetadata := filepath.Join(root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
+		body := strings.Replace(readFileText(t, sdkMetadata), `"1.0.23"`, `"1.0.22"`, 1)
+		require.NoError(t, os.WriteFile(sdkMetadata, []byte(body), 0o644))
+
+		report, errCode := runVerifyScript(t, root, nil, nil)
+		require.NotEqual(t, 0, errCode,
+			"a provisioned tree at the wrong SDK version passed verification:\n%s", report)
+		require.Contains(t, report, "1.0.22")
+		require.Contains(t, report, "1.0.23")
+		require.Contains(t, report, "ci --omit=dev")
+	})
+
 	t.Run("unprotected_install_root_is_rejected", func(t *testing.T) {
 		// Every verifier implementation this machine can run has to reach the same
 		// verdict: an install root any local user can write is not a protected root.
+		shipped := []string{"--tree-state", "shipped"}
 		for _, impl := range verifierImplementations(t) {
 			t.Run(impl, func(t *testing.T) {
 				root := copyInstallRoot(t, built.installRoot)
-				report, errCode := runVerifyScriptImpl(t, impl, root, nil, nil)
+				report, errCode := runVerifyScriptImpl(t, impl, root, nil, shipped)
 				require.Equal(t, 0, errCode, "a protected install root failed verification:\n%s", report)
 				require.Contains(t, report, "install ownership:")
 
@@ -302,7 +430,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 				// checksummed companion after verification.
 				require.NoError(t, os.Chmod(root, 0o777))
 				t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
-				report, errCode = runVerifyScriptImpl(t, impl, root, nil, nil)
+				report, errCode = runVerifyScriptImpl(t, impl, root, nil, shipped)
 				require.NotEqual(t, 0, errCode, "a world-writable plugin root passed the %s verifier:\n%s", impl, report)
 				require.Contains(t, report, "writable beyond its owner")
 				require.Contains(t, report, "protected plugin root")
@@ -312,13 +440,20 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 
 	t.Run("extracted_archive_installs_and_verifies", func(t *testing.T) {
 		// The archive, not the staging tree, is what an operator receives: unpack
-		// it into a fresh install root and verify the extracted bytes.
+		// it into a fresh install root and verify the extracted bytes. A freshly
+		// unpacked archive is unprovisioned, which is a finding in installed state and
+		// the expected content in shipped state.
 		installed := extractArchive(t, built.archive)
-		report, errCode := runVerifyScript(t, installed, nil, nil)
+		report, errCode := runVerifyScript(t, installed, nil, []string{"--tree-state", "shipped"})
 		require.Equal(t, 0, errCode, "extracted archive failed verification:\n%s", report)
-		require.Contains(t, report, "sdk version (staged production tree): 1.0.23")
+		require.Contains(t, report, "sdk: not redistributed, required 1.0.23 at run time")
 		require.Contains(t, report, "private runtime resolves to itself: yes")
 		require.Contains(t, report, fmt.Sprintf("install root: %s", installed))
+
+		report, errCode = runVerifyScript(t, installed, nil, nil)
+		require.NotEqual(t, 0, errCode,
+			"a freshly unpacked archive passed installed-state verification:\n%s", report)
+		require.Contains(t, report, "not provisioned")
 	})
 
 	t.Run("tampered_plugin_private_file_fails_verification", func(t *testing.T) {
@@ -328,7 +463,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		tampered := filepath.Join(root, filepath.FromSlash(archive.BridgeDistPath()), "models.js")
 		require.NoError(t, os.WriteFile(tampered, []byte(readFileText(t, tampered)+"\n// tampered\n"), 0o644))
 
-		report, errCode := runVerifyScript(t, root, nil, nil)
+		report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 		require.NotEqual(t, 0, errCode, "a tampered private file passed verification:\n%s", report)
 		require.Contains(t, report, "private/bridge/dist/models.js")
 		require.Contains(t, report, "checksum mismatch")
@@ -341,7 +476,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		launcher := filepath.Join(root, filepath.FromSlash(archive.LauncherPath()))
 		require.NoError(t, os.Remove(launcher))
 
-		report, errCode := runVerifyScript(t, root, nil, nil)
+		report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 		require.NotEqual(t, 0, errCode)
 		require.Contains(t, report, archive.LauncherPath())
 		require.Contains(t, report, "reinstall")
@@ -354,7 +489,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, os.Remove(filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimePath()))))
 
-		report, errCode := runVerifyScript(t, root, nil, nil)
+		report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 		require.NotEqual(t, 0, errCode)
 		require.Contains(t, report, archive.PrivateRuntimePath())
 		require.Contains(t, report, "reinstall")
@@ -377,7 +512,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			extra := filepath.Join(root, "private", "bridge", "notes.txt")
 			require.NoError(t, os.WriteFile(extra, []byte("not part of the archive\n"), 0o644))
 
-			report, errCode := runVerifyScript(t, root, nil, nil)
+			report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 			require.NotEqual(t, 0, errCode)
 			require.Contains(t, report, "private/bridge/notes.txt")
 			require.Contains(t, report, "checksums.sha256")
@@ -387,12 +522,12 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			root := copyInstallRoot(t, built.installRoot)
 			archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
 			require.NoError(t, err)
-			require.NoError(t, os.RemoveAll(filepath.Join(root,
-				filepath.FromSlash(archive.BridgeModulesPath()), ".package-lock.json")))
+			require.NoError(t, os.Remove(filepath.Join(root,
+				filepath.FromSlash(archive.BridgePackageJSONPath()))))
 
-			report, errCode := runVerifyScript(t, root, nil, nil)
+			report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 			require.NotEqual(t, 0, errCode)
-			require.Contains(t, report, ".package-lock.json")
+			require.Contains(t, report, archive.BridgePackageJSONPath())
 			require.Contains(t, report, "missing")
 		})
 	})
@@ -419,7 +554,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 				// earlier on the checksum.
 				rewriteChecksum(t, root, archive.CompatibilityPath())
 
-				report, errCode := runVerifyScript(t, root, nil, nil)
+				report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 				require.NotEqual(t, 0, errCode,
 					"a recorded digest that matches nothing passed verification:\n%s", report)
 				require.Contains(t, report, "records "+tc.field,
@@ -472,7 +607,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		writeJSONFile(t, manifestPath, manifest)
 		rewriteChecksum(t, root, "plugin.backendplugin.json")
 
-		report, errCode := runVerifyScript(t, root, nil, nil)
+		report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 		require.NotEqual(t, 0, errCode, "an archive claiming unvalidated platforms passed verification")
 		require.Contains(t, report, "platform")
 		require.Contains(t, report, runtime.GOOS+"/"+runtime.GOARCH)
@@ -481,15 +616,21 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 	t.Run("private_runtime_variant_needs_no_global_node", func(t *testing.T) {
 		// PATH keeps the Go toolchain the layout contract needs and drops every
 		// directory that holds a node executable, so a runtime lookup through PATH
-		// would fail instead of silently succeeding with the developer's Node.
+		// would fail instead of silently succeeding with the developer's Node. The tree
+		// is provisioned first, so this also proves the launcher serves a real request
+		// path - doctor through the private runtime and the bridge entry - with nothing
+		// but the archive's own runtime available.
 		env := nodeFreeEnvironment(t)
 		require.NotEmpty(t, env)
 
-		report, errCode := runVerifyScript(t, built.installRoot, env, nil)
+		root := copyProvisionedInstallRoot(t, provisioned)
+
+		report, errCode := runVerifyScript(t, root, env, nil)
 		require.Equal(t, 0, errCode, "verification needed a global Node:\n%s", report)
 		require.Contains(t, report, "node on PATH: not required")
 		require.Contains(t, report, "private runtime resolves to itself: yes")
-		require.Contains(t, report, "sdk version (staged production tree): 1.0.23")
+		require.Contains(t, report, "sdk: required 1.0.23, provisioned 1.0.23")
+		require.Contains(t, report, "doctor: ok")
 	})
 
 	t.Run("cross_platform_archive_is_refused", func(t *testing.T) {
@@ -563,17 +704,34 @@ func TestPackageArchive_ScriptsDoNotRestateTheArchiveLayout(t *testing.T) {
 			"%s restates the built-JavaScript staging directory", script)
 	}
 
-	// Both packagers have to read the entry, the built JavaScript, and the dependency
-	// tree out of the report, and both have to derive the source-tree path of each from
-	// the bridge package directory rather than from a name of their own. The verifiers
-	// do not stage them and are not expected to.
+	// Both packagers have to read the entry, the built JavaScript, the shipped lockfile
+	// that pins the SDK, and the runtime's bundled npm out of the report, and both have
+	// to derive the source-tree path of each from the bridge package directory rather
+	// than from a name of their own. The verifiers do not stage them and are not expected
+	// to; they read the provisioned prefix, the SDK metadata, and the provisioning
+	// command, because those are what their verdict is about.
 	for _, script := range []string{
 		filepath.Join("scripts", "package-plugin.sh"),
 		filepath.Join("scripts", "package-plugin.ps1"),
 	} {
 		body := readFileText(t, filepath.Join(repo, script))
-		for _, field := range []string{"bridge_entry", "bridge_dist", "bridge_modules", "bridge_package_dir"} {
+		for _, field := range []string{
+			"bridge_entry", "bridge_dist", "bridge_package_dir", "bridge_package_lock",
+			"private_npm_root", "sdk_provision_command",
+		} {
 			require.Contains(t, body, field, "%s must derive its staging paths from the layout report", script)
+		}
+	}
+	for _, script := range []string{
+		filepath.Join("scripts", "verify-package.sh"),
+		filepath.Join("scripts", "verify-package.ps1"),
+	} {
+		body := readFileText(t, filepath.Join(repo, script))
+		for _, field := range []string{
+			"provisioned_prefix", "sdk_package_json", "sdk_package_name",
+			"sdk_provision_command", "private_npm_cli", "tree_states",
+		} {
+			require.Contains(t, body, field, "%s must read the provisioning contract from the layout report", script)
 		}
 	}
 }
@@ -836,6 +994,52 @@ var (
 	packageErr    error
 )
 
+// provisionedInstallRoot copies the assembled archive into a fresh install root and
+// provisions it once for the whole package.
+//
+// Every case that needs a provisioned tree wants the same tree: one the operator resolved
+// from the shipped lockfile through the shipped runtime. Resolving it once and copying the
+// result keeps the gate's runtime proportional to the checks rather than to the number of
+// copies, and the provisioning runs against the parent's temporary directory so the copies
+// outlive the case that first asked for them.
+func provisionedInstallRoot(tb testing.TB, installRoot string) string {
+	tb.Helper()
+
+	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+	require.NoError(tb, err)
+
+	root := filepath.Join(tb.TempDir(), "provisioned install root with spaces")
+	require.NoError(tb, copyTree(installRoot, root))
+	require.Contains(tb, root, " ")
+
+	// Started as a direct process with no shell, so a provision that needed a global
+	// Node or a global package manager would fail here rather than quietly succeed
+	// with the build machine's toolchain. It reaches the network, which is why it
+	// lives in the opt-in package gate rather than the default unit lane.
+	cmd := exec.Command(
+		filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimePath())),
+		filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMCLIPath())),
+		"ci", "--omit=dev")
+	cmd.Dir = filepath.Join(root, filepath.FromSlash(archive.BridgePackageDirPath()))
+	out, runErr := cmd.CombinedOutput()
+	require.NoError(tb, runErr,
+		"provisioning the SDK with the shipped runtime failed:\n%s\ncommand: %s", out, cmd.String())
+	require.FileExists(tb, filepath.Join(root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath())),
+		"provisioning reported success but installed no SDK metadata:\n%s", out)
+	return root
+}
+
+// copyProvisionedInstallRoot gives one case its own mutable copy of the provisioned tree,
+// so a case that tampers with it cannot affect another.
+func copyProvisionedInstallRoot(tb testing.TB, provisioned string) string {
+	tb.Helper()
+
+	dst := filepath.Join(tb.TempDir(), "plugin install root with spaces")
+	require.NoError(tb, copyTree(provisioned, dst))
+	require.Contains(tb, dst, " ")
+	return dst
+}
+
 // builtPackage assembles one archive for the whole package: the platform gate is
 // a single native assembly plus a set of cheap verifications of copies of it.
 func builtPackage(tb testing.TB) *packagedArchive {
@@ -1002,6 +1206,7 @@ func scriptOption(impl, name string) string {
 		"platform":        "Platform",
 		"report":          "ReportPath",
 		"expect-platform": "ExpectPlatform",
+		"tree-state":      "TreeState",
 	}[name]
 	if spelled == "" {
 		return "-" + name
@@ -1433,6 +1638,13 @@ func mapsWithout(set map[string]struct{}, drop string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// recordString reads one string field of a staged JSON object, so a diagnostic
+// assertion does not have to spell the type assertion.
+func recordString(record map[string]any, key string) string {
+	value, _ := record[key].(string)
+	return value
 }
 
 // decodeJSONObject reads one staged JSON object.

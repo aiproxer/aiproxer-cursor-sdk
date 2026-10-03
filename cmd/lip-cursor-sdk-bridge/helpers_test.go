@@ -37,13 +37,24 @@ func writeBridgeScript(tb testing.TB, lay installedPrivateLayout, script string)
 // installRunnablePrivateLayout installs a packaged private layout whose private
 // runtime is the deterministic fake Node binary, so launcher lifecycle tests
 // exercise a real descendant without a JavaScript toolchain.
+//
+// The layout is a provisioned one: the shipped bridge manifest pins the SDK and the
+// operator-provisioned package metadata resolves to that pin, which is what the
+// launcher's SDK preflight requires before it starts anything. A case that wants the
+// unprovisioned answer stages its own tree.
 func installRunnablePrivateLayout(tb testing.TB, script string) installedPrivateLayout {
 	tb.Helper()
 	lay := installPrivateLayout(tb, true, true)
 	require.NoError(tb, copyFile(fakebridge.BuildNodeExe(tb), lay.runtime))
 	writeBridgeScript(tb, lay, script)
+	writeBridgeManifest(tb, lay, pinnedTestSDKVersion)
+	writeProvisionedSDK(tb, lay, pinnedTestSDKVersion)
 	return lay
 }
+
+// pinnedTestSDKVersion is the SDK pin the launcher fixtures ship, matching the bridge
+// manifest the plugin stages.
+const pinnedTestSDKVersion = "1.0.23"
 
 func strconvQuote(value string) string {
 	return strconv.Quote(value)
