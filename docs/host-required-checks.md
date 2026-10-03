@@ -5,8 +5,9 @@ read-only inspection of the Go-LIP host repository; nothing in the host's branch
 workflows was changed. Re-run the commands below before acting on this record - required contexts are
 external configuration and can change independently of this repository.
 
-Inspected: `matdev83/go-llm-interactive-proxy`, branch `main`, host worktree on `spec/cursor-sdk-standalone`
-at the `3.2` merge of this plugin (`c803d4b`).
+Inspected: `matdev83/go-llm-interactive-proxy`, host worktree on `spec/cursor-sdk-standalone` at
+`3887c146` - the commit that records this plugin's `3.2` merge (`c803d4b`). Every line number below was
+read from that tree, so re-derive them there rather than from `origin/main`.
 
 ## Current state
 
@@ -89,46 +90,102 @@ Deleting the workflow first would leave `bridge-node-tests` required and permane
 "never leave PRs blocked on a deleted required job" case in the design's Integration & Migration Notes
 step 4, and it is why no required check may be retired before its replacement reports.
 
+### Second ordering constraint: the relocated scripts outlive batch-1
+
+Deleting the host's `scripts/test-cursor-sdk-*.{sh,ps1}` must land **no earlier than** batch-1, the Cursor
+test and verification ownership transfer (`migration-inventory.json` `batches.batch-1`, task 6.1, 59
+`*_test.go` files).
+
+The reason is a relocated host test that reads the live-bridge scripts **from the repository root**, not from
+the connector directory. At the inspected baseline, `connectors/cursorsdk/internal/product/live_bridge_scripts_test.go`
+resolves `repoRoot` by walking **four** levels up from its own directory (~18) - i.e. to the host root - and
+then `require.NoError`s on reading `scripts/test-cursor-sdk-live-bridge.ps1` and `.sh` from there (~20-25).
+
+So the earlier rationale, that those references "disappear with the directory itself", holds for the scripts'
+*callers* inside `connectors/cursorsdk/**` but **not** for `_test.go` files: `go test` discovers tests by file,
+not by directory, and a test is not deleted because its parent tree is deleted one commit later. As long as
+that test lives anywhere in the host module, the host copies of
+`scripts/test-cursor-sdk-live-bridge.{sh,ps1}` are load-bearing and their deletion is a `require.NoError`
+failure. The batch-1 transfer is what removes the reader; only then may the host copies go.
+
+This is a sequencing constraint, not a scope change: the script rows are nominally task 5.2 work, and
+`tasks.md` records 6.1 as depending on 5.2. The host-side ordering inside that graph is still
+`transfer (6.1) -> delete host copies`, so the deletion step must be held back into the 6.1 delivery or later.
+Its own copy in this repository already rewrote the same walk to **two** levels up, which is why the plugin's
+`go test ./...` passes here with no host root at all.
+
 ## Also host-side, for the cutover batches
 
 The complete set of **active** host references that break or go stale when
 `.github/workflows/cursor-sdk-platform.yml` and the relocated `scripts/test-cursor-sdk-*.{sh,ps1}` leave the host.
 None of them is a plugin prerequisite, so none of them gates this repository's own release; every one of them is
-the host's problem to land in the task 5.2 batch.
+the host's problem. Almost all land in task 5.2's batch; the relocated-script deletions are held to the batch-1
+ordering constraint above.
 
-The list was reconciled against the recorded baseline by grepping the host for `cursor-sdk-platform`,
-`bridge-node-tests`, the `cursorsdk` go-cache lane, and `test-cursor-sdk-`. Re-run those four greps before acting;
-a host-side reference the migration inventory missed is a red `internal/qa` lane or a silently unbound cache lane,
-not a documentation nit.
+### How this list was derived
+
+The list is the union of two passes, run against the `3887c146` tree with
+`.kiro/specs/archive/**`, `.kiro/specs/cursor-sdk-standalone/**`, and the connector source trees excluded
+(archived specs are historical record; the active spec owns its own inventory).
+
+**Pass 1 - mechanical, by identifier.** One `git grep -l -i -F` per pattern, over the whole worktree:
+
+| Pattern | Catches |
+| --- | --- |
+| `cursor-sdk-platform` | the workflow file name, wherever it is read or named |
+| `Cursor SDK Platform Smoke` | the workflow's **display** `name:`, and so every prose and cache-policy reference to the lane |
+| `bridge-node-tests` | the required job by name |
+| `test-cursor-sdk-` | the eight relocated script files and every caller |
+| `cursorsdk` | the cache-lane key, the `makefile-scope` scope keyword, and every kind/prefix enumeration |
+| `cursor_sdk` | the underscore spelling, which the other patterns miss |
+| `Cursor SDK` | prose-only references that name the product rather than a path |
+| `makefile-scope` | every consumer of the shared Makefile-relevance probe, Cursor-related or not |
+
+**Pass 2 - by workflow file name, not by content.** `git ls-files` for `cursor-sdk-platform`,
+`test-cursor-sdk-`, and `makefile-scope`, so a file that *is* the artifact is never missed because it does
+not spell its own name.
+
+**Why both passes.** Pass 1 alone finds `.github/workflows/backend-plugin-release-gates.yml`, which names
+the lane only in a two-line comment and shares no identifier with the file it references; the earlier
+four-pattern reconciliation could not see it. Pass 2 alone finds nothing prose. A reference is only
+reconciled when both passes have run, which is also why the table below carries a "Deliberately not in this
+list" section: the excluded hits have to be named to prove they were checked rather than missed.
+
+Re-run both passes before acting. A host-side reference the migration inventory missed is a red
+`internal/qa` lane or a silently unbound cache lane, not a documentation nit.
 
 **UPDATE means the file stays and its expectations are rewritten. DELETE means the whole reference goes.** The
-distinction is load-bearing in one row: the QA contract tests are updated, never deleted, because each one also
-carries a generic host-boundary assertion that must survive.
+distinction is load-bearing in two rows. The QA contract tests are updated, never deleted, because each one also
+carries a generic host-boundary assertion that must survive. And `scripts/makefile-scope.sh` is updated, never
+deleted, because its `acp` and `backend-plugin` scopes serve two live non-Cursor matrices - a reader that treats
+it as Cursor-only tooling takes those matrices with it.
 
 ### Must be updated in the same change
 
 | Host reference | What it references | Why it is not a deletion |
 | --- | --- | --- |
 | `internal/qa/remote_ci_performance_contract_test.go` (~149-152) | Hard-reads `cursor-sdk-platform.yml` and asserts the `bridge-node-tests` job's `name`, `if`, and `needs`. | **The item that breaks loudest.** `read` fatals on a missing file, so following this document's own ordering turns `go test ./internal/qa` red. Task 5.2 drops the dedicated-lane expectation and keeps the generic assertion it also carries. |
-| `internal/qa/ci_iteration_speed_contract_test.go` (~91, ~101) | Names `cursor-sdk-platform.yml` in two workflow lists: the Makefile-relevance probe for expensive matrices, and the bounded go-cache consumer/producer set. | `readRepositoryFile` fatals on a missing file. Its cache-contract assertions are generic and must stay, minus this workflow. |
+| `internal/qa/ci_iteration_speed_contract_test.go` (~72, ~78-82, ~91, ~101) | **Three** distinct Cursor couplings. (a) ~72 reads `scripts/makefile-scope.sh` through `readRepositoryFile`, which `t.Fatalf`s on error. (b) ~78-82 asserts the hard needle `"cursor-sdk\|cursorsdk"` against that script and `t.Fatalf`s when it is absent. (c) ~91 and ~101 name `cursor-sdk-platform.yml` in the Makefile-relevance probe list and in the bounded go-cache consumer/producer set, each read through the same fatal helper. | (a) and (b) mean the script cannot be deleted at all - see the `makefile-scope.sh` row. Only the `"cursor-sdk\|cursorsdk"` needle drops; `"acp\|cursorcliacp"` and `"backend-plugin"` must survive, or the assertion weakens. Its remaining cache-contract assertions are generic and stay, minus this workflow. |
 | `internal/qa/development_iteration_contract_test.go` (~20, ~69) | Names the same workflow in the bounded-cache/`cache: true` set and in the retention-trigger cross-check. | Same hard read; the retention cross-check is what keeps `go-cache-maintenance.yml` honest, so the row below moves with it. |
-| `internal/qa/main_push_lane_scope_test.go` (~24) | Lane-table row `{cursor-sdk-platform.yml, changes, filter, cursorsdk, connectors/cursorsdk/example.go, true, true}`. | Same hard read. The generic scoped-lane rows stay. |
+| `internal/qa/main_push_lane_scope_test.go` (~24, ~68-69) | **Two** couplings. (a) ~24 is the lane-table row `{cursor-sdk-platform.yml, changes, filter, cursorsdk, connectors/cursorsdk/example.go, true, true}`. (b) ~68-69 copies `makefile-scope.sh` out of the real repo into a throwaway git fixture via `readRepositoryFile` **inside every lane subtest**, including the `acp-process-tree`, `backend-plugin-cross-platform`, `taskrunner-process-tree` and `codeql`/`security`/`qa` rows that have nothing to do with Cursor. | (a) is the Cursor lane row. (b) is why deleting `scripts/makefile-scope.sh` turns *this whole file* red, not just one subtest: a missing script fails the fixture setup of all **ten** lane subtests in the ~18-27 table. Only the ~24 row drops. |
+| `scripts/makefile-scope.sh` (~16-18, ~29-31, ~96-104, ~122-137) | **UPDATE, not delete - this file must survive.** Its `acp` and `backend-plugin` scopes (~29-30) have nothing to do with the Cursor smoke, and they are precisely why the file stays. Only the `cursorsdk` keyword is removed: the scope name at ~18, the case arm and pattern at ~31, and the self-test assertions at ~96-104 and ~122-137. | Deleting it strands the cutover three ways. **1. Two live workflow consumers.** `.github/workflows/acp-process-tree.yml` (~77) and `.github/workflows/backend-plugin-cross-platform.yml` (~104) both shell out to `bash scripts/makefile-scope.sh --relevant "$BASE_SHA" HEAD {acp,backend-plugin}` under `probe_rc=0; ... || probe_rc=$?` followed by `if [[ "$probe_rc" != "1" ]]`. Both are **fail-open on exit 1 only**: a missing script makes bash return 127, which is `!= "1"`, so both native matrices would flip to `relevant=true` and run on *every* Makefile edit - silently burning the ACP process-tree and backend-plugin cross-platform matrices while still reporting success. **2. A fatal QA read.** `internal/qa/ci_iteration_speed_contract_test.go` ~72 reads it through the fatal helper. **3. A per-subtest read.** `internal/qa/main_push_lane_scope_test.go` ~68-69 reads it in every lane subtest. Note the design's File Structure Plan row for `Makefile`, `scripts/makefile-scope.sh` says "retire Cursor targets, source-specific exceptions and enumerations" - enumerations and Cursor-specific entries, never the shared script. |
 | `.github/workflows/go-cache-maintenance.yml` (~7) | Retention trigger list names `Cursor SDK Platform Smoke`. | Removing the workflow without this leaves a retention trigger for a workflow that can no longer run. `development_iteration_contract_test.go` cross-checks these names against each workflow's `name:` line, so the two have to land together. |
+| `.github/workflows/backend-plugin-release-gates.yml` (~5-6) | A comment enumerating the workflows that hold shared evidence: "...remains in focused cross-platform, process-tree, and Cursor SDK smoke workflows (backend-plugin-cross-platform, ACP process-tree, **Cursor SDK Platform Smoke**)." | **Prose-only, found by pass 1's `Cursor SDK Platform Smoke` pattern, not by the earlier four.** It names the lane's display name in a comment and shares no identifier with the workflow file, so a search for `cursor-sdk-platform` cannot see it. Nothing breaks: it is a comment, not a trigger, and no test reads it. It goes stale the moment the workflow does, and this document's own scope is stale prose. Delete the clause, keep the surviving two workflows named. |
 | `scripts/prune-go-caches.py` (~10, ~14) | `cursorsdk` is an alternative in both the `SNAPSHOT` and `LEGACY` retention regexes. | Stale coupling, not a break: `scripts/test_prune_go_caches.py` never names the lane, so the extra alternative is inert. It goes because no workflow produces that cache prefix any more. |
 | `docs/remote-ci-performance.md` (~110, ~129) | Prose describing the independent `bridge-node-tests` status and the "Cursor" entry in the gate list. | This is the host runbook for the lane being deleted. Stale prose here is what makes the next operator believe a retired job is still reporting. |
-| `docs/cursor-sdk-backend.md` (whole file) | The active in-tree runbook, including `make test-cursor-sdk-*` invocations (~130-131, ~156, ~171). | Replaced by an external install/migration pointer with no local npm instructions, per the design's File Structure Plan row for `docs/cursor-sdk-backend.md`, `README.md`. It is not deleted. |
+| `docs/cursor-sdk-backend.md` (whole file) | The active in-tree runbook, including the `make test-cursor-sdk-*` invocations (~130-133, ~156-162, ~171, ~179). | Replaced by an external install/migration pointer with no local npm instructions, per the design's File Structure Plan row for `docs/cursor-sdk-backend.md`, `README.md`. It is not deleted. |
 | `README.md` (~33, ~120, ~128) | Names `connectors/cursorsdk`, `docs/cursor-sdk-backend.md`, `config/examples/cursor-sdk-experimental.yaml`, and `make test-cursor-sdk-comparison-report`. | Same external-pointer rewrite, same design row. The `cursorcliacp` mentions in this file are a separate product line and are out of scope. |
 
 ### Deleted outright
 
 - `.github/workflows/cursor-sdk-platform.yml`. The ordering constraint above applies to it.
 - `Makefile` targets `test-cursor-sdk-live`, `test-cursor-sdk-live-bridge`, `test-cursor-sdk-platform`, and
-  `test-cursor-sdk-comparison-report`, plus their `.PHONY` (~line 1) and `help` (~line 88) lines.
-- `scripts/makefile-scope.sh`, whose `cursorsdk` scope keyword (~18, ~31) and its self-test fixtures (~94-100,
-  ~122-137) exist only to gate the 3-OS smoke.
-- `scripts/test-cursor-sdk-*.{sh,ps1}`. All four pairs now live in this repository under `scripts/`, so the
-  cutover deletes host copies that already have an owner.
-- The `cursorsdk` entry in `.github/actions/go-cache/policy.json` (~42-45), which is bound to
+  `test-cursor-sdk-comparison-report`, plus their `.PHONY` (~line 1) and `help` (~lines 86-89) entries.
+- `scripts/test-cursor-sdk-*.{sh,ps1}` (all eight files). They now live in this repository under `scripts/`,
+  so the cutover deletes host copies that already have an owner - **but not before batch-1**, see the second
+  ordering constraint above. `scripts/makefile-scope.sh` is deliberately **not** in this list; see its UPDATE
+  row above.
+- The `cursorsdk` entry in `.github/actions/go-cache/policy.json` (~42-46), which is bound to
   `job: platform-smoke` and `workflow: Cursor SDK Platform Smoke`. `scripts/ci-go-cache.py` resolves the lane by
   name from the workflow's `lane:` input, so an orphaned entry is inert rather than fatal; it goes with the
   workflow it configures.
@@ -137,11 +194,38 @@ carries a generic host-boundary assertion that must survive.
 
 ### Deliberately not in this list
 
-- `.kiro/specs/archive/windows-task-reliability/design.md` (~220) records `test-cursor-sdk-platform` in a
-  completed specification. Archived specs are retained historical record and are never rewritten.
+Every remaining hit from the two derivation passes, with the reason it is out of scope. These were checked,
+not missed.
+
+- `.kiro/specs/archive/windows-task-reliability/design.md` (~220, ~258-263) records `test-cursor-sdk-platform`
+  and the connector's test fixtures in a completed specification. Archived specs are retained historical record
+  and are never rewritten. `.kiro/specs/cursor-sdk-standalone/**` is the live spec and owns its own inventory.
 - References inside `connectors/cursorsdk/**` disappear with the directory itself, and the host-side inventories
-  that enumerate that directory (`pkg/lipsdk/backendplugin/contracttest/coverage.go`,
-  `scripts/fuzz-targets.tsv`, `scripts/check-adhoc-goroutines.{sh,ps1}`, `.golangci.yml`,
-  `config/config.yaml`, `internal/archtest/cursor_sdk*`) are a different cutover batch from the workflow and
-  script removal. Task 5.2's own scope text owns them; this record covers what breaks when the workflow and the
-  relocated scripts go.
+  that enumerate that directory are a different cutover batch from the workflow and script removal. Task 5.2's
+  own scope text owns them; this record covers what breaks when the workflow and the relocated scripts go. The
+  full set, as swept: `pkg/lipsdk/backendplugin/contracttest/coverage.go`, `scripts/fuzz-targets.tsv`,
+  `scripts/check-adhoc-goroutines.{sh,ps1}`, `.golangci.yml`, `config/config.yaml`,
+  `config/examples/cursor-sdk-experimental.yaml`, `internal/archtest/cursor_sdk_external_gates_test.go`,
+  `internal/archtest/cursorsdk_boundaries_test.go`, `internal/archtest/backend_multi_user_policy_test.go`,
+  `internal/archtest/testdata/backend_multi_user_policy/authority/connector_recreates_multi_user_authority.go.txt`,
+  `internal/standardplugins/{backend_prefix_inventory,multi_user_backend_policy,standard_bundle_posture}_test.go`,
+  and `internal/providerprofiles/{expected_inventory,catalog_population}_test.go`. These are batch-2
+  implementation-removal work, named in the design's File Structure Plan row for
+  `internal/standardplugins/...`/`internal/providerprofiles/...`.
+- Prose that names Cursor SDK as an *example product* rather than as this lane, in
+  `docs/backend-plugins/authoring.md` (~15) and `docs/backend-plugins/operator.md` (~140, ~218). Both describe
+  the generic `agent_runtime` execution-composition posture and cite "Cursor SDK agents" the way they cite
+  `openai-codex`; neither references the workflow, the scripts, the cache lane, or the Makefile targets. They
+  stay correct after the cutover. Found only by pass 1's `Cursor SDK` pattern.
+- `internal/core/routing/execution_composition_test.go` (~385, ~391, ~395) uses `cursor_sdk` as a synthetic
+  route prefix inside generic selector-parsing fixtures. No host reference; found only by the `cursor_sdk`
+  pattern.
+- `.github/workflows/acp-process-tree.yml` (~134, ~150) has steps named `Cursor connector (Unix)` and
+  `Cursor connector (Windows)`, but both set `working-directory: connectors/cursorcliacp` - the separate
+  `cursorcliacp` product line, which this cutover leaves untouched. A case-insensitive `Cursor` search hits
+  them; they are false positives, not stale references.
+- `internal/infra/runtimebundle/candidate_concurrent_lifecycle_test.go` (~17) mentions "cursor SDK" in a
+  comment naming a class of candidate compile/rollback test. No host reference.
+- `scripts/test-cursor-sdk-*.{sh,ps1}` themselves, and `scripts/makefile-scope.sh` (~96-104, ~122-137) self-test
+  fixtures. The scripts are the artifacts being removed; the `makefile-scope.sh` self-test edits are part of its
+  UPDATE row, not a separate deletion.
