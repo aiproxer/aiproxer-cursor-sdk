@@ -296,10 +296,16 @@ func mustFrameLine(tb testing.TB, frame *protocol.Frame) string {
 
 // installedLauncherLayout builds the packaged private layout around the real
 // launcher executable and the deterministic fake private runtime.
+//
+// The layout is provisioned: the launcher checks the operator-provisioned SDK tree
+// before it starts anything, so a layout without one is refused with a prerequisite
+// failure rather than reaching the runtime.
 func installedLauncherLayout(tb testing.TB, withRuntime bool) installedPrivateLayout {
 	tb.Helper()
 	lay := installPrivateLayout(tb, withRuntime, true)
 	require.NoError(tb, copyFile(buildLauncherExe(tb), lay.launcher))
+	writeBridgeManifest(tb, lay, pinnedTestSDKVersion)
+	writeProvisionedSDK(tb, lay, pinnedTestSDKVersion)
 	if withRuntime {
 		require.NoError(tb, copyFile(fakebridge.BuildNodeExe(tb), lay.runtime))
 	}

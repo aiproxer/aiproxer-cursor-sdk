@@ -44,6 +44,16 @@ func launchMain(ctx context.Context, args []string, stdio stdioSet) int {
 		return exitPrerequisite
 	}
 
+	// The Cursor SDK is operator-provisioned, so an installed tree that has not been
+	// provisioned cannot serve a request. Deciding that here gives the operator the
+	// provisioning command instead of a module-resolution stack from inside the
+	// runtime, and it starts nothing. The bridge's own check stays as defense in depth
+	// for a tree that changes after this point.
+	if err := preflightSDK(lay.private); err != nil {
+		fmt.Fprintln(stdio.err, err)
+		return exitPrerequisite
+	}
+
 	l := newLauncher(lay, args, stdio, launcherOptions{})
 	stop := installTerminationHandler(l)
 	defer stop()

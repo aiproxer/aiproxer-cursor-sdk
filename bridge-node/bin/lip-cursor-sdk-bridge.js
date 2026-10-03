@@ -28,6 +28,23 @@ function printVersion() {
   );
 }
 
+// The Cursor SDK is proprietary and is not redistributed by the plugin archive, so an
+// installed tree carries package.json and package-lock.json only. The operator
+// provisions node_modules/ once, out of band, with the runtime the archive ships
+// running that runtime's own bundled npm - no global Node and no global npm. npm
+// specifically, because the undici override in package.json is npm `overrides`
+// semantics, which other package managers resolve differently.
+//
+// This shim is defense in depth: the packaged launcher checks the same fact before it
+// starts the runtime, so this message is what a source checkout or a tree that changed
+// underneath a running launcher sees. It runs no package manager either way.
+function provisionCommand() {
+  const npmRel = process.platform === "win32"
+    ? join("..", "node", "node_modules", "npm", "bin", "npm-cli.js")
+    : join("..", "node", "lib", "node_modules", "npm", "bin", "npm-cli.js");
+  return `cd ${root} && ${join("..", "node", process.platform === "win32" ? "node.exe" : "node")} ${npmRel} ci --omit=dev`;
+}
+
 function runDoctor() {
   const pkg = readPackageJSON();
   const issues = [];
@@ -37,7 +54,7 @@ function runDoctor() {
   const sdkPkgPath = join(root, "node_modules", "@cursor", "sdk", "package.json");
   let sdkVersion = "";
   if (!existsSync(sdkPkgPath)) {
-    issues.push("@cursor/sdk not installed in companion package");
+    issues.push("@cursor/sdk is not provisioned in this companion package");
   } else {
     sdkVersion = JSON.parse(readFileSync(sdkPkgPath, "utf8")).version ?? "";
     if (sdkVersion !== PINNED_SDK_VERSION) {
@@ -51,6 +68,7 @@ function runDoctor() {
     for (const issue of issues) {
       process.stderr.write(`${issue}\n`);
     }
+    process.stderr.write(`provision it once with:\n  ${provisionCommand()}\n`);
     process.exitCode = 1;
     return;
   }

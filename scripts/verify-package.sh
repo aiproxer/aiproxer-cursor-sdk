@@ -2,14 +2,32 @@
 #
 # Verify an assembled Cursor SDK plugin install tree.
 #
-# Reports the exact files of an install tree, the checksum of every one of them, and
-# the private runtime metadata, and fails when the tree does not match what the
-# release claims. It checks that every required archive entry exists, that the file
-# set and the checksum record agree in both directions, that every digest matches
-# including the plugin-private files, that the closed host manifest carries the
+# Reports the exact files of an install tree, the checksum of every shipped one of them,
+# and the private runtime metadata, and fails when the tree does not match what the
+# release claims. It checks that every required archive entry exists, that the shipped
+# file set and the checksum record agree in both directions, that every shipped digest
+# matches including the plugin-private files, that the closed host manifest carries the
 # plugin's identity and export posture and claims only the platform the archive was
 # assembled on, and that the shipped private runtime and the plugin-private bridge
-# launcher actually run and report the SDK version the bridge pins.
+# launcher actually run.
+#
+# The Cursor SDK is proprietary and is not redistributed, so an installed tree carries
+# it only after the operator provisions it against the runtime the archive ships. Two
+# tree states decide what a run means, and both are checked in full:
+#
+#   --tree-state installed (default) an installed tree. The operator-provisioned
+#     dependency tree is outside the shipped checksum record - the plugin authenticates
+#     what it ships, the operator authenticates what they provisioned - so its files are
+#     neither "present but not listed" nor digested here. What has to hold instead is
+#     the SDK requirement: the tree resolves the pinned SDK version, or the run fails
+#     with the exact provisioning command.
+#
+#   --tree-state shipped a released archive nobody has provisioned yet. It must carry no
+#     Cursor SDK and nothing that exists only to satisfy it, because shipping the SDK or
+#     its dependency closure would assert a redistribution right nobody has verified.
+#     The scope of that rule is the Cursor SDK and its closure, not the whole tree: the
+#     archive does ship third-party package code, the private runtime's own bundled npm,
+#     and that is expected rather than a finding.
 #
 # The archive layout is not restated here. It is read from
 # cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout.
@@ -26,13 +44,14 @@
 # PATH: the private-runtime variant ships its own runtime, and a verification that
 # needed a global Node would prove the opposite of what it claims.
 #
-# The checksums cover plugin-private files, but nothing here claims the host
-# authenticates them: the host's manifest digest stays the authority for the outer
+# The checksums cover the shipped plugin-private files, but nothing here claims the
+# host authenticates them: the host's manifest digest stays the authority for the outer
 # executable only.
 #
 # Usage:
 #   scripts/verify-package.sh --package-root DIR
 #                             [--report FILE] [--expect-platform os/arch]
+#                             [--tree-state shipped|installed]
 set -euo pipefail
 
 # usage prints the leading comment block of this script, so the help text cannot drift
@@ -44,12 +63,14 @@ usage() {
 package_root=""
 report_path=""
 expect_platform=""
+tree_state=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --package-root) package_root="${2:-}"; shift 2 ;;
     --report) report_path="${2:-}"; shift 2 ;;
     --expect-platform) expect_platform="${2:-}"; shift 2 ;;
+    --tree-state) tree_state="${2:-}"; shift 2 ;;
     -h|--help) usage "$0"; exit 0 ;;
     *) printf 'verify-package: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -140,10 +161,30 @@ manifest_name="$(layout_report manifest)"
 checksums_name="$(layout_report checksums)"
 licenses_dir="$(layout_report licenses_dir)"
 private_prefix="$(layout_report private_prefix)"
+provisioned_prefix="$(layout_report provisioned_prefix)"
 checksum_separator="$(layout_report checksum_separator)"
 outer_executable="$(layout_report outer_executable)"
 launcher_rel="$(layout_report launcher)"
 private_runtime="$(layout_report private_runtime)"
+bridge_package_json="$(layout_report bridge_package_json)"
+bridge_modules="$(layout_report bridge_modules)"
+sdk_package_json="$(layout_report sdk_package_json)"
+sdk_package_name="$(layout_report sdk_package_name)"
+sdk_provision_command="$(layout_report sdk_provision_command)"
+private_npm_cli="$(layout_report private_npm_cli)"
+
+# The tree states are part of the layout contract too, so this script does not spell a
+# state of its own: an unrecognized request is a usage error naming the states the
+# archive contract knows.
+[ -n "$tree_state" ] || tree_state="installed"
+case " $(layout_entries tree_states | tr '\n' ' ') " in
+  *" $tree_state "*) ;;
+  *)
+    printf 'verify-package: --tree-state %s is not one of: %s\n' \
+      "$tree_state" "$(layout_entries tree_states | tr '\n' ' ')" >&2
+    exit 2
+    ;;
+esac
 
 record_path="$package_root/$compatibility_name"
 record_json=""
@@ -192,6 +233,7 @@ same_path() {
 }
 
 line "install root: $package_root"
+line "tree state: $tree_state"
 
 # Protected install ownership: a group- or world-writable plugin root lets any local
 # user replace a checksummed companion after verification, which is exactly the
@@ -214,12 +256,16 @@ while IFS= read -r rel; do
   finding "required archive entry is missing: $rel; reinstall the Cursor plugin package from a complete archive"
 done < <(layout_entries required_entries)
 
-# 2. Checksum record and file set. The record has to describe exactly the files
-#    present: an unlisted file is unaccounted-for content, a listed file that is
-#    gone is a broken install.
+# 2. Checksum record and file set. The record covers shipped files only, so the shipped
+#    side still has to agree in both directions - an unlisted shipped file is
+#    unaccounted-for content, a listed file that is gone is a broken install - while the
+#    operator-provisioned tree is explicitly outside it: the plugin authenticates what
+#    it ships and the operator authenticates what they provisioned. The provisioned
+#    prefix is the whole of that scope, and it comes from the layout contract.
 checksums_path="$package_root/$checksums_name"
 checksum_order=()
 mismatched=0
+provisioned_count=0
 if [ ! -f "$checksums_path" ]; then
   finding "checksum record is missing: $checksums_name; reinstall the Cursor plugin package from a complete archive"
 else
@@ -235,12 +281,32 @@ else
     case " ${checksum_order[*]} " in
       *" $rel "*) finding "duplicate checksum line for $rel"; continue ;;
     esac
+    # A record line for a provisioned file would claim the plugin authenticated the
+    # operator's own npm resolution, which is the one claim the record scope does not
+    # make.
+    case "$rel" in
+      "$provisioned_prefix"*)
+        finding "checksum record lists the operator-provisioned $rel: $checksums_name covers shipped files only; the plugin authenticates what it ships, the operator authenticates what they provisioned"
+        ;;
+    esac
     checksum_order+=("$rel|$digest")
   done <"$checksums_path"
 fi
 
 while IFS= read -r -d '' rel; do
   [ "$rel" = "$checksums_name" ] && continue
+  case "$rel" in
+    "$provisioned_prefix"*)
+      # Outside the shipped record by design, so it is counted and reported rather than
+      # digested. In a shipped archive its presence at all is the finding: the archive
+      # must carry no Cursor SDK and nothing that exists only to satisfy it.
+      provisioned_count=$((provisioned_count + 1))
+      if [ "$tree_state" = shipped ]; then
+        finding "shipped archive contains the third-party package code $rel: the Cursor SDK is not redistributed, so the archive ships no $bridge_modules; the operator provisions it against the shipped runtime with: $sdk_provision_command"
+      fi
+      continue
+      ;;
+  esac
   recorded=""
   for entry in "${checksum_order[@]:-}"; do
     if [ "${entry%%|*}" = "$rel" ]; then recorded="${entry#*|}"; break; fi
@@ -259,8 +325,11 @@ done < <(cd "$package_root" && find . -type f -print0 | sed -z 's|^\./||' | LC_A
 for entry in "${checksum_order[@]:-}"; do
   [ -n "$entry" ] || continue
   rel="${entry%%|*}"
+  case "$rel" in
+    "$provisioned_prefix"*) continue ;;
+  esac
   if [ ! -f "$package_root/$rel" ]; then
-    finding "file listed in $checksums_name is missing: $rel; reinstall the Cursor plugin package"
+    finding "file listed in $checksums_name is missing: ${rel}; reinstall the Cursor plugin package"
   fi
 done
 
@@ -270,6 +339,7 @@ for entry in "${checksum_order[@]:-}"; do
   case "${entry%%|*}" in "$private_prefix"*) private_count=$((private_count + 1)) ;; esac
 done
 files_present="$(find "$package_root" -type f | wc -l | tr -d ' ')"
+shipped_count=$((files_present - provisioned_count))
 
 variant="$(json_string packaging_variant "$record_json")"
 external_node="$(json_scalar external_node_required "$record_json")"
@@ -282,9 +352,10 @@ case "$external_node" in
   *) line 'external node required: yes' ;;
 esac
 line "node on PATH: not required; $private_runtime is the only runtime this tree starts"
-line "files: $files_present present, $listed_count checksummed, $mismatched checksum mismatch(es)"
+line "files: $files_present present ($shipped_count shipped, $provisioned_count operator-provisioned), $listed_count checksummed, $mismatched checksum mismatch(es)"
 line "plugin-private files checksummed: $private_count of $listed_count under $private_prefix"
 line "checksums: $checksums_name (sha256, <digest>${checksum_separator}<install-root-relative path>)"
+line "checksum record scope: shipped files only; $provisioned_prefix is operator-provisioned and outside the record, so the plugin authenticates what it ships and the operator authenticates what they provisioned"
 line "host digest authority: $manifest_name sha256 covers $outer_executable only; nothing here claims the host authenticates companion files"
 
 # 3. Closed host manifest: identity, export posture, and the platform claim.
@@ -352,19 +423,67 @@ if [ -f "$manifest_path" ]; then
   fi
 fi
 
-# 4. Release metadata, and the private runtime and bridge that actually run.
+# 4. The SDK requirement, the release metadata, and the private runtime and bridge that
+#    actually run.
+#
+#    The shipped bridge manifest is the authority for the pinned SDK version: the
+#    release metadata is cross-checked against it rather than trusted on its own, because
+#    the manifest is a shipped file the record cannot contradict. What the tree has to
+#    resolve is the operator's own installation, which is outside the shipped record, so
+#    it is checked as a requirement and never as a digest.
+required_version=""
+if [ -f "$package_root/$bridge_package_json" ]; then
+  required_version="$(sed -n "s|.*\"$sdk_package_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*|\1|p" \
+    "$package_root/$bridge_package_json" | head -n 1)"
+fi
+if [ -z "$required_version" ]; then
+  finding "the shipped $bridge_package_json pins no $sdk_package_name version, so no SDK requirement can be verified; reinstall the Cursor plugin package from a complete archive"
+  required_version="(unknown)"
+fi
+provisioned_version=""
+if [ -f "$package_root/$sdk_package_json" ]; then
+  provisioned_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$package_root/$sdk_package_json" | head -n 1)"
+fi
+
 if [ -n "$record_json" ]; then
-  sdk_version="$(json_string cursor_sdk_version "$record_json")"
-  pinned_version="$(json_string cursor_sdk_pinned_version "$record_json")"
-  if [ -n "$pinned_version" ] && [ -n "$sdk_version" ] && [ "$sdk_version" != "$pinned_version" ]; then
-    finding "release metadata records SDK $sdk_version but the bridge pins $pinned_version"
-  fi
-  line "sdk version (staged production tree): $sdk_version (pinned $pinned_version)"
+  recorded_required="$(json_string cursor_sdk_required_version "$record_json")"
+  case "$recorded_required" in
+    [0-9]*)
+      if [ "$recorded_required" != "$required_version" ]; then
+        finding "release metadata records cursor_sdk_required_version $recorded_required but the shipped $bridge_package_json pins $required_version; the record does not describe this archive"
+      fi
+      ;;
+  esac
+  case "$(json_scalar cursor_sdk_bundled "$record_json")" in
+    true)
+      finding "release metadata records cursor_sdk_bundled true: the Cursor SDK is proprietary and is not redistributed, so no archive bundles it"
+      ;;
+  esac
   line "node engine required: $(json_string bridge_node_engine "$record_json")"
   line "private runtime source: $(json_string private_runtime_source "$record_json")"
   tested_host="$(json_string tested_host_artifact_sha256 "$record_json")"
   line "tested host artifact sha256: ${tested_host:-(not certified in this archive)}"
+fi
 
+line "sdk provisioning command: $sdk_provision_command"
+if [ "$tree_state" = shipped ]; then
+  line "sdk: not redistributed, required $required_version at run time, provisioned: no (operator-provisioned; $private_npm_cli ships so the command above needs no global npm)"
+else
+  case "$provisioned_version" in
+    '')
+      finding "the Cursor SDK is not provisioned: $sdk_package_json not found in this installed tree, and this archive ships no $sdk_package_name; required version $required_version. Provision it once with: $sdk_provision_command"
+      ;;
+    "$required_version")
+      line "sdk: required $required_version, provisioned $provisioned_version"
+      ;;
+    *)
+      finding "the provisioned Cursor SDK is $provisioned_version but the shipped $bridge_package_json pins $required_version; provision the pinned version with: $sdk_provision_command"
+      ;;
+  esac
+fi
+
+if [ -n "$record_json" ]; then
   private_runtime_path="$package_root/$private_runtime"
   launcher_path="$package_root/$launcher_rel"
 
@@ -400,10 +519,18 @@ if [ -n "$record_json" ]; then
     done
     line "private runtime bundled components:${summary# }"
 
-    doctor="$(probe "$launcher_path" doctor)"
-    printf '%s' "$doctor" | grep -q 'doctor: ok' ||
-      finding "the private bridge launcher did not pass doctor through the private runtime: $doctor"
-    line "bridge doctor (launcher -> private runtime -> bridge entry): $doctor"
+    # The launcher starts the packaged runtime and runs the bridge's own doctor, which
+    # resolves the installed SDK. That is an installed-tree question: on a shipped
+    # archive the bridge cannot serve a request until the operator provisions it, and
+    # the SDK requirement above is the finding that says so.
+    if [ "$tree_state" = shipped ]; then
+      line "bridge doctor: not run; a shipped archive cannot serve a request until the operator provisions $bridge_modules"
+    else
+      doctor="$(probe "$launcher_path" doctor)"
+      printf '%s' "$doctor" | grep -q 'doctor: ok' ||
+        finding "the private bridge launcher did not pass doctor through the private runtime: $doctor"
+      line "bridge doctor (launcher -> private runtime -> bridge entry): $doctor"
+    fi
   else
     finding 'the private runtime or the private bridge launcher is missing, so no runtime metadata could be probed'
   fi

@@ -46,6 +46,9 @@ type privateLayout struct {
 	Runtime string
 	// Entry is the fixed bridge entry the private runtime executes.
 	Entry string
+	// private is the archive-level contract the same resolution produced, including the
+	// operator-provisioned SDK slots and the provisioning command.
+	private packagelayout.Private
 }
 
 // argv is the fixed private runtime invocation with the launcher's own arguments
@@ -74,7 +77,7 @@ func privateLayoutFor(launcherExecutable string) (privateLayout, error) {
 		}
 		return privateLayout{}, fmt.Errorf("lip-cursor-sdk-bridge: %w", err)
 	}
-	lay := privateLayout{Runtime: priv.Runtime, Entry: priv.Entry}
+	lay := privateLayout{Runtime: priv.Runtime, Entry: priv.Entry, private: priv}
 	if err := lay.validate(); err != nil {
 		return privateLayout{}, err
 	}

@@ -147,16 +147,20 @@ type installedPrivateLayout struct {
 	launcher string
 	runtime  string
 	entry    string
+	// packageDir is the bridge package directory: the shipped manifest, the built
+	// JavaScript, and the operator-provisioned dependency tree live here.
+	packageDir string
 }
 
 func installPrivateLayout(tb testing.TB, withRuntime, withEntry bool) installedPrivateLayout {
 	tb.Helper()
 	root := filepath.Join(tb.TempDir(), "plugin root with spaces")
 	lay := installedPrivateLayout{
-		root:     root,
-		launcher: filepath.Join(root, "private", "bridge", launcherName+platformExeSuffix()),
-		runtime:  filepath.Join(root, "private", "node", "node"+platformExeSuffix()),
-		entry:    filepath.Join(root, "private", "bridge", "bin", bridgeEntryName),
+		root:       root,
+		launcher:   filepath.Join(root, "private", "bridge", launcherName+platformExeSuffix()),
+		runtime:    filepath.Join(root, "private", "node", "node"+platformExeSuffix()),
+		entry:      filepath.Join(root, "private", "bridge", "bin", bridgeEntryName),
+		packageDir: filepath.Join(root, "private", "bridge"),
 	}
 	require.NoError(tb, os.MkdirAll(filepath.Dir(lay.launcher), 0o755))
 	// The launcher slot only has to exist for resolution; process-level tests

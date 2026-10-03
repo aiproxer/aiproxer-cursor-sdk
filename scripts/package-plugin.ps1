@@ -4,12 +4,24 @@
 
 .DESCRIPTION
     Builds the outer plugin executable and the plugin-private bridge launcher for
-    the host platform, builds the production JavaScript, stages only the
-    production npm dependencies plus the metadata the bridge needs to resolve and
-    verify the SDK version, stages the private Node runtime with its license and
-    provenance notices, renders the closed host manifest and the release metadata,
-    records a checksum over every archive file including the plugin-private ones,
-    and emits a per-platform archive with its own digest.
+    the host platform, builds the production JavaScript out of the source tree,
+    stages the metadata the bridge needs to resolve and verify the SDK version - the
+    package manifest and the lockfile that pins it - plus the private Node runtime
+    together with that runtime's own bundled npm, renders the closed host manifest and
+    the release metadata, records a checksum over every archive file including the
+    plugin-private ones, and emits a per-platform archive with its own digest.
+
+    The archive stages NO Cursor SDK package code. The Cursor SDK is proprietary and is
+    not redistributed, so neither it nor its dependency closure is shipped: the operator
+    provisions that tree once, out of band, with the runtime this archive carries. The
+    archive does ship third-party package code - the private runtime's own bundled npm
+    and the dependencies npm bundles with it - because the provisioning command has to run
+    without a global Node or a global package manager. That code is NOT covered by the
+    Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
+    package npm bundles is licensed on the terms its own manifest declares. So the
+    generated notice attributes each bundled component to that declared license, counts
+    every bundled package in the tree, and names any bundled package that ships no
+    license text of its own.
 
     The archive layout is not restated here. It is read from
     cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the
@@ -200,6 +212,14 @@ function Find-NodeLicense([string]$Executable) {
     Fail "no Node LICENSE found next to $Executable or its parents; a staged private runtime must ship its license notices"
 }
 
+# Get-JsonField reads one field of a JSON object without failing when it is absent.
+function Get-JsonField($Record, [string]$Name) {
+    if (-not $Record) { return '' }
+    $property = $Record.PSObject.Properties[$Name]
+    if (-not $property) { return '' }
+    return $property.Value
+}
+
 # Resolve-PrivateRuntimeSource decides which Node runtime to stage and returns its
 # executable, the license text that ships with it, a provenance label, the kind of
 # source it came from, and any temporary directory the caller has to remove. The kind
@@ -267,18 +287,265 @@ function Resolve-PrivateRuntimeSource([string]$Dist, [string]$Runtime, [string]$
     }
 }
 
-# Write-ThirdPartyNotices records, factually, what the archive redistributes and
-# what is unresolved. It states the licenses the components declare and it does not
-# assert a redistribution right nobody has confirmed.
+# Write-LockedInventory records what the shipped lockfile pins and which half of it the
+# provisioning command actually installs. The archive stages no Cursor SDK package code,
+# so this is the inventory of what the operator's npm will resolve rather than of what
+# the archive carries: naming the pinned versions is still evidence, and stating the
+# attribution next to it is what keeps it honest.
+#
+# An npm lockfile carries a "" key for the project root, which ConvertFrom-Json
+# rejects as a property name and only accepts as a hashtable key.
+function Write-LockedInventory {
+    param(
+        [string]$LockFile,
+        [string]$ManifestFile,
+        [System.Collections.Generic.List[string]]$Lines
+    )
+
+    $lock = Get-Content -LiteralPath $LockFile -Raw | ConvertFrom-Json -AsHashtable
+    $manifest = Get-Content -LiteralPath $ManifestFile -Raw | ConvertFrom-Json -AsHashtable
+    $packages = $lock['packages']
+    if ($null -eq $packages) { $packages = @{} }
+    $root = $packages['']
+    if ($null -eq $root) { $root = @{} }
+
+    # npm resolves a dependency from the dependent's own directory and then from each
+    # enclosing one, so the installed set is the closure of the root dependencies under
+    # that rule. Everything else the lockfile pins is development-only and --omit=dev
+    # leaves it out of an install tree.
+    $depDir = Get-LockfileDependencyDir $packages
+    if (-not $depDir) { throw "the lockfile pins no packages" }
+
+    $installed = [System.Collections.Generic.HashSet[string]]::new()
+    $queue = [System.Collections.Generic.Queue[object]]::new()
+    foreach ($name in @(Get-ManifestNames $root)) {
+        $queue.Enqueue(@('', $name))
+    }
+    while ($queue.Count -gt 0) {
+        $entry = $queue.Dequeue()
+        $from = [string]$entry[0]
+        $key = Resolve-LockEntry -Packages $packages -DependencyDir $depDir -From $from -Name ([string]$entry[1])
+        if (-not $key -or -not $installed.Add($key)) { continue }
+        foreach ($dependency in @(Get-ManifestNames $packages[$key])) {
+            $queue.Enqueue(@($key, $dependency))
+        }
+    }
+
+    $write = {
+        param($keys)
+        $Lines.Add('| package | pinned version |')
+        $Lines.Add('| --- | --- |')
+        foreach ($key in @($keys | Sort-Object)) {
+            $version = [string]$packages[$key]['version']
+            $Lines.Add("| $key | $(if ($version) { $version } else { '(not declared)' }) |")
+        }
+    }
+    & $write @($installed | Where-Object { $packages.ContainsKey($_) })
+    $devOnly = @($packages.Keys | Where-Object { $_ -ne '' -and -not $installed.Contains($_) })
+    if ($devOnly.Count -gt 0) {
+        $Lines.Add('')
+        $Lines.Add('- Development-only packages the lockfile pins and `--omit=dev` leaves out:')
+        $Lines.Add('')
+        & $write $devOnly
+    }
+
+    $overrides = $manifest['overrides']
+    $named = @(if ($overrides) { @($overrides.Keys | Sort-Object) } else { @() })
+    $Lines.Add('')
+    if ($named.Count -eq 0) {
+        $Lines.Add('- The shipped bridge manifest declares no npm overrides.')
+        return
+    }
+$rendered = ($named | ForEach-Object { "$_ $($overrides[$_])" }) -join ', '
+    # Concatenated rather than interpolated: a backtick is an escape character inside a
+    # double-quoted PowerShell string, so an inline one would be swallowed.
+    $Lines.Add('- Security overrides the shipped bridge manifest declares, honored through npm `overrides`: ' +
+        "$rendered.")
+}
+
+# Get-LockfileDependencyDir is the dependency directory name a lockfile keys its
+# packages by, read out of those keys rather than written here so this script never
+# carries a second copy of the layout it stages.
+function Get-LockfileDependencyDir($Packages) {
+    foreach ($key in $Packages.Keys) {
+        if ($key -eq '') { continue }
+        return $key.Split('/')[0]
+    }
+    return ''
+}
+
+# Resolve-LockEntry finds the lockfile key npm would install one dependency to: the
+# dependent's own dependency directory first, then each enclosing one, then the root.
+# Get-ManifestNames returns the dependency and optional-dependency names one lockfile
+# entry declares, as an array even when it declares none, so a caller never asks a
+# missing hashtable for its keys.
+function Get-ManifestNames($Entry) {
+    $names = @()
+    if ($null -eq $Entry) { return $names }
+    if ($Entry['dependencies']) { $names += @($Entry['dependencies'].Keys) }
+    if ($Entry['optionalDependencies']) { $names += @($Entry['optionalDependencies'].Keys) }
+    return @($names | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+}
+
+function Resolve-LockEntry {
+    param(
+        [hashtable]$Packages,
+        [string]$DependencyDir,
+        [string]$From,
+        [string]$Name
+    )
+
+    $base = $From
+    while ($true) {
+        $candidate = if ($base) { "$base/$DependencyDir/$Name" } else { "$DependencyDir/$Name" }
+        if ($Packages.ContainsKey($candidate)) { return $candidate }
+        if (-not $base) { return '' }
+        $cut = $base.LastIndexOf("/$DependencyDir/")
+        $base = if ($cut -lt 0) { '' } else { $base.Substring(0, $cut) }
+    }
+}
+
+# Write-NPMLicenseCoverage records, from the staged tree rather than from an assumption,
+# how many of the packages npm bundles ship their own license text and which ship none.
+#
+# The staged npm LICENSE licenses the npm application and then states that npm's bundled
+# Node package dependencies are licensed on their respective license terms, so the only
+# place a bundled component's license text can come from is that package's own directory.
+# A package that ships none is named here with the license its own manifest declares:
+# implying coverage this archive does not carry is precisely the false claim the notice
+# must not make.
+#
+# The enumeration is the staged filesystem rather than a list carried here, because a
+# runtime staging a different npm ships a different tree. It reaches every dependency
+# directory the tree has, not only the one npm bundles directly: a bundled package may
+# bundle packages of its own, and those ship in this archive too, so an inventory that
+# stopped at the top level would describe less than the archive carries. Names are ordered
+# with an ordinal comparison because Sort-Object would collate case-insensitively and
+# disagree with the shell packager's row order for the same tree.
+function Write-NPMLicenseCoverage {
+    param(
+        [string]$StagedNPMRoot,
+        [string]$NPMRoot,
+        [string]$NPMModules,
+        [System.Collections.Generic.List[string]]$Lines
+    )
+
+    # The two archive-relative paths share the npm root prefix, so the dependency directory
+    # name is read out of the layout contract rather than written into this script.
+    $modulesRel = $NPMModules.Substring($NPMRoot.Length + 1)
+    $separator = [string][System.IO.Path]::DirectorySeparatorChar
+    $modulesPath = Join-Path $StagedNPMRoot ($modulesRel -replace '/', $separator)
+    if (-not (Test-Path -LiteralPath $modulesPath -PathType Container)) {
+        $Lines.Add('  (this npm tree bundles no third-party packages)')
+        return
+    }
+
+    # npm bundles its dependencies as ordinary package directories, scoped names one level
+    # down. The walk is breadth first over the dependency directories it finds, so a
+    # dependency directory nested inside a bundled package is inventoried under the package
+    # that bundles it and reported by a path that says which one.
+    $names = [System.Collections.Generic.List[string]]::new()
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue('')
+    while ($pending.Count -gt 0) {
+        $prefix = $pending.Dequeue()
+        $dir = if ($prefix) { Join-Path $modulesPath ($prefix -replace '/', $separator) } else { $modulesPath }
+        foreach ($entry in Get-ChildItem -LiteralPath $dir -Directory -Force) {
+            $scoped = $entry.Name.StartsWith('@')
+            $packages = if ($scoped) { @(Get-ChildItem -LiteralPath $entry.FullName -Directory -Force) } else { @($entry) }
+            foreach ($package in $packages) {
+                $leaf = if ($scoped) { "$($entry.Name)/$($package.Name)" } else { $package.Name }
+                $name = if ($prefix) { "$prefix/$leaf" } else { $leaf }
+                $names.Add($name)
+                $nested = Get-NestedDependencyDir $package.FullName $modulesRel
+                if ($nested) { $pending.Enqueue("$name/$modulesRel") }
+            }
+        }
+    }
+    $names.Sort([System.StringComparer]::Ordinal)
+
+    $uncovered = [System.Collections.Generic.List[string]]::new()
+    $shippedCount = 0
+    foreach ($name in $names) {
+        $dir = Join-Path $modulesPath ($name -replace '/', $separator)
+        $manifest = Read-Manifest $dir
+        $hasText = @(Get-ChildItem -LiteralPath $dir -File -Force |
+            Where-Object { $_.Name -match '(?i)^licen[sc]e' }).Count -gt 0
+        if ($hasText) { $shippedCount++; continue }
+        $declared = Get-JsonField $manifest 'license'
+        if ($declared -isnot [string] -or -not $declared) { $declared = '(not declared by its package.json)' }
+        $shown = Get-JsonField $manifest 'version'
+        if ($shown -isnot [string] -or -not $shown) { $shown = '(not declared)' }
+        $uncovered.Add("| $name | $shown | $declared | no |")
+    }
+
+    if ($names.Count -eq 0) {
+        $Lines.Add('  (this npm tree bundles no third-party packages)')
+    } elseif ($uncovered.Count -eq 0) {
+        $Lines.Add("  $($names.Count) bundled packages, all of them shipping a license text in their own package directory.")
+        $Lines.Add('  Every one of them carries its license text where the package itself ships it, so')
+        $Lines.Add('  no bundled package depends on a notice this archive does not carry.')
+    } else {
+        $Lines.Add("  $($names.Count) bundled packages, $shippedCount of them shipping a license text in their own package directory.")
+        $Lines.Add("  The $($uncovered.Count) below ship no license text in their own package directory,")
+        $Lines.Add('  and this archive redistributes none for them. They are named here rather than')
+        $Lines.Add('  left to be assumed covered. The license column is what each package.json declares:')
+        $Lines.Add('')
+        $Lines.Add('| bundled package | bundled version | declared license | license text shipped |')
+        $Lines.Add('| --- | --- | --- | --- |')
+        foreach ($row in $uncovered) { $Lines.Add($row) }
+    }
+}
+
+# Get-NestedDependencyDir reports the dependency directory a bundled package carries inside
+# itself, or nothing when it has none. The directory name comes from the layout contract for
+# the same reason the walk's starting point does: a script that spelled it out could stage
+# the previous layout's tree. A reparse point is a link into a tree staged elsewhere rather
+# than code this archive ships here, and following one could reach a directory the walk has
+# already inventoried.
+function Get-NestedDependencyDir([string]$PackageDir, [string]$ModulesDir) {
+    $nested = Join-Path $PackageDir $ModulesDir
+    $item = Get-Item -LiteralPath $nested -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.PSIsContainer) { return '' }
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return '' }
+    return $nested
+}
+
+# Read-Manifest reads one staged package.json, answering an empty result for a package
+# that does not have one: a bundled directory without a manifest is reported as
+# undeclared rather than failing packaging.
+function Read-Manifest([string]$PackageDir) {
+    $file = Join-Path $PackageDir 'package.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+# Write-ThirdPartyNotices records, factually, what the archive redistributes, what it
+# deliberately does not, and who owns what. It states the licenses the redistributed
+# components declare, it asserts no redistribution right nobody has confirmed, and it
+# says plainly that the provisioned dependency tree is the operator's own resolution
+# rather than this project's artifact.
 function Write-ThirdPartyNotices {
     param(
         [string]$Path,
+        [string]$LockFile,
+        [string]$SDKPackageName,
+        [string]$BridgeManifest,
         [string]$ModulesDir,
+        [string]$PrivateNPMRoot,
+        [string]$PrivateNPMLicense,
+        [string]$PrivateNPMModules,
+        [string]$StagedNPMRoot,
         [string]$PrivateRuntime,
         [string]$NodeVersion,
         [string]$NodeSourceKind,
         [string]$NodeSource,
-        [string]$Platform
+        [string]$Platform,
+        [string]$ProvisionCommand
     )
 
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -302,42 +569,70 @@ function Write-ThirdPartyNotices {
     $lines.Add('- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds')
     $lines.Add('  the Node.js license grant together with the notices for the components Node')
     $lines.Add('  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.')
+    $lines.Add('  That grant is Node''s own and does not extend to the npm tree below.')
+    $lines.Add('- The runtime ships with its own bundled npm, and so does this archive, at')
+    # ${...} rather than a bare $PrivateNPMRoot: PowerShell reads a colon straight
+    # after a variable name as part of that name and rejects the reference.
+    $lines.Add("  ${PrivateNPMRoot}: that is what the provisioning command below runs, so an")
+    $lines.Add('  operator needs neither a global Node nor a global package manager.')
+    $lines.Add('- That npm tree, together with the third-party packages npm bundles inside it, IS')
+    $lines.Add('  third-party package code shipped by this archive, and it is the only such code')
+    $lines.Add('  here. It is NOT licensed under the Node.js MIT grant. npm ships its own license')
+    $lines.Add('  text inside the staged npm tree, at')
+    $lines.Add("  $PrivateNPMLicense")
+    $lines.Add('  That text licenses the npm application under the Artistic License 2.0 and states')
+    $lines.Add('  that npm''s bundled Node package dependencies are licensed on their respective')
+    $lines.Add('  license terms.')
+    $lines.Add('- The packages npm bundles under')
+    $lines.Add("  $PrivateNPMModules")
+    $lines.Add('  are each licensed on the terms their own package.json declares. Where such a')
+    $lines.Add('  package ships its own license text, it ships in that package directory; where it')
+    $lines.Add('  ships none, this archive redistributes none for it, and the coverage statement')
+    $lines.Add('  below names it rather than leaving it implied. The Node distribution license does')
+    $lines.Add('  not carry those texts, and no coverage by it is claimed here. What the staged tree')
+    $lines.Add('  actually contains, read from every dependency directory in it, nested ones included:')
+    Write-NPMLicenseCoverage -StagedNPMRoot $StagedNPMRoot `
+        -NPMRoot $PrivateNPMRoot -NPMModules $PrivateNPMModules -Lines $lines
+    $lines.Add('')
     $lines.Add('- Components the staged runtime reports about itself:')
     $versions = (Invoke-Tool -Command $PrivateRuntime -Arguments @('-p', 'JSON.stringify(process.versions)')) | ConvertFrom-Json
     foreach ($entry in ($versions.PSObject.Properties | Sort-Object Name)) {
         $lines.Add("  - $($entry.Name) $($entry.Value)")
     }
     $lines.Add('')
-    $lines.Add('## Production npm dependencies')
+    $lines.Add('## Cursor SDK: not redistributed, operator-provisioned')
     $lines.Add('')
-    $lines.Add('| package | version | declared license | staged at |')
-    $lines.Add('| --- | --- | --- | --- |')
-    foreach ($manifest in (Get-ChildItem -LiteralPath $ModulesDir -Filter 'package.json' -File -Recurse | Sort-Object FullName)) {
-        try {
-            $pkg = Get-Content -LiteralPath $manifest.FullName -Raw | ConvertFrom-Json
-        } catch {
-            continue
-        }
-        $name = ($pkg.PSObject.Properties['name'] | Select-Object -First 1)
-        if (-not $name) { continue }
-        $rel = [System.IO.Path]::GetRelativePath($ModulesDir, $manifest.FullName).Replace('\', '/')
-        $pkgVersion = ($pkg.PSObject.Properties['version'] | Select-Object -First 1)
-        $license = ($pkg.PSObject.Properties['license'] | Select-Object -First 1)
-        $lines.Add("| $($name.Value) | $(if ($pkgVersion) { $pkgVersion.Value } else { '(not declared)' }) | " +
-            "$(if ($license) { [string]$license.Value } else { '(not declared in package.json)' }) | $rel |")
-    }
-    $lines.Add('')
-    $lines.Add('## Cursor SDK')
-    $lines.Add('')
-    $lines.Add('- @cursor/sdk is proprietary. Its staged LICENSE.md states that use is subject to')
+    $lines.Add("- $SDKPackageName is proprietary. Its LICENSE.md states that use is subject to")
     $lines.Add("  Cursor's Terms of Service (https://cursor.com/terms-of-service) and it grants no")
-    $lines.Add('  redistribution right. It is staged because the bridge cannot resolve it otherwise.')
-    $lines.Add('- The platform package ships bundled native binaries (rg and cursandbox). Their')
-    $lines.Add('  license texts are not redistributed by the package, and no ripgrep license text')
-    $lines.Add('  is present in the staged tree.')
-    $lines.Add('- ACTION REQUIRED before any publication: a maintainer has to confirm the')
-    $lines.Add('  redistribution rights for @cursor/sdk and for its bundled binaries. Until that')
-    $lines.Add('  confirmation exists this archive is release-blocked.')
+    $lines.Add('  redistribution right. Its platform package additionally ships bundled native')
+    $lines.Add('  binaries (rg and cursandbox) whose own license texts the package does not')
+    $lines.Add('  redistribute.')
+    $lines.Add("- This archive therefore contains no $SDKPackageName and none of its dependency")
+    $lines.Add('  closure. The scope of that claim is the Cursor SDK and its closure: the')
+    $lines.Add('  third-party package code this archive does ship is the npm tree named above, and')
+    $lines.Add('  nothing else. The checksums in this archive cover the shipped files only.')
+    $lines.Add("- The operator obtains the SDK themselves, accepting Cursor's terms, and")
+    $lines.Add('  provisions it once with the runtime this archive ships:')
+    $lines.Add('')
+    $lines.Add("      $ProvisionCommand")
+    $lines.Add('')
+    $lines.Add('- npm specifically, not any package manager: `overrides` semantics differ')
+    $lines.Add('  across package managers and the security baseline below depends on that')
+    $lines.Add('  override being honored. A tree provisioned with another package manager is')
+    $lines.Add('  unsupported.')
+    $lines.Add('- Provisioning is an install-time operator step. The plugin never installs')
+    $lines.Add('  anything, runs no package manager, and downloads nothing.')
+    $lines.Add("- Provisioning writes $ModulesDir in the install tree.")
+    $lines.Add('- The provisioned tree is operator-attributable: it is resolved by the')
+    $lines.Add("  operator's npm from the shipped lockfile, it is outside this project's")
+    $lines.Add('  checksum record, and no notice in this archive covers it.')
+    $lines.Add('')
+    $lines.Add('## Locked dependency closure (pinned, not shipped)')
+    $lines.Add('')
+    $lines.Add('- What the shipped lockfile pins for the operator to provision:')
+    $lines.Add('')
+    Write-LockedInventory -LockFile $LockFile -ManifestFile $BridgeManifest -Lines $lines
+    $lines.Add('')
     $lines.Add('')
     $lines.Add('## Plugin')
     $lines.Add('')
@@ -405,20 +700,24 @@ try {
     Invoke-Tool -Command 'go' -Arguments @('build', '-trimpath', '-ldflags=-buildid=', '-o', $outerExe, $outerCommand) -WorkingDirectory $RepoRoot | Out-Null
     Invoke-Tool -Command 'go' -Arguments @('build', '-trimpath', '-ldflags=-buildid=', '-o', $launcher, ('./cmd/' + [string]$layout.launcher_name)) -WorkingDirectory $RepoRoot | Out-Null
 
-    # 2. Production JavaScript. The dev toolchain stays in the source tree; only
-    #    the built output and the production dependency tree are staged.
+    # 2. Production JavaScript. The dev toolchain stays in the source tree and never
+    #    enters the archive; only the built output does.
     $bridgeSource = Join-Path $RepoRoot 'bridge-node'
     Invoke-Tool -Command 'npm' -Arguments @('ci', '--no-audit', '--no-fund') -WorkingDirectory $bridgeSource | Out-Null
     Invoke-Tool -Command 'npm' -Arguments @('run', 'build') -WorkingDirectory $bridgeSource | Out-Null
 
-    # 3. Plugin-private bridge tree. The lockfile is present only so npm can
-    #    resolve the production tree; the archive itself needs no package manager.
+    # 3. Plugin-private bridge tree. The manifest and the lockfile ship because they are
+    #    what the operator provisions against: the manifest pins the SDK version the
+    #    bridge verifies at run time, and the lockfile pins the exact closure and the
+    #    undici security override. The dependency closure itself is NOT staged - the
+    #    Cursor SDK is proprietary and is not redistributed - so the archive needs no
+    #    package manager of its own to run.
     $bridgeDir = Join-Path $staging ($layout.bridge_package_dir -replace '/', $sep)
     New-Item -ItemType Directory -Path $bridgeDir -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $bridgeSource 'package.json') -Destination (Join-Path $bridgeDir 'package.json')
-    Copy-Item -LiteralPath (Join-Path $bridgeSource 'package-lock.json') -Destination (Join-Path $bridgeDir 'package-lock.json')
-    Invoke-Tool -Command 'npm' -Arguments @('ci', '--omit=dev', '--no-audit', '--no-fund') -WorkingDirectory $bridgeDir | Out-Null
-    Remove-Item -LiteralPath (Join-Path $bridgeDir 'package-lock.json') -Force
+    Copy-Item -LiteralPath (Join-Path $bridgeSource (Split-Path -Leaf ([string]$layout.bridge_package_json))) `
+        -Destination (Join-Path $staging ($layout.bridge_package_json -replace '/', $sep))
+    Copy-Item -LiteralPath (Join-Path $bridgeSource (Split-Path -Leaf ([string]$layout.bridge_package_lock))) `
+        -Destination (Join-Path $staging ($layout.bridge_package_lock -replace '/', $sep))
 
     $bridgeDist = Join-Path $staging ($layout.bridge_dist -replace '/', $sep)
     New-Item -ItemType Directory -Path $bridgeDist -Force | Out-Null
@@ -429,7 +728,6 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $bridgeEntry) -Force | Out-Null
     $bridgeEntrySource = Join-Path $bridgeSource ((Get-BridgeRelativePath $layout $layout.bridge_entry) -replace '/', $sep)
     Copy-Item -LiteralPath $bridgeEntrySource -Destination $bridgeEntry -Force
-    $bridgeModulesDir = Join-Path $bridgeDir ((Get-BridgeRelativePath $layout $layout.bridge_modules) -replace '/', $sep)
 
     # 4. Private Node runtime plus the notices that have to travel with it.
     $licensesDir = Join-Path $staging $layout.licenses_dir
@@ -454,8 +752,29 @@ try {
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'plugin-LICENSE') -Force
     $nodeVersion = (Invoke-Tool -Command $privateRuntime -Arguments @('--version')).Trim()
 
+    # The runtime ships with its own npm, and so does this archive. Without it the
+    # provisioning command would need a global package manager, which is the
+    # prerequisite the private runtime exists to remove. It is resolved from the same
+    # installation the runtime came from, so an archive carries the npm that belongs to
+    # its runtime rather than whatever npm happens to be nearest on the build machine.
+    $npmRel = ([string]$layout.private_npm_root).Substring(([string]$layout.private_runtime_dir).Length + 1)
+    $npmSource = ''
+    foreach ($npmRoot in @((Split-Path -Parent $runtimeSource.Executable),
+            (Split-Path -Parent (Split-Path -Parent $runtimeSource.Executable)))) {
+        $candidate = Join-Path $npmRoot ($npmRel -replace '/', $sep)
+        if (Test-Path -LiteralPath $candidate -PathType Container) { $npmSource = $candidate; break }
+    }
+    if (-not $npmSource) {
+        Fail "no bundled npm found at $npmRel beside $($runtimeSource.Executable); stage an official Node distribution with -NodeDist so the archive ships the npm that provisions the Cursor SDK"
+    }
+    $npmTarget = Join-Path $staging ($layout.private_npm_root -replace '/', $sep)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $npmTarget) -Force | Out-Null
+    Copy-Item -LiteralPath $npmSource -Destination $npmTarget -Recurse -Force
+
     # 5. Closed host manifest and release metadata, both derived from the staged
-    #    tree rather than described independently of it.
+    #    tree rather than described independently of it. The renderer refuses to describe
+    #    a tree carrying the Cursor SDK dependency closure, so a packager that staged one
+    #    fails here rather than publishing a bundle it must not ship.
     $exeDigest = Read-FileSHA256 $outerExe
     Invoke-Tool -Command 'go' -Arguments @(
         'run', './cmd/lip-cursor-sdk-packaging', 'render',
@@ -465,9 +784,18 @@ try {
     ) -WorkingDirectory $RepoRoot | Out-Null
 
     Write-ThirdPartyNotices -Path (Join-Path $licensesDir 'THIRD-PARTY-NOTICES.md') `
-        -ModulesDir $bridgeModulesDir -PrivateRuntime $privateRuntime `
+        -LockFile (Join-Path $staging ($layout.bridge_package_lock -replace '/', $sep)) `
+        -BridgeManifest (Join-Path $staging ($layout.bridge_package_json -replace '/', $sep)) `
+        -SDKPackageName ([string]$layout.sdk_package_name) `
+        -ModulesDir ([string]$layout.bridge_modules) `
+        -PrivateNPMRoot ([string]$layout.private_npm_root) `
+        -PrivateNPMLicense ([string]$layout.private_npm_license) `
+        -PrivateNPMModules ([string]$layout.private_npm_modules) `
+        -StagedNPMRoot $npmTarget `
+        -PrivateRuntime $privateRuntime `
         -NodeVersion $nodeVersion -NodeSourceKind $runtimeSource.Kind `
-        -NodeSource $runtimeSource.Label -Platform $layout.platform
+        -NodeSource $runtimeSource.Label -Platform $layout.platform `
+        -ProvisionCommand ([string]$layout.sdk_provision_command)
 
     # 6. Checksums over every archive file, plugin-private files included. The
     #    record cannot cover itself, so it is written last. The order is ordinal by
@@ -513,6 +841,8 @@ try {
     Write-Output "node_version: $nodeVersion"
     Write-Output "node_source_kind: $($runtimeSource.Kind)"
     Write-Output "node_source: $($runtimeSource.Label)"
+    Write-Output "cursor_sdk_bundled: no (operator-provisioned; $($layout.sdk_package_name) is not redistributed)"
+    Write-Output "sdk_provision_command: $($layout.sdk_provision_command)"
     Write-Output "file_count: $($digests.Count + 1)"
 } finally {
     if (Test-Path -LiteralPath $staging) { Remove-Item -Recurse -Force -LiteralPath $staging }

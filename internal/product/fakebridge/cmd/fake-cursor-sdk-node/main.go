@@ -46,6 +46,10 @@ type script struct {
 	ChildPIDFile string `json:"childPidFile"`
 	// SpawnChild starts a long-lived descendant before serving.
 	SpawnChild bool `json:"spawnChild"`
+	// FlushedFile, when set, is written by the hold mode once all of stdin has
+	// been forwarded to stdout. It is the barrier a caller needs before it tears
+	// the runtime down, because forwarding is otherwise invisible from outside.
+	FlushedFile string `json:"flushedFile"`
 }
 
 func main() {
@@ -123,6 +127,13 @@ func main() {
 	case "hold":
 		go func() {
 			_, _ = io.Copy(os.Stdout, os.Stdin)
+			// Forwarding ends at stdin EOF, after the last write reached the
+			// runtime's stdout pipe. A caller that tears the runtime down needs to
+			// know that happened before it starts the teardown, so the optional
+			// barrier file is written here and never before.
+			if sc.FlushedFile != "" {
+				_ = os.WriteFile(sc.FlushedFile, []byte("flushed\n"), 0o644)
+			}
 		}()
 		blockForever()
 	case "echo":
