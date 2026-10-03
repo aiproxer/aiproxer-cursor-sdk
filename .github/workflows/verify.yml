@@ -129,16 +129,17 @@ jobs:
     # so the Windows/amd64 claim has enforced CI evidence of its own rather than a
     # maintainer's word, not to multiply claims.
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
       GOWORK: "off"
-      # The gate assembles a real archive (production JavaScript, production
-      # dependency tree over the network, a private Node runtime), so it is opt-in
-      # rather than part of the default unit lane, and this lane is what opts in.
+      # The gate assembles a real archive (production JavaScript, a private Node
+      # runtime) and resolves the Cursor SDK over the network exactly as an operator
+      # does, so it is opt-in rather than part of the default unit lane, and this lane
+      # is what opts in.
       LIP_PACKAGE_GATE: "1"
     steps:
       - name: Check out repository
@@ -151,9 +152,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Packaging is a build-time operation: npm resolves the production dependency
-      # tree and stages the private Node runtime from the runner's Node toolchain.
-      # Nothing in the assembled archive needs npm or a global Node at run time.
+      # Packaging is a build-time operation: npm builds the production JavaScript and
+      # stages the private Node runtime from the runner's Node toolchain. Nothing the
+      # assembled archive needs at run time is looked up on PATH, and no
+      # third-party package code ships in it: the operator provisions the Cursor SDK
+      # against the runtime the archive carries.
       - name: Setup Node (22.22.3)
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -164,18 +167,19 @@ jobs:
       - name: Download modules
         run: go mod download
 
-      # Assembles the archive, verifies it, and fails on a tampered or missing
-      # private file, an unlisted or missing file, a platform overclaim, a missing
-      # companion, an install root containing spaces, or any dependence on a global
-      # Node for the private-runtime variant.
+      # Assembles the archive, audits it as a released artifact, provisions it the way
+      # an operator does, and fails on an archive carrying the SDK, an unprovisioned
+      # installed tree, a provisioned tree at the wrong SDK version, a tampered or
+      # missing shipped file, a checksum record covering operator-provisioned files, an
+      # unlisted or missing shipped file, a platform overclaim, a missing companion, an
+      # install root containing spaces, or any dependence on a global Node.
       #
-      # -timeout is raised off Go's 10m default on purpose. The gate verifies one
-      # assembled tree about fifteen times (every way a package can lie has to be
-      # shown to fail), each verification walks and digests the whole staged tree
-      # including the private Node runtime, and on a POSIX runner every one of those
-      # verifications runs the shell verifier as well as the PowerShell one. Ten
-      # minutes is not a budget this lane can meet, and a lane that panics on the
-      # default reports no platform evidence at all. It stays inside the job's own
-      # 30m ceiling so a slow run is a failure with a real report rather than a kill.
+      # -timeout is raised off Go's 10m default on purpose. The gate verifies an
+      # assembled tree about twenty times (every way a package can lie has to be
+      # shown to fail), each verification walks and digests the whole tree, and one
+      # verification resolves the SDK over the network. Ten minutes is not a budget
+      # this lane can meet, and a lane that panics on the default reports no platform
+      # evidence at all. It stays inside the job's own 45m ceiling so a slow run is a
+      # failure with a real report rather than a kill.
       - name: Native package platform validation
-        run: go test -count=1 -timeout 25m -run TestPackageArchive -v .
+        run: go test -count=1 -timeout 40m -run TestPackageArchive -v .

@@ -54,10 +54,18 @@ const (
 	// for the outer process only.
 	PrivatePrefix = "private/"
 
-	// ModulesDirName is the staged production npm dependency directory. It is named
-	// here rather than in a packaging script so that a script which has to know it
-	// reads it from this contract instead of restating it.
+	// ModulesDirName is the npm dependency directory name. Inside the bridge package
+	// directory it is operator-provisioned and never shipped: the proprietary Cursor
+	// SDK is not redistributed, so the archive stages the manifest and the lockfile
+	// that pin it and nothing else. Inside the private runtime directory it is the
+	// runtime's own bundled npm, which does ship, because provisioning has to run
+	// without a global package manager. It is named here rather than in a packaging
+	// script so that a script which has to know it reads it from this contract
+	// instead of restating it.
 	ModulesDirName = "node_modules"
+
+	// SDKPackageName is the proprietary package the operator provisions.
+	SDKPackageName = "@cursor/sdk"
 
 	// BridgeDistDirName is the built production JavaScript directory inside the bridge
 	// package directory. Both packagers have to name it in the source tree as well as
@@ -67,11 +75,32 @@ const (
 	// directory out, and a static guard can then see that it did.
 	BridgeDistDirName = "dist"
 
+	// BridgeLockFileName is the lockfile that pins the SDK version and the undici
+	// override. The archive ships it so the operator's `npm ci` resolves exactly the
+	// versions the bridge verifies at run time.
+	BridgeLockFileName = "package-lock.json"
+
 	binDirName            = "bin"
 	privateDirName        = "private"
 	bridgeDirName         = "bridge"
 	runtimeDirName        = "node"
 	bridgePackageJSONName = "package.json"
+	// licenseFileName is the name npm's own license text carries inside its package
+	// directory. npm is licensed separately from Node.js - its LICENSE states that the
+	// npm application is licensed under the Artistic License 2.0 and that npm's bundled
+	// Node package dependencies are licensed on their respective license terms - so the
+	// notice names this file rather than the Node distribution license.
+	licenseFileName = "LICENSE"
+	// npmDirName is the runtime's own bundled npm, and libDirName is the POSIX
+	// distribution's location of it: node-vXX-linux-x64 keeps the runtime in bin/ and
+	// npm under lib/, while node-vXX-win-x64 keeps both at the distribution root. The
+	// archive stages npm where its own distribution keeps it, so nothing inside the
+	// npm tree is renamed and the entry point the provisioning command names is the
+	// real one.
+	npmDirName    = "npm"
+	libDirName    = "lib"
+	npmCLIName    = "npm-cli.js"
+	npmBinDirName = "bin"
 )
 
 // RuntimeRelDoc is the documented, platform-agnostic spelling of the private
@@ -182,7 +211,10 @@ func (a Archive) BridgeEntryPath() string { return entryRelPath }
 // BridgeDistPath is the built production JavaScript directory.
 func (a Archive) BridgeDistPath() string { return a.BridgePackageDirPath() + "/" + BridgeDistDirName }
 
-// BridgeModulesPath is the staged production npm dependency tree.
+// BridgeModulesPath is the operator-provisioned npm dependency tree of the bridge
+// package. It is not archive content: the Cursor SDK is proprietary and is not
+// redistributed, so the archive ships the manifest and the lockfile and the operator
+// resolves the tree. Everything that has to talk about the tree resolves it here.
 func (a Archive) BridgeModulesPath() string {
 	return a.BridgePackageDirPath() + "/" + ModulesDirName
 }
@@ -193,15 +225,125 @@ func (a Archive) BridgePackageJSONPath() string {
 	return a.BridgePackageDirPath() + "/" + bridgePackageJSONName
 }
 
+// BridgePackageLockPath is the shipped lockfile that pins the SDK and the undici
+// security override. It is archive content and required: without it the operator
+// could not provision a pinned, reproducible tree.
+func (a Archive) BridgePackageLockPath() string {
+	return a.BridgePackageDirPath() + "/" + BridgeLockFileName
+}
+
+// ProvisionedSDKDirPath is the operator-provisioned SDK package directory.
+func (a Archive) ProvisionedSDKDirPath() string {
+	return a.BridgeModulesPath() + "/" + SDKPackageName
+}
+
+// ProvisionedSDKPackageJSONPath is the provisioned SDK package metadata the bridge
+// entry and the run-time preflight read to learn the installed SDK version.
+func (a Archive) ProvisionedSDKPackageJSONPath() string {
+	return a.ProvisionedSDKDirPath() + "/" + bridgePackageJSONName
+}
+
+// PrivateRuntimeDirPath is the plugin-private runtime directory. It holds the
+// runtime executable and that runtime's own bundled npm.
+func (a Archive) PrivateRuntimeDirPath() string {
+	return PrivatePrefix + runtimeDirName
+}
+
+// PrivateRuntimeNPMRel is the bundled npm tree's path relative to the private
+// runtime directory, which is where the platform's own Node distribution keeps it.
+func (a Archive) PrivateRuntimeNPMRel() string {
+	if a.goos == "windows" {
+		return ModulesDirName + "/" + npmDirName
+	}
+	return libDirName + "/" + ModulesDirName + "/" + npmDirName
+}
+
+// PrivateRuntimeNPMRootPath is the shipped npm package root.
+func (a Archive) PrivateRuntimeNPMRootPath() string {
+	return a.PrivateRuntimeDirPath() + "/" + a.PrivateRuntimeNPMRel()
+}
+
+// PrivateRuntimeNPMCLIPath is the npm entry point the provisioning command names.
+func (a Archive) PrivateRuntimeNPMCLIPath() string {
+	return a.PrivateRuntimeNPMRootPath() + "/" + npmBinDirName + "/" + npmCLIName
+}
+
+// PrivateRuntimeNPMLicensePath is npm's own license text, which ships inside the
+// staged npm tree rather than being collected into the notice directory.
+//
+// It is a separate archive location from the Node distribution license for the same
+// reason npm is a separate license: the staged LICENSE states that the npm application
+// is licensed under the Artistic License 2.0 and that npm's bundled Node package
+// dependencies are licensed on their respective license terms, so the Node.js MIT
+// grant does not reach either. The notice points here rather than at
+// LICENSES/nodejs-LICENSE, which carries the Node grant.
+func (a Archive) PrivateRuntimeNPMLicensePath() string {
+	return a.PrivateRuntimeNPMRootPath() + "/" + licenseFileName
+}
+
+// PrivateRuntimeNPMModulesPath is the dependency directory npm bundles inside its own
+// package, and this archive ships it with npm. Each package in it carries its own
+// license text in its own package directory, so the notice attributes each bundled
+// component to that text rather than to a single distribution-wide license.
+func (a Archive) PrivateRuntimeNPMModulesPath() string {
+	return a.PrivateRuntimeNPMRootPath() + "/" + ModulesDirName
+}
+
+// provisionCommandDocPrefix is the placeholder a documented provisioning command
+// carries in place of the install root, which documentation and release metadata do
+// not know. An operator substitutes it; the launcher prints the resolved root.
+const provisionCommandDocPrefix = "<plugin-root>"
+
+// provisionArgs is the npm invocation that provisions the pinned tree. --omit=dev
+// keeps the development toolchain out of an install tree, and `ci` installs exactly
+// what the shipped lockfile pins.
+//
+// npm specifically, and not any package manager: the `overrides` block in the bridge
+// manifest is what pins the undici security fix, and overrides are npm semantics that
+// another package manager resolves differently. A tree provisioned with one is
+// unsupported.
+const provisionArgs = "ci --omit=dev"
+
+// ProvisionCommand is the one command an operator runs to provision the Cursor SDK
+// into an installed tree at installRoot. Both operands are inside the archive and
+// relative to the directory the command changes into, so the command needs no global
+// Node and no global npm: it runs the runtime the archive ships, through that
+// runtime's own bundled npm. An empty installRoot renders the documented placeholder
+// spelling.
+func (a Archive) ProvisionCommand(installRoot string) string {
+	fromBridgeDir := "../" + runtimeDirName + "/"
+	runtime := fromBridgeDir + PrivateRuntimeName + a.ExeSuffix()
+	npmCLI := fromBridgeDir + a.PrivateRuntimeNPMRel() + "/" + npmBinDirName + "/" + npmCLIName
+
+	dir := a.BridgePackageDirPath()
+	if installRoot != "" {
+		dir = strings.TrimRight(filepath.ToSlash(installRoot), "/") + "/" + dir
+	} else {
+		dir = provisionCommandDocPrefix + "/" + dir
+	}
+	return "cd " + dir + " && " + runtime + " " + npmCLI + " " + provisionArgs
+}
+
 // PrivateRuntimePath is the private Node runtime executable.
 func (a Archive) PrivateRuntimePath() string {
-	return PrivatePrefix + runtimeDirName + "/" + PrivateRuntimeName + a.ExeSuffix()
+	return a.PrivateRuntimeDirPath() + "/" + PrivateRuntimeName + a.ExeSuffix()
 }
+
+// ProvisionedPrefix is the install-root-relative prefix of every operator-provisioned
+// file, with its trailing separator. It is platform-independent because the
+// provisioned tree lives in the bridge package directory. The shipped checksum
+// record covers shipped files only, so this prefix is exactly the scope outside it:
+// the plugin authenticates what it ships and the operator authenticates what they
+// provisioned.
+const ProvisionedPrefix = PrivatePrefix + bridgeDirName + "/" + ModulesDirName + "/"
 
 // RequiredEntries is the exact set of install-root entries an installable
 // archive must contain. Directories are included because an archive without the
-// production JavaScript or the production dependency tree is not installable
-// even when every fixed file is present.
+// production JavaScript or the runtime's bundled npm is not installable even when
+// every fixed file is present.
+//
+// The operator-provisioned dependency tree is deliberately absent: it is not archive
+// content, and requiring it would make the archive claim a bundle it must not ship.
 func (a Archive) RequiredEntries() []string {
 	entries := []string{
 		a.ManifestPath(),
@@ -209,9 +351,10 @@ func (a Archive) RequiredEntries() []string {
 		a.LauncherPath(),
 		a.BridgeEntryPath(),
 		a.BridgeDistPath(),
-		a.BridgeModulesPath(),
 		a.BridgePackageJSONPath(),
+		a.BridgePackageLockPath(),
 		a.PrivateRuntimePath(),
+		a.PrivateRuntimeNPMCLIPath(),
 		a.CompatibilityPath(),
 		a.ChecksumsPath(),
 		a.LicensesDir(),
@@ -244,6 +387,21 @@ type Private struct {
 	// runtime and the entry, relative to the install root.
 	RuntimeRel string
 	EntryRel   string
+	// PackageDir is the bridge package directory. It holds the shipped bridge
+	// manifest that names the pinned SDK version and is the directory the
+	// provisioning command changes into.
+	PackageDir string
+	// SDKPackageJSON is the operator-provisioned SDK package metadata, absent until
+	// the operator provisions it.
+	SDKPackageJSON string
+	// NPMCLI is the shipped npm entry point the provisioning command runs.
+	NPMCLI string
+	// ProvisionedPrefix is the install-root-relative prefix of every
+	// operator-provisioned file, with its trailing separator.
+	ProvisionedPrefix string
+	// ProvisionCommand is the exact command that provisions the pinned SDK into this
+	// install tree, with the resolved package directory.
+	ProvisionCommand string
 }
 
 // ErrUnknownLauncherPath marks a launcher path that cannot name a private
@@ -251,10 +409,10 @@ type Private struct {
 // unusable.
 var ErrUnknownLauncherPath = errors.New("cannot locate the launcher executable")
 
-// PrivateFor resolves the private runtime and bridge entry for a launcher
-// executable installed at a plugin-private archive location. It touches no
-// filesystem: checking the slots is a separate step so a caller can report an
-// unusable launcher path without probing a guessed root.
+// PrivateFor resolves the private runtime, the bridge entry, and the provisioning
+// slots for a launcher executable installed at a plugin-private archive location. It
+// touches no filesystem: checking the slots is a separate step so a caller can report
+// an unusable launcher path without probing a guessed root.
 func PrivateFor(launcherExecutable, goos string) (Private, error) {
 	self := strings.TrimSpace(launcherExecutable)
 	if self == "" {
@@ -263,11 +421,28 @@ func PrivateFor(launcherExecutable, goos string) (Private, error) {
 	// The launcher lives in private/bridge/, so the runtime is its sibling
 	// private/node/ directory and the entry is its own bin/ subdirectory.
 	root := filepath.Dir(filepath.Clean(self))
+	installRoot := filepath.Clean(filepath.Join(root, "..", ".."))
+	suffix := ExeSuffixFor(goos)
+	packageDir := filepath.Clean(root)
+	// The npm tree is staged where the platform's Node distribution keeps it, so the
+	// entry point the provisioning command names is the real one rather than a path
+	// invented for the archive.
+	npmRel := ModulesDirName + "/" + npmDirName
+	if goos != "windows" {
+		npmRel = libDirName + "/" + ModulesDirName + "/" + npmDirName
+	}
+	archive := Archive{goos: goos}
 	return Private{
-		Runtime:    filepath.Clean(filepath.Join(root, "..", runtimeDirName, PrivateRuntimeName+ExeSuffixFor(goos))),
-		Entry:      filepath.Clean(filepath.Join(root, binDirName, BridgeEntryName)),
-		RuntimeRel: PrivatePrefix + runtimeDirName + "/" + PrivateRuntimeName + ExeSuffixFor(goos),
+		Runtime:    filepath.Join(root, "..", runtimeDirName, PrivateRuntimeName+suffix),
+		Entry:      filepath.Join(root, binDirName, BridgeEntryName),
+		RuntimeRel: PrivatePrefix + runtimeDirName + "/" + PrivateRuntimeName + suffix,
 		EntryRel:   entryRelPath,
+		PackageDir: packageDir,
+		SDKPackageJSON: filepath.Join(packageDir, ModulesDirName,
+			filepath.FromSlash(SDKPackageName), bridgePackageJSONName),
+		NPMCLI:            filepath.Join(root, "..", runtimeDirName, filepath.FromSlash(npmRel), npmBinDirName, npmCLIName),
+		ProvisionedPrefix: archive.BridgeModulesPath() + "/",
+		ProvisionCommand:  archive.ProvisionCommand(filepath.ToSlash(installRoot)),
 	}, nil
 }
 

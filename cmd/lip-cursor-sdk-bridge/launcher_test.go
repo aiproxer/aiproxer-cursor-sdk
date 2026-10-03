@@ -184,11 +184,18 @@ func TestLauncher_ShutdownDuringStartTerminatesAndReapsRuntime(t *testing.T) {
 // TestLauncher_CloseTerminatesAndReapsRuntimeIgnoringStdinEOF covers bounded
 // cleanup of a runtime that ignores the graceful stdin EOF: the launcher must
 // escalate to its declared process-tree kill and reap the descendant.
+//
+// The runtime is observed through its flush barrier, not through a clock: it
+// reports that its forwarded bytes have reached its own stdout before cleanup
+// starts, so the assertion measures the launcher's cleanup and never the
+// runtime's flush latency. Without that barrier the test asserted output the
+// runtime had not necessarily produced yet, and lost it whenever the runtime was
+// terminated before its own forward completed.
 func TestLauncher_CloseTerminatesAndReapsRuntimeIgnoringStdinEOF(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
-	pidFile := filepathJoin(t.TempDir(), "runtime.pid")
-	lay := installRunnablePrivateLayout(t, `{"mode":"hold","pidFile":`+strconvQuote(pidFile)+`}`)
+	flushedFile := filepathJoin(t.TempDir(), "runtime.flushed")
+	lay := installRunnablePrivateLayout(t, `{"mode":"hold","flushedFile":`+strconvQuote(flushedFile)+`}`)
 	stdio, stdout, _ := testStdio(t, "graceful payload\n")
 
 	rec := newRecordingChild(t)
@@ -197,7 +204,9 @@ func TestLauncher_CloseTerminatesAndReapsRuntimeIgnoringStdinEOF(t *testing.T) {
 
 	l := newLauncher(mustLayout(t, lay), nil, stdio, opts)
 	require.NoError(t, l.Start(context.Background()))
-	waitForFile(t, pidFile)
+	// The payload is on the runtime's stdout before cleanup begins, so cleanup is
+	// what has to preserve it.
+	waitForFile(t, flushedFile)
 
 	closed := make(chan error, 1)
 	go func() { closed <- l.Close() }()

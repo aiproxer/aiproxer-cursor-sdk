@@ -81,14 +81,29 @@ type compatibility struct {
 	Manifest                string `json:"manifest"`
 	// ManifestSHA256 ties the record to the exact manifest bytes the archive
 	// carries, so the checksum file and this record describe the same artifact.
-	ManifestSHA256         string `json:"manifest_sha256"`
-	CursorSDKVersion       string `json:"cursor_sdk_version"`
-	CursorSDKPinnedVersion string `json:"cursor_sdk_pinned_version"`
-	BridgeVersion          string `json:"bridge_version"`
-	BridgeNodeEngine       string `json:"bridge_node_engine"`
-	PrivateRuntimeVersion  string `json:"private_runtime_version"`
-	PrivateRuntimeSource   string `json:"private_runtime_source"`
-	PrivateRuntimeSHA256   string `json:"private_runtime_sha256"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	// CursorSDKRequiredVersion is the SDK version an install tree has to resolve
+	// after the operator provisions it. It is the pin the bridge manifest carries and
+	// the bridge verifies at run time, so the record and the run-time check cannot
+	// disagree.
+	CursorSDKRequiredVersion string `json:"cursor_sdk_required_version"`
+	// CursorSDKBundled is false in every archive this tool writes. The Cursor SDK is
+	// proprietary and is not redistributed: the archive ships the manifest and the
+	// lockfile that pin it and neither the SDK nor its dependency closure. The third-party
+	// package code this archive does ship is the private runtime's own bundled npm.
+	CursorSDKBundled bool `json:"cursor_sdk_bundled"`
+	// CursorSDKProvisioningCommand is the exact command that provisions the pinned SDK
+	// with the runtime the archive ships.
+	CursorSDKProvisioningCommand string `json:"cursor_sdk_provisioning_command"`
+	// CursorSDKRedistribution states the non-redistribution position inside every
+	// archive, so nothing the plugin ships can be read as asserting a redistribution
+	// right it does not hold.
+	CursorSDKRedistribution string `json:"cursor_sdk_redistribution"`
+	BridgeVersion           string `json:"bridge_version"`
+	BridgeNodeEngine        string `json:"bridge_node_engine"`
+	PrivateRuntimeVersion   string `json:"private_runtime_version"`
+	PrivateRuntimeSource    string `json:"private_runtime_source"`
+	PrivateRuntimeSHA256    string `json:"private_runtime_sha256"`
 	// TestedHostArtifactSHA256 stays empty until a release is certified against a
 	// versioned host artifact. An unverified claim is recorded as absent rather than
 	// invented.
@@ -352,8 +367,7 @@ func runtimeSource(kind, label string) (string, error) {
 }
 
 // renderCompatibility derives the release metadata from the staged tree, so the
-// recorded SDK and private runtime versions are the ones the archive actually
-// carries.
+// recorded versions and provenance are the ones the archive actually carries.
 func renderCompatibility(staging string, meta releaseMeta, archive packagelayout.Archive, digest, nodeSourceKind, nodeSource string, manifest map[string]any) (*compatibility, error) {
 	outer := filepath.Join(staging, filepath.FromSlash(archive.OuterExecutablePath()))
 	if err := packagelayout.CheckSlot(outer, archive.OuterExecutablePath()); err != nil {
@@ -370,33 +384,33 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 	if err := packagelayout.CheckSlot(priv.Entry, archive.BridgeEntryPath()); err != nil {
 		return nil, prerequisite(err)
 	}
-	for _, dir := range []string{archive.BridgeDistPath(), archive.BridgeModulesPath()} {
-		info, err := os.Stat(filepath.Join(staging, filepath.FromSlash(dir)))
-		if err != nil {
-			return nil, prerequisite(fmt.Errorf("staged %s: %w", dir, err))
-		}
-		if !info.IsDir() {
-			return nil, prerequisite(fmt.Errorf("staged %s is not a directory", dir))
-		}
+	// The shipped runtime's own npm is what the recorded provisioning command runs,
+	// so an archive that does not carry it cannot be provisioned without a global
+	// package manager and is not the archive this tool describes.
+	if err := packagelayout.CheckSlot(priv.NPMCLI, archive.PrivateRuntimeNPMCLIPath()); err != nil {
+		return nil, prerequisite(err)
+	}
+	if err := checkStagedDir(staging, archive.BridgeDistPath()); err != nil {
+		return nil, err
+	}
+	// The bridge manifest and the lockfile that pins the SDK are archive content;
+	// the dependency closure they describe is not.
+	if err := packagelayout.CheckSlot(
+		filepath.Join(staging, filepath.FromSlash(archive.BridgePackageLockPath())),
+		archive.BridgePackageLockPath()); err != nil {
+		return nil, prerequisite(err)
+	}
+	if err := rejectProvisionedTree(staging, archive); err != nil {
+		return nil, err
 	}
 
 	bridge, err := readStagedJSON(filepath.Join(staging, filepath.FromSlash(archive.BridgePackageJSONPath())), archive.BridgePackageJSONPath())
 	if err != nil {
 		return nil, prerequisite(err)
 	}
-	pinned, err := pinnedSDKVersion(bridge, archive.BridgePackageJSONPath())
+	required, err := pinnedSDKVersion(bridge, archive.BridgePackageJSONPath())
 	if err != nil {
 		return nil, prerequisite(err)
-	}
-	sdkRel := archive.BridgeModulesPath() + "/@cursor/sdk/package.json"
-	sdk, err := readStagedJSON(filepath.Join(staging, filepath.FromSlash(sdkRel)), sdkRel)
-	if err != nil {
-		return nil, prerequisite(fmt.Errorf("staged production dependency tree has no %s: %w", sdkRel, err))
-	}
-	sdkVersion, _ := sdk["version"].(string)
-	if sdkVersion != pinned {
-		return nil, fmt.Errorf("staged @cursor/sdk is %s but the bridge pins %s; the released archive must match the pin the bridge verifies at run time",
-			orUnknown(sdkVersion), orUnknown(pinned))
 	}
 
 	runtimeSHA, err := fileSHA256(runtimePath)
@@ -417,45 +431,107 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 		return nil, err
 	}
 	return &compatibility{
-		Schema:                   compatibilitySchema,
-		PluginID:                 meta.PluginID,
-		PluginVersion:            meta.Version,
-		BuildID:                  meta.BuildID,
-		ReleaseTagDeclared:       meta.Tag,
-		Module:                   meta.Module,
-		PublishedRootModule:      meta.PublishedRootModule,
-		Platform:                 archive.Platform(),
-		NativePlatformAssembled:  archive.Platform(),
-		PackagingVariant:         packagingVariant,
-		ExternalNodeRequired:     false,
-		ProtocolMajor:            uintField(manifest, "protocol_major"),
-		ProtocolMinMinor:         uintField(manifest, "protocol_min_minor"),
-		ProtocolMaxMinor:         uintField(manifest, "protocol_max_minor"),
-		OuterExecutable:          archive.OuterExecutablePath(),
-		OuterExecutableSHA256:    digest,
-		Manifest:                 archive.ManifestPath(),
-		ManifestSHA256:           manifestSHA,
-		CursorSDKVersion:         sdkVersion,
-		CursorSDKPinnedVersion:   pinned,
-		BridgeVersion:            stringField(bridge, "version"),
-		BridgeNodeEngine:         engineConstraint(bridge),
-		PrivateRuntimeVersion:    version,
-		PrivateRuntimeSource:     provenance,
-		PrivateRuntimeSHA256:     runtimeSHA,
-		TestedHostArtifactSHA256: "",
-		PackageVerification:      "scripts/verify-package",
-		LicensingStatus:          licensingStatus,
-		GeneratedBy:              "scripts/package-plugin",
+		Schema:                       compatibilitySchema,
+		PluginID:                     meta.PluginID,
+		PluginVersion:                meta.Version,
+		BuildID:                      meta.BuildID,
+		ReleaseTagDeclared:           meta.Tag,
+		Module:                       meta.Module,
+		PublishedRootModule:          meta.PublishedRootModule,
+		Platform:                     archive.Platform(),
+		NativePlatformAssembled:      archive.Platform(),
+		PackagingVariant:             packagingVariant,
+		ExternalNodeRequired:         false,
+		ProtocolMajor:                uintField(manifest, "protocol_major"),
+		ProtocolMinMinor:             uintField(manifest, "protocol_min_minor"),
+		ProtocolMaxMinor:             uintField(manifest, "protocol_max_minor"),
+		OuterExecutable:              archive.OuterExecutablePath(),
+		OuterExecutableSHA256:        digest,
+		Manifest:                     archive.ManifestPath(),
+		ManifestSHA256:               manifestSHA,
+		CursorSDKRequiredVersion:     required,
+		CursorSDKBundled:             false,
+		CursorSDKProvisioningCommand: archive.ProvisionCommand(""),
+		CursorSDKRedistribution:      cursorSDKRedistribution,
+		BridgeVersion:                stringField(bridge, "version"),
+		BridgeNodeEngine:             engineConstraint(bridge),
+		PrivateRuntimeVersion:        version,
+		PrivateRuntimeSource:         provenance,
+		PrivateRuntimeSHA256:         runtimeSHA,
+		TestedHostArtifactSHA256:     "",
+		PackageVerification:          "scripts/verify-package",
+		LicensingStatus:              licensingStatus,
+		GeneratedBy:                  "scripts/package-plugin",
 	}, nil
 }
 
-// licensingStatus is the standing redistribution statement. The private Node
-// runtime is MIT and its notices ship with it; @cursor/sdk is proprietary under
-// Cursor's terms and bundles platform binaries. No redistribution right is
-// asserted here: a maintainer has to confirm it before anything is published.
-const licensingStatus = "private Node runtime is MIT with its bundled third-party notices in " +
-	"LICENSES/; @cursor/sdk is proprietary under Cursor's terms and ships bundled platform " +
-	"binaries, so a maintainer must confirm redistribution rights before publishing this archive"
+// checkStagedDir rejects a staged directory the archive cannot run without.
+func checkStagedDir(staging, rel string) error {
+	info, err := os.Stat(filepath.Join(staging, filepath.FromSlash(rel)))
+	if err != nil {
+		return prerequisite(fmt.Errorf("staged %s: %w", rel, err))
+	}
+	if !info.IsDir() {
+		return prerequisite(fmt.Errorf("staged %s is not a directory", rel))
+	}
+	return nil
+}
+
+// rejectProvisionedTree refuses to describe a staged tree that carries third-party
+// package code.
+//
+// The Cursor SDK is proprietary and its platform package bundles native binaries whose
+// license texts it does not redistribute, so staging the dependency closure inside a
+// published archive would assert a redistribution right nobody has verified. The
+// operator provisions that tree themselves against the shipped runtime, which is why
+// the archive carries the manifest and the lockfile and nothing else.
+func rejectProvisionedTree(staging string, archive packagelayout.Archive) error {
+	_, err := os.Stat(filepath.Join(staging, filepath.FromSlash(archive.BridgeModulesPath())))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return prerequisite(fmt.Errorf("staged %s: %w", archive.BridgeModulesPath(), err))
+	}
+	return fmt.Errorf("staged %s carries third-party package code; the Cursor SDK is not redistributed, "+
+		"so the archive ships %s and %s only and the operator provisions %s with: %s",
+		archive.BridgeModulesPath(), archive.BridgePackageJSONPath(), archive.BridgePackageLockPath(),
+		archive.BridgeModulesPath(), archive.ProvisionCommand(""))
+}
+
+// licensingStatus is the standing redistribution statement.
+//
+// The private Node runtime is MIT and its notices ship with it, and that runtime does
+// carry third-party package code: its own bundled npm plus the dependencies npm bundles.
+// Neither is covered by the Node.js MIT grant, so neither may be described by it. npm
+// ships its own license text inside the staged npm tree and licenses the npm application
+// under the Artistic License 2.0 while stating that its bundled Node package dependencies
+// are licensed on their respective license terms; each bundled package carries its own
+// license text in its own package directory, and any that ships none is named in the
+// staged notice rather than left to be assumed covered. @cursor/sdk is proprietary under
+// Cursor's terms and its platform package bundles native binaries whose license texts it
+// does not redistribute, so this archive ships none of that: the Cursor SDK dependency
+// closure is operator-provisioned, not redistributed.
+//
+// The non-redistribution claim is therefore scoped to the Cursor SDK and its closure. A
+// bare "no third-party package code ships in this archive" would be false of the archive
+// this tool writes and would contradict the npm disclosure in the same string, and it
+// would leave an auditor unable to tell what third-party code the archive does ship.
+const licensingStatus = "the private Node runtime is MIT, with those notices staged in LICENSES/ from " +
+	"the shipped runtime LICENSE; the runtime's bundled npm and the third-party packages npm bundles " +
+	"with it ship as well, npm under its own Artistic-2.0 license text inside the staged npm tree and " +
+	"each bundled package under its own license text in its own package directory, with any bundled " +
+	"package shipping none named in LICENSES/THIRD-PARTY-NOTICES.md; the Cursor SDK is proprietary under " +
+	"Cursor's terms and is not redistributed in this archive, which therefore ships no Cursor SDK and no " +
+	"Cursor SDK dependency closure"
+
+// cursorSDKRedistribution is the non-redistribution position, recorded in every
+// archive so nothing the plugin ships can be read as asserting a right it does not
+// hold. The operator, not the plugin, obtains the SDK and accepts Cursor's terms.
+const cursorSDKRedistribution = "@cursor/sdk is not redistributed by this archive and no redistribution " +
+	"right is asserted for it or for the native binaries its platform package bundles; the archive ships " +
+	"the bridge package.json and package-lock.json that pin it, and the operator provisions the SDK at the " +
+	"required version into the install tree themselves"
 
 // loadRelease reads the flat release metadata. An unknown key or an unparsable
 // file is a failure: the packager must not describe a release it did not read.
@@ -627,13 +703,5 @@ func uintField(manifest map[string]any, key string) uint32 {
 // stringField reads a JSON string field.
 func stringField(record map[string]any, key string) string {
 	value, _ := record[key].(string)
-	return value
-}
-
-// orUnknown renders an empty version for diagnostics without hiding it.
-func orUnknown(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "(none)"
-	}
 	return value
 }

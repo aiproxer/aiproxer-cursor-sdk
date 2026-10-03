@@ -4,8 +4,9 @@ This repository was extracted from the Go-LIP host repository
 [`matdev83/go-llm-interactive-proxy`](https://github.com/matdev83/go-llm-interactive-proxy). It is
 governed by the Go-LIP specification `cursor-sdk-standalone` (`tasks.md` task 1.3 provisioned this
 repository skeleton, task 2.1 relocated the Go connector, task 2.2 relocated the SDK bridge, task 2.3
-wired plugin-local companion resolution, task 3.1 added the private Node launcher, and task 3.2 added
-native archive assembly and verification; release metadata and publication follow in later tasks).
+wired plugin-local companion resolution, task 3.1 added the private Node launcher, task 3.2 added
+native archive assembly and verification, and task 3.3 stopped redistributing the SDK and made it
+operator-provisioned; release metadata and publication follow in later tasks).
 
 ## Extraction baseline
 
@@ -51,9 +52,14 @@ explicitly:
   hygiene, and the plugin-specific bridge, release, and documentation changes) is MIT-licensed. The
   scaffold-only `internal/pinnedcontracts` guard was deleted once the real connector source arrived; the
   relocated connector itself is derived from the host module above.
-- Any redistributed JavaScript runtime or SDK dependency added by a later task must carry its own license
-  and provenance notices in the released artifact. The relocated `bridge-node/` sources carry no npm
-  licenses of their own; the installed SDK and runtime tree is assembled and licensed at packaging time.
+- Any redistributed JavaScript runtime must carry its own license and provenance notices in the released
+  artifact, and no redistributed dependency closure may enter one without a verified redistribution right.
+  The relocated `bridge-node/` sources carry no npm licenses of their own; the private runtime tree is
+  assembled and licensed at packaging time, and the SDK dependency closure is not redistributed at all - it
+  is operator-provisioned from the shipped lockfile. The one third-party dependency closure the archive does
+  redistribute is the one the pinned runtime ships with its own distribution: the bundled npm and the packages
+  npm bundles inside it, staged whole from that distribution and attributed to their own license texts as the
+  table below records.
 
 Nothing in this file re-licenses the host project as MIT; it only states the license of this repository and
 attributes the origin of derived material.
@@ -66,16 +72,41 @@ notices to `LICENSES/`, so the artifact carries its own attribution:
 | Component | License | Notice staged |
 | --- | --- | --- |
 | Node.js private runtime (`private/node/node[.exe]`) | MIT, with the notices for the components Node bundles (ICU, OpenSSL, c-ares, libuv, ...) in the distribution `LICENSE` | `LICENSES/nodejs-LICENSE` |
+| The runtime's own bundled npm (`private/node/{lib/,}node_modules/npm/`) | **Not** under the Node.js MIT grant. npm's own `LICENSE` licenses the npm application under the Artistic License 2.0 and states that its bundled Node package dependencies are licensed on their respective license terms | `private/node/{lib/,}node_modules/npm/LICENSE`, shipped inside the tree |
+| The packages npm bundles inside its own npm tree (`private/node/{lib/,}node_modules/npm/node_modules/`) | Each package on its own terms, as its own `package.json` declares. A package that ships its own license text ships it in its own package directory; `LICENSES/THIRD-PARTY-NOTICES.md` names every bundled package that ships none, with the license it declares, and counts the whole tree, nested `node_modules` included | the per-package license file where the package ships one, or the generated notice |
 | This repository's plugin sources | MIT | `LICENSES/plugin-LICENSE` |
-| Staged production npm dependencies (`@bufbuild/protobuf`, `@connectrpc/*`, `@statsig/*`, `undici`, `zod`) | As declared by each package: Apache-2.0 and/or BSD-3-Clause, Apache-2.0, ISC, MIT, MIT | `LICENSES/THIRD-PARTY-NOTICES.md` |
-| `@cursor/sdk` and its platform package | Proprietary. `LICENSE.md` states that use is subject to [Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right. The platform package additionally ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package does not redistribute. | `LICENSES/THIRD-PARTY-NOTICES.md` (factually recorded) |
+| `@cursor/sdk` and its dependency closure | Proprietary and **not redistributed**. `LICENSE.md` states that use is subject to [Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right. The platform package additionally ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package does not redistribute. No archive ships the Cursor SDK or any package that exists only to satisfy it; the third-party package code an archive does ship is the runtime's own bundled npm, listed above. | `LICENSES/THIRD-PARTY-NOTICES.md` (the pinned closure is listed from the shipped lockfile; the packages themselves are absent) |
+
+The third-party-code boundary is worth stating plainly, because an archive is mostly third-party code by
+volume: the runtime's bundled npm and the dependencies npm bundles with it are the great majority of the files
+an archive carries. That is deliberate — it is what lets an operator provision the SDK with no global Node and
+no global package manager — and it is attributed to the license text each component actually ships, not to a
+single distribution-wide grant: npm's own license is its own, and each package it bundles is licensed on its
+own terms by the text in its own package directory where the package ships one. The distribution `LICENSE`
+collected into `LICENSES/`
+carries Node's grant and Node's component notices; it does not carry those per-package texts, and nothing
+here claims it does. What an archive never ships is the Cursor SDK or its dependency closure. Neither
+statement is a claim about the other, and no artifact in this repository claims that an archive is free of
+third-party package code: it is not.
 
 The generated notice file records what the archive redistributes; it is evidence, not a license grant. It
-states explicitly that a maintainer must confirm the redistribution rights for `@cursor/sdk` and its
-bundled binaries before publication. **That confirmation does not exist yet, so this repository has
-published nothing and must publish nothing until it does.** `compatibility.json` carries the same status
-inside every archive, and `scripts/verify-package` reports the staged notices so an operator sees the same
-question the maintainers have to answer.
+states explicitly that `@cursor/sdk` is not redistributed, prints the one command that provisions it with the
+shipped runtime, and records that the resulting tree is **operator-attributable**: resolved by the operator's
+npm from the shipped lockfile, outside this project's checksum record, and covered by no notice in the
+archive. `compatibility.json` carries the same position inside every archive as
+`cursor_sdk_bundled: false` plus an explicit non-redistribution statement, and `scripts/verify-package`
+reports it.
+
+Because the dependency closure is not shipped, the shipped checksum record covers **shipped files only**, and
+the trust claim narrows accordingly: the plugin authenticates what it ships, and the operator authenticates
+what they provisioned. `scripts/verify-package` prints that split, rejects a checksum record that covers the
+provisioned tree, and requires the provisioned tree to resolve `@cursor/sdk` at the pinned version the
+shipped bridge manifest names. `scripts/verify-package --tree-state shipped` additionally rejects an archive
+that contains the provisioned tree at all, so the no-redistribution rule is checkable on the bytes an
+operator receives rather than only asserted by the packager.
+
+**No plugin artifact has been released: there is no tag and no GitHub release, and
+`compatibility.json` in a built archive records no tested host artifact.**
 
 The private Node runtime is staged from one of three sources, and `compatibility.json` records which one
 in `private_runtime_source`, so an archive never overstates where its runtime came from:
@@ -91,7 +122,11 @@ distribution: no distribution digest backs it, and `LICENSES/THIRD-PARTY-NOTICES
 archive itself. **An archive whose `private_runtime_source` is a PATH fallback or a supplied runtime is
 not release evidence of a redistributable runtime; re-stage it from an official distribution before
 publishing.** The Node license notice that ships with the runtime is collected from the same directory
-or a parent of it either way, so the MIT grant travels with the file regardless of its source.
+or a parent of it either way, so the MIT grant travels with the file regardless of its source. The
+runtime's own bundled npm is staged from that same installation, at the location the platform's
+distribution keeps it, so the provisioning command an operator is documented to run resolves to a real
+entry point rather than to an invented path; a runtime staged with no npm beside it is a packaging
+failure naming `-NodeDist`, because a global package manager is not an acceptable substitute.
 
 `compatibility.json` also records the runtime's version and digest, and `release_tag_declared` records
 the tag `release.yaml` declares for a future publication - a declaration, not a publication: no such tag
@@ -121,14 +156,18 @@ Native archive assembly and verification are original work added in this reposit
 under the same terms as the rest of it: `internal/packagelayout` (the single archive-layout contract),
 `cmd/lip-cursor-sdk-packaging` (its build-time reporting and metadata-rendering surface),
 `scripts/package-plugin.{sh,ps1}`, `scripts/verify-package.{sh,ps1}`, `scripts/lib/install-ownership.ps1`,
-and the packaging tests. They contain no relocated host code and no JavaScript. **No plugin artifact has
-been released: there is no tag and no GitHub release, and the redistribution rights above are still
-unconfirmed.**
+`cmd/lip-cursor-sdk-bridge/sdk.go` (the run-time SDK preflight), `docs/installation.md` (the operator
+guide), and the packaging tests. They contain no relocated host code and no JavaScript. **No plugin
+artifact has been released: there is no tag and no GitHub release, and no built archive in this
+repository records a tested host artifact.**
 
 The plugin-private bridge launcher in `cmd/lip-cursor-sdk-bridge/` is original work added in this
 repository and is MIT-licensed under the same terms as the rest of this repository. It is a small
 Go program that resolves the packaged private Node runtime and bridge entry relative to its own
-location and forwards the bridge protocol; it contains no relocated host code, no JavaScript, and no
-bundled or vendored runtime. It redistributes nothing by itself: the private Node runtime and the
-production `@cursor/sdk` tree enter an archive only through the packaging scripts above, which carry the
-notices recorded in this file.
+location, checks the operator-provisioned SDK tree against the pin the shipped bridge manifest
+carries, and forwards the bridge protocol; it contains no relocated host code, no JavaScript, and no
+bundled or vendored runtime. It redistributes nothing by itself, installs nothing, and runs no
+package manager: it resolves the private Node runtime and its bundled npm, reads the provisioned
+package metadata, and prints the provisioning command when the tree is missing or at the wrong
+version. Those two components enter an archive only through the packaging scripts above, which carry
+the notices recorded in this file.

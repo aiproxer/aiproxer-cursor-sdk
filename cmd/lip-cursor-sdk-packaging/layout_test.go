@@ -32,11 +32,24 @@ func TestMain_LayoutReportIsTheSinglePackagingContract(t *testing.T) {
 
 	for _, key := range []string{"os", "arch", "manifest", "outer_executable",
 		"launcher", "launcher_name", "bridge_package_dir", "bridge_entry", "bridge_dist",
-		"bridge_modules", "bridge_package_json", "private_runtime",
-		"private_runtime_doc", "private_prefix", "compatibility", "checksums", "licenses_dir",
+		"bridge_modules", "bridge_package_json", "bridge_package_lock",
+		"provisioned_prefix", "sdk_package_json", "sdk_package_name", "sdk_provision_command",
+		"private_runtime", "private_runtime_doc", "private_npm_root", "private_npm_cli",
+		"private_npm_license", "private_npm_modules",
+		"private_prefix", "compatibility", "checksums", "licenses_dir",
 		"checksum_separator", "declared_platforms"} {
 		require.NotEmpty(t, report[key], "layout report key %q", key)
 	}
+	require.Equal(t, []any{"shipped", "installed"}, report["tree_states"])
+
+	// The staged npm tree carries its own license texts, and the notice points at them
+	// rather than at the Node distribution license, which does not cover npm. Both paths
+	// are reported so a packager names the real staged files instead of hardcoding a
+	// spelling that the layout could move out from under it.
+	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+	require.NoError(t, err)
+	require.Equal(t, archive.PrivateRuntimeNPMLicensePath(), report["private_npm_license"])
+	require.Equal(t, archive.PrivateRuntimeNPMModulesPath(), report["private_npm_modules"])
 
 	// exe_suffix is the one report field that is legitimately empty: it is empty
 	// exactly on the platforms whose executables carry no suffix. An empty value
@@ -48,6 +61,11 @@ func TestMain_LayoutReportIsTheSinglePackagingContract(t *testing.T) {
 	require.Contains(t, required, "checksums.sha256")
 	require.Contains(t, required, report["bridge_entry"])
 	require.Contains(t, required, report["private_runtime"])
+	// The provisioned dependency tree is not archive content, so it is reported and
+	// required to be absent rather than required to be present.
+	require.NotContains(t, required, report["bridge_modules"])
+	require.Contains(t, required, report["bridge_package_lock"])
+	require.Contains(t, required, report["private_npm_cli"])
 
 	priv := stringSlice(t, report["private_entries"])
 	require.NotEmpty(t, priv)
