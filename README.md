@@ -165,17 +165,23 @@ not native validation. Each assembled archive narrows the manifest's `platforms`
 was assembled on, so an artifact cannot advertise support that was never tested, and
 `scripts/verify-package` rejects a tree whose manifest claims any other platform.
 
+`manifest/template.backendplugin.json` declares exactly the platforms this pipeline can natively assemble,
+and nothing else. A platform nobody assembles and runs natively is not declared here, is not resolvable
+as an archive layout, and is not a claim this project makes.
+
 | Platform | State |
 | --- | --- |
-| `windows/amd64` | Natively assembled and verified on Windows/amd64. |
-| `linux/amd64` | Natively assembled and verified on Linux/amd64. |
-| `windows/arm64`, `linux/arm64` | Declared in `manifest/template.backendplugin.json`, not assembled, not verified, no artifact. |
+| `windows/amd64` | Declared, natively assembled and verified on Windows/amd64. |
+| `linux/amd64` | Declared, natively assembled and verified on Linux/amd64. |
+| `windows/arm64`, `linux/arm64` | Not a declared plugin platform: no native runner assembles or verifies them, so there is no evidence for the claim. |
 | `darwin/*` | Not a declared plugin platform. |
 
-Both assembled platforms have enforced evidence rather than a maintainer's word: the `package` lane in
+Both declared platforms have enforced evidence rather than a maintainer's word: the `package` lane in
 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) is a matrix over `windows-latest` and
 `ubuntu-latest`, and each leg assembles, verifies, and runs the private runtime on its own runner. A
 platform claim is a fact about a native run, so a new platform needs a new native runner.
+`TestManifestScope_TemplateDeclaresExactlyThePlatformsThePipelineAssembles` holds the declared set, the
+`internal/packagelayout` contract, and that runner matrix to the same set, so the three cannot drift apart.
 
 Each natively validated platform's evidence is `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`,
 which covers an archive content audit (no Cursor SDK and no SDK dependency closure in it), checksum coverage of
@@ -185,7 +191,7 @@ provisioned with the shipped runtime and verified end to end, a provisioned tree
 unlisted and missing shipped files, a platform overclaim, install roots containing spaces, extracted-archive
 round trips, deterministic checksum-record ordering, the staged runtime starting as a direct process, and
 verification with no `node` reachable on `PATH`. On a POSIX runner that lane also drives the PowerShell
-verifier over the same tree, so both verifier implementations reach the same verdicts. The public
+verifier over the same tree, so both verifier implementations reach the same verdicts. The declared
 Linux/Windows claims in the manifest survive only for the platforms in the table above.
 
 The always-on half runs in the default unit lane and holds on every platform, whichever script this host
@@ -441,9 +447,41 @@ comfortable margin. CI runs it as `go test -count=1 -timeout 40m -run TestPackag
 45-minute job, so a slow run is a failure with a real report rather than a kill; pass `-timeout` yourself
 if you run the gate locally and it panics on the default.
 
+### Cursor SDK test tooling
+
+`scripts/test-cursor-sdk-*.{sh,ps1}` are this plugin's own Cursor SDK development and evidence tooling, and
+they are owned here. They moved out of the Go-LIP host repository with the rest of the integration; the host
+no longer carries Cursor SDK source, and a script that exercised Cursor SDK behaviour has no reason to live
+in a repository that no longer contains it. Each one resolves the repository root from its own location, so
+run it from anywhere:
+
+| Script | What it does | Needs |
+| --- | --- | --- |
+| `test-cursor-sdk-platform.{sh,ps1}` | Fake-bridge platform smoke for the current OS: `TestPlatformSmoke_*` and `TestProbeNativeBridgeLane_*` in `internal/product`. | Go toolchain only. No credentials, no network. |
+| `test-cursor-sdk-comparison-report.{sh,ps1}` | ACP-versus-Cursor-SDK comparison matrix, synthetic and blocked rows only. | Go toolchain only. No credentials, no network. |
+| `test-cursor-sdk-live.{sh,ps1}` | Opt-in Node live scenarios (`npm run live-scenarios`) in `bridge-node/`. | `CURSOR_SDK_LIVE=1`, `CURSOR_API_KEY`, and a provisioned bridge tree. |
+| `test-cursor-sdk-live-bridge.{sh,ps1}` | Opt-in Go-to-Node live bridge lifecycle harness (`-tags=cursorsdk_live_bridge`). | `CURSOR_SDK_LIVE=1`, `CURSOR_API_KEY`. |
+
+```sh
+bash scripts/test-cursor-sdk-platform.sh
+bash scripts/test-cursor-sdk-comparison-report.sh
+CURSOR_SDK_LIVE=1 CURSOR_API_KEY=... bash scripts/test-cursor-sdk-live.sh
+```
+
+The two credential-free scripts are the ones to run by hand; they are the same suites the default
+`go test ./...` lane already runs, wrapped so the run pattern and the working directory are explicit. Both
+live scripts print `BLOCKED` and exit `0` unless they are explicitly opted in, which is a skip and not a
+green live proof - the live rows of the comparison report say `blocked` for the same reason. Live scenarios
+consume provider quota, so they stay out of the default verification path.
+
+`comparison-report` is a provider-comparison tool, not a claim about the plugin: it reports synthetic and
+blocked rows when no credentials are opted in, and its own output says so.
+
 ## Documentation
 
 - Operator installation and provisioning: [`docs/installation.md`](docs/installation.md).
+- Host required status checks touching the Cursor lane, and the order in which they have to be retired:
+  [`docs/host-required-checks.md`](docs/host-required-checks.md).
 - Plugin authoring and the executable backend-plugin ABI: Go-LIP
   [`docs/backend-plugins/authoring.md`](https://github.com/matdev83/go-llm-interactive-proxy/blob/main/docs/backend-plugins/authoring.md).
 - Go-LIP host repository: [`matdev83/go-llm-interactive-proxy`](https://github.com/matdev83/go-llm-interactive-proxy).
