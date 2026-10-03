@@ -48,21 +48,29 @@ type report struct {
 	SDKPackageName string `json:"sdk_package_name"`
 	// SDKProvisionCommand is the one command an operator runs, with the install root
 	// spelled as a placeholder.
-	SDKProvisionCommand string   `json:"sdk_provision_command"`
-	PrivateRuntime      string   `json:"private_runtime"`
-	PrivateRuntimeDir   string   `json:"private_runtime_dir"`
-	PrivateNPMRoot      string   `json:"private_npm_root"`
-	PrivateNPMCLI       string   `json:"private_npm_cli"`
-	LauncherName        string   `json:"launcher_name"`
-	PrivateRuntimeDoc   string   `json:"private_runtime_doc"`
-	PrivatePrefix       string   `json:"private_prefix"`
-	Compatibility       string   `json:"compatibility"`
-	Checksums           string   `json:"checksums"`
-	LicensesDir         string   `json:"licenses_dir"`
-	RequiredEntries     []string `json:"required_entries"`
-	PrivateEntries      []string `json:"private_entries"`
-	TreeStates          []string `json:"tree_states"`
-	DeclaredPlatforms   []string `json:"declared_platforms"`
+	SDKProvisionCommand string `json:"sdk_provision_command"`
+	PrivateRuntime      string `json:"private_runtime"`
+	PrivateRuntimeDir   string `json:"private_runtime_dir"`
+	PrivateNPMRoot      string `json:"private_npm_root"`
+	PrivateNPMCLI       string `json:"private_npm_cli"`
+	// PrivateNPMLicense is npm's own license text inside the shipped npm tree. It is
+	// reported so the notice points at the staged file that actually carries npm's terms
+	// instead of at the Node distribution license, which does not cover npm.
+	PrivateNPMLicense string `json:"private_npm_license"`
+	// PrivateNPMModules is the dependency tree npm bundles inside itself. Each package
+	// there ships its own license text, and the notice names this directory as where
+	// those texts live.
+	PrivateNPMModules string   `json:"private_npm_modules"`
+	LauncherName      string   `json:"launcher_name"`
+	PrivateRuntimeDoc string   `json:"private_runtime_doc"`
+	PrivatePrefix     string   `json:"private_prefix"`
+	Compatibility     string   `json:"compatibility"`
+	Checksums         string   `json:"checksums"`
+	LicensesDir       string   `json:"licenses_dir"`
+	RequiredEntries   []string `json:"required_entries"`
+	PrivateEntries    []string `json:"private_entries"`
+	TreeStates        []string `json:"tree_states"`
+	DeclaredPlatforms []string `json:"declared_platforms"`
 	// ChecksumSeparator is the digest/path separator of checksums.sha256. It is
 	// reported so the packaging scripts write the same line format the verifier
 	// parses, in the sha256sum order "<digest><separator><install-root-relative path>".
@@ -110,6 +118,8 @@ func runLayout(args []string) error {
 		PrivateRuntimeDir:   archive.PrivateRuntimeDirPath(),
 		PrivateNPMRoot:      archive.PrivateRuntimeNPMRootPath(),
 		PrivateNPMCLI:       archive.PrivateRuntimeNPMCLIPath(),
+		PrivateNPMLicense:   archive.PrivateRuntimeNPMLicensePath(),
+		PrivateNPMModules:   archive.PrivateRuntimeNPMModulesPath(),
 		LauncherName:        packagelayout.LauncherName,
 		PrivateRuntimeDoc:   packagelayout.RuntimeRelDoc,
 		PrivatePrefix:       packagelayout.PrivatePrefix,

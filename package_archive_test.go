@@ -209,6 +209,74 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, words, "Locked dependency closure (pinned, not shipped)")
 	})
 
+	t.Run("third_party_notices_attribute_the_shipped_npm_tree_to_its_own_license_texts", func(t *testing.T) {
+		// Every license claim the notice makes about the bundled npm tree has to be
+		// true of the bytes the archive carries. npm is not under the Node.js MIT grant:
+		// its own LICENSE ships inside the staged tree, licenses the npm application
+		// under the Artistic License 2.0, and says its bundled Node package dependencies
+		// are licensed on their respective terms. A notice calling that tree MIT, or
+		// saying one distribution license covers it, misstates the license for most of an
+		// archive.
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := built.installRoot
+		notices := readFileText(t, filepath.Join(root,
+			filepath.FromSlash(archive.LicensesDir()), "THIRD-PARTY-NOTICES.md"))
+		words := strings.Join(strings.Fields(notices), " ")
+
+		require.NotContains(t, words, "It is MIT licensed under the same Node distribution license",
+			"the shipped npm tree is not licensed under the Node distribution license")
+		require.NotContains(t, words, "whose notices cover those bundled components",
+			"the distribution license does not carry the bundled packages' own license texts")
+		require.Contains(t, words, "It is NOT licensed under the Node.js MIT grant")
+
+		// The notice names the staged license texts by their real archive paths, and
+		// those paths have to exist in this archive rather than being a claim about a
+		// file the packager never wrote.
+		require.Contains(t, words, archive.PrivateRuntimeNPMLicensePath(),
+			"the notice has to name the npm license text the archive stages")
+		require.FileExists(t, filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMLicensePath())))
+		require.Contains(t, words, archive.PrivateRuntimeNPMModulesPath(),
+			"the notice has to name the bundled npm dependency tree the archive stages")
+		require.DirExists(t, filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMModulesPath())))
+
+		// The staged npm license is the one the notice describes, on the bytes.
+		npmLicense := readFileText(t, filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMLicensePath())))
+		require.Contains(t, npmLicense, "Licensed on the terms of The Artistic License 2.0",
+			"the npm license text this archive ships is not the one the notice describes")
+		require.Contains(t, npmLicense, "Licensed on their respective license terms")
+
+		// The coverage statement is derived from the staged tree, so the counts it
+		// reports have to be the counts the tree actually has, and the packages it names
+		// as uncovered have to be exactly the packages that ship no license text. That is
+		// what keeps the notice from implying coverage that is not there: a package with
+		// its own license file must not be named as missing one, and a package without
+		// one must be named.
+		bundled := filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMModulesPath()))
+		packages := bundledPackages(t, bundled)
+		var uncovered []string
+		for _, name := range packages {
+			if !shipsLicenseText(t, filepath.Join(bundled, filepath.FromSlash(name))) {
+				uncovered = append(uncovered, name)
+			}
+		}
+		require.Contains(t, words, fmt.Sprintf("%d bundled packages, %d of them shipping a license text",
+			len(packages), len(packages)-len(uncovered)),
+			"the notice has to report the tree's real coverage counts")
+		if len(uncovered) == 0 {
+			// A runtime whose npm ships a license text for every bundled package needs no
+			// uncovered list; it still needs the notice to say so rather than stay silent.
+			require.Contains(t, words, "bundled packages, all of them shipping a license text")
+			return
+		}
+		require.Contains(t, words, fmt.Sprintf("The %d below ship NO license text anywhere in this archive", len(uncovered)),
+			"the notice has to state the uncovered set plainly rather than leave it implied")
+		for _, name := range uncovered {
+			require.Contains(t, words, "| "+name+" |",
+				"bundled package %s ships no license text and the notice has to name it", name)
+		}
+	})
+
 	t.Run("checksums_cover_every_file_including_plugin_private_ones", func(t *testing.T) {
 		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
 		require.NoError(t, err)
@@ -1638,6 +1706,52 @@ func mapsWithout(set map[string]struct{}, drop string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// bundledPackages names the packages npm bundles inside its own tree, scoped names
+// included, read from the staged tree rather than from a list the test carries: the
+// runtime decides which packages it bundles, not this file.
+func bundledPackages(tb testing.TB, modulesDir string) []string {
+	tb.Helper()
+
+	var out []string
+	entries, err := os.ReadDir(modulesDir)
+	require.NoError(tb, err)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if !strings.HasPrefix(entry.Name(), "@") {
+			out = append(out, entry.Name())
+			continue
+		}
+		scoped, scopeErr := os.ReadDir(filepath.Join(modulesDir, entry.Name()))
+		require.NoError(tb, scopeErr)
+		for _, inner := range scoped {
+			if inner.IsDir() {
+				out = append(out, entry.Name()+"/"+inner.Name())
+			}
+		}
+	}
+	slices.Sort(out)
+	require.NotEmpty(tb, out, "the staged npm tree bundles no packages")
+	return out
+}
+
+// shipsLicenseText reports whether one bundled package carries a license text in its
+// own directory. The name match is deliberately loose, because the question the notice
+// answers is whether a package ships license text at all, not which spelling it uses.
+func shipsLicenseText(tb testing.TB, packageDir string) bool {
+	tb.Helper()
+
+	entries, err := os.ReadDir(packageDir)
+	require.NoError(tb, err)
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(strings.ToUpper(entry.Name()), "LICEN") {
+			return true
+		}
+	}
+	return false
 }
 
 // recordString reads one string field of a staged JSON object, so a diagnostic

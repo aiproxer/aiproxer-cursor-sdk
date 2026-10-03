@@ -85,6 +85,12 @@ const (
 	bridgeDirName         = "bridge"
 	runtimeDirName        = "node"
 	bridgePackageJSONName = "package.json"
+	// licenseFileName is the name npm's own license text carries inside its package
+	// directory. npm is licensed separately from Node.js - its LICENSE states that the
+	// npm application is licensed under the Artistic License 2.0 and that npm's bundled
+	// Node package dependencies are licensed on their respective license terms - so the
+	// notice names this file rather than the Node distribution license.
+	licenseFileName = "LICENSE"
 	// npmDirName is the runtime's own bundled npm, and libDirName is the POSIX
 	// distribution's location of it: node-vXX-linux-x64 keeps the runtime in bin/ and
 	// npm under lib/, while node-vXX-win-x64 keeps both at the distribution root. The
@@ -260,6 +266,27 @@ func (a Archive) PrivateRuntimeNPMRootPath() string {
 // PrivateRuntimeNPMCLIPath is the npm entry point the provisioning command names.
 func (a Archive) PrivateRuntimeNPMCLIPath() string {
 	return a.PrivateRuntimeNPMRootPath() + "/" + npmBinDirName + "/" + npmCLIName
+}
+
+// PrivateRuntimeNPMLicensePath is npm's own license text, which ships inside the
+// staged npm tree rather than being collected into the notice directory.
+//
+// It is a separate archive location from the Node distribution license for the same
+// reason npm is a separate license: the staged LICENSE states that the npm application
+// is licensed under the Artistic License 2.0 and that npm's bundled Node package
+// dependencies are licensed on their respective license terms, so the Node.js MIT
+// grant does not reach either. The notice points here rather than at
+// LICENSES/nodejs-LICENSE, which carries the Node grant.
+func (a Archive) PrivateRuntimeNPMLicensePath() string {
+	return a.PrivateRuntimeNPMRootPath() + "/" + licenseFileName
+}
+
+// PrivateRuntimeNPMModulesPath is the dependency directory npm bundles inside its own
+// package, and this archive ships it with npm. Each package in it carries its own
+// license text in its own package directory, so the notice attributes each bundled
+// component to that text rather than to a single distribution-wide license.
+func (a Archive) PrivateRuntimeNPMModulesPath() string {
+	return a.PrivateRuntimeNPMRootPath() + "/" + ModulesDirName
 }
 
 // provisionCommandDocPrefix is the placeholder a documented provisioning command

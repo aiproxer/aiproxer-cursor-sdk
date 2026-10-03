@@ -22,9 +22,12 @@
 #     the SDK requirement: the tree resolves the pinned SDK version, or the run fails
 #     with the exact provisioning command.
 #
-#   --tree-state shipped a released archive nobody has provisioned yet. It must contain
-#     no third-party package code at all, because shipping the SDK or its dependency
-#     closure would assert a redistribution right nobody has verified.
+#   --tree-state shipped a released archive nobody has provisioned yet. It must carry no
+#     Cursor SDK and nothing that exists only to satisfy it, because shipping the SDK or
+#     its dependency closure would assert a redistribution right nobody has verified.
+#     The scope of that rule is the Cursor SDK and its closure, not the whole tree: the
+#     archive does ship third-party package code, the private runtime's own bundled npm,
+#     and that is expected rather than a finding.
 #
 # The archive layout is not restated here. It is read from
 # cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout.
@@ -296,7 +299,7 @@ while IFS= read -r -d '' rel; do
     "$provisioned_prefix"*)
       # Outside the shipped record by design, so it is counted and reported rather than
       # digested. In a shipped archive its presence at all is the finding: the archive
-      # must contain no third-party package code.
+      # must carry no Cursor SDK and nothing that exists only to satisfy it.
       provisioned_count=$((provisioned_count + 1))
       if [ "$tree_state" = shipped ]; then
         finding "shipped archive contains the third-party package code $rel: the Cursor SDK is not redistributed, so the archive ships no $bridge_modules; the operator provisions it against the shipped runtime with: $sdk_provision_command"

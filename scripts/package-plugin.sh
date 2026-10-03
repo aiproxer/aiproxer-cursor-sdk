@@ -15,8 +15,11 @@
 # operator provisions that tree once, out of band, with the runtime this archive carries.
 # The archive does ship third-party package code - the private runtime's own bundled npm
 # and the dependencies npm bundles with it - because the provisioning command has to run
-# without a global Node or a global package manager. That code is MIT and its notices are
-# collected from the staged runtime's own LICENSE into the archive's notice directory.
+# without a global Node or a global package manager. That code is NOT covered by the
+# Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
+# package npm bundles carries its own license text in its own package directory, so the
+# generated notice attributes each bundled component to the license that package declares
+# and names any bundled package that ships none.
 #
 # The archive layout is not restated here. It is read from
 # cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the packager,
@@ -191,6 +194,7 @@ write_third_party_notices() {
   local path="$1" lockfile="$2" bridge_manifest="$3" runtime="$4" node_version="$5" node_kind="$6"
   local node_label="$7" platform_tag="$8" provision_command="$9" sdk_package="${10}"
   local modules_dir="${11}" npm_root="${12}"
+  local npm_license="${13}" npm_modules="${14}" npm_staged="${15}"
 
   {
     printf '# Third-party notices\n\n'
@@ -209,13 +213,26 @@ write_third_party_notices() {
     printf -- '- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds\n'
     printf '  the Node.js license grant together with the notices for the components Node\n'
     printf '  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.\n'
+    printf '  That grant is Node'"'"'s own and does not extend to the npm tree below.\n'
     printf -- '- The runtime ships with its own bundled npm, and so does this archive, at\n'
     printf '  %s: that is what the provisioning command below runs, so an\n' "$npm_root"
     printf '  operator needs neither a global Node nor a global package manager.\n'
     printf -- '- That npm tree, together with the third-party packages npm bundles inside it, IS\n'
     printf '  third-party package code shipped by this archive, and it is the only such code\n'
-    printf '  here. It is MIT licensed under the same Node distribution license staged in this\n'
-    printf '  archive, whose notices cover those bundled components.\n'
+    printf '  here. It is NOT licensed under the Node.js MIT grant. npm ships its own license\n'
+    printf '  text inside the staged npm tree, at\n'
+    printf '  %s\n' "$npm_license"
+    printf '  That text licenses the npm application under the Artistic License 2.0 and states\n'
+    printf '  that npm'"'"'s bundled Node package dependencies are licensed on their respective\n'
+    printf '  license terms.\n'
+    printf -- '- The packages npm bundles under\n'
+    printf '  %s\n' "$npm_modules"
+    printf '  each ship their own license text in their own package directory, so each bundled\n'
+    printf '  component is attributed to the license that package declares. The Node\n'
+    printf '  distribution license does not carry those texts, and no coverage by it is\n'
+    printf '  claimed here. What the staged tree actually contains:\n'
+    write_npm_license_coverage "$runtime" "$npm_staged" "$npm_root" "$npm_modules"
+    printf '\n'
     printf -- '- Components the staged runtime reports about itself:\n'
     "$runtime" -p 'Object.entries(process.versions).map(([k,v])=>`  - ${k} ${v}`).join("\n")' | LC_ALL=C sort
     printf '\n## Cursor SDK: not redistributed, operator-provisioned\n\n'
@@ -249,6 +266,81 @@ write_third_party_notices() {
     printf '  connector code originates from an Apache-2.0 project; see PROVENANCE.md in the\n'
     printf '  source repository.\n'
   } >"$path"
+}
+
+# write_npm_license_coverage records, from the staged tree rather than from an assumption,
+# how many of the packages npm bundles ship their own license text and which ship none.
+#
+# The staged npm LICENSE licenses the npm application and then states that npm's bundled
+# Node package dependencies are licensed on their respective license terms, so the only
+# place a bundled component's license text can come from is that package's own directory.
+# A package that ships none is named here with the license its own manifest declares:
+# implying coverage this archive does not carry is precisely the false claim the notice
+# must not make.
+#
+# The inventory is read with the runtime this archive stages, the same way the locked
+# inventory below is, so both packagers print the same rows from the same tree.
+write_npm_license_coverage() {
+  local runtime="$1" npm_staged="$2" npm_root="$3" npm_modules="$4"
+  # The two archive-relative paths share the npm root prefix, so the dependency directory
+  # name is read out of the layout contract rather than written into this script.
+  "$runtime" -e '
+    const fs = require("fs");
+    const path = require("path");
+    const modules = path.join(process.argv[1], process.argv[2]);
+    const licenseText = /^licen[sc]e/i;
+
+    // npm bundles its dependencies as ordinary package directories, scoped names one
+    // level down. The enumeration is the staged filesystem rather than a list carried
+    // here, because a runtime staging a different npm ships a different tree.
+    const names = [];
+    let entries = [];
+    try { entries = fs.readdirSync(modules, { withFileTypes: true }); } catch { entries = []; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith("@")) {
+        let scoped = [];
+        try { scoped = fs.readdirSync(path.join(modules, entry.name), { withFileTypes: true }); } catch { scoped = []; }
+        for (const inner of scoped) {
+          if (inner.isDirectory()) names.push(entry.name + "/" + inner.name);
+        }
+        continue;
+      }
+      names.push(entry.name);
+    }
+
+    const rows = names.sort().map((name) => {
+      const dir = path.join(modules, ...name.split("/"));
+      let manifest = {};
+      try { manifest = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")); } catch {}
+      return {
+        name,
+        version: typeof manifest.version === "string" ? manifest.version : "(not declared)",
+        license: typeof manifest.license === "string" && manifest.license
+          ? manifest.license
+          : "(not declared by its package.json)",
+        shipped: fs.readdirSync(dir).some((file) => licenseText.test(file)),
+      };
+    });
+
+    const uncovered = rows.filter((row) => !row.shipped);
+    if (rows.length === 0) {
+      console.log("  (this npm tree bundles no third-party packages)");
+    } else if (uncovered.length === 0) {
+      console.log(`  ${rows.length} bundled packages, all of them shipping a license text in their own package directory.`);
+      console.log("  Every one of them carries its license text where the package itself ships it, so");
+      console.log("  no bundled package depends on a notice this archive does not carry.");
+    } else {
+      console.log(`  ${rows.length} bundled packages, ${rows.length - uncovered.length} of them shipping a license text in their own package directory.`);
+      console.log(`  The ${uncovered.length} below ship NO license text anywhere in this archive. They are`);
+      console.log("  named here rather than left to be assumed covered. The license column is what");
+      console.log("  each package.json declares; this archive redistributes no license text for them:");
+      console.log("");
+      console.log("| bundled package | bundled version | declared license | license text shipped |");
+      console.log("| --- | --- | --- | --- |");
+      for (const row of uncovered) console.log(`| ${row.name} | ${row.version} | ${row.license} | no |`);
+    }
+  ' "$npm_staged" "${npm_modules#"$npm_root"/}"
 }
 
 # write_locked_inventory records what the shipped lockfile pins and which half of it the
@@ -370,6 +462,8 @@ bridge_package_json="$(layout_report bridge_package_json)"
 bridge_package_lock="$(layout_report bridge_package_lock)"
 private_npm_root="$(layout_report private_npm_root)"
 private_npm_cli="$(layout_report private_npm_cli)"
+private_npm_license="$(layout_report private_npm_license)"
+private_npm_modules="$(layout_report private_npm_modules)"
 sdk_provision_command="$(layout_report sdk_provision_command)"
 private_runtime="$(layout_report private_runtime)"
 private_runtime_dir="$(layout_report private_runtime_dir)"
@@ -533,7 +627,8 @@ write_third_party_notices "$staging/$licenses_dir/THIRD-PARTY-NOTICES.md" \
   "$staging/$bridge_package_lock" "$staging/$bridge_package_json" "$private_runtime_path" \
   "$node_version" "$runtime_kind" "$runtime_label" "$layout_platform" \
   "$sdk_provision_command" "$sdk_package_name" \
-  "$bridge_modules" "$private_npm_root"
+  "$bridge_modules" "$private_npm_root" \
+  "$private_npm_license" "$private_npm_modules" "$staging/$private_npm_root"
 
 # 6. Checksums over every archive file, plugin-private files included. The record
 #    cannot cover itself, so it is written last.

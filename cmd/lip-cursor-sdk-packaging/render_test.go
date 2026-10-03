@@ -216,6 +216,23 @@ func TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled(t *testing.T) {
 	require.NotContains(t, licensing, "confirm redistribution rights")
 	require.Contains(t, licensing, "not redistributed")
 
+	// The record also may not hand the shipped npm tree the Node.js MIT grant. npm
+	// licenses its own application under the Artistic License 2.0 in a LICENSE inside
+	// the staged npm tree and states that the packages it bundles are licensed on their
+	// respective terms, so a record calling that tree MIT is false of the artifact and
+	// would leave an auditor with the wrong license for most of an archive.
+	require.NotContains(t, licensing,
+		"including its bundled npm and the third-party dependencies npm bundles with it, is MIT",
+		"the shipped npm tree is not covered by the Node.js MIT grant")
+	require.NotContains(t, licensing, "whose notices cover those bundled components",
+		"the Node distribution license does not carry the bundled packages' own license texts")
+	require.Contains(t, licensing, "Artistic-2.0",
+		"the record has to name the license npm's own staged text declares")
+	require.Contains(t, licensing, "its own license text in its own package directory",
+		"each package npm bundles is attributed to the license text it ships itself")
+	require.Contains(t, licensing, "THIRD-PARTY-NOTICES.md",
+		"the record has to point at the staged notice that names any bundled package shipping none")
+
 	// The record describes an archive that provisions itself, so the staged tree has
 	// to carry the two files that make the recorded command runnable.
 	require.FileExists(t, filepath.Join(lay.root, filepath.FromSlash(archive.BridgePackageLockPath())))

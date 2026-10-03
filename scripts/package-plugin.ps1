@@ -16,8 +16,11 @@
     provisions that tree once, out of band, with the runtime this archive carries. The
     archive does ship third-party package code - the private runtime's own bundled npm
     and the dependencies npm bundles with it - because the provisioning command has to run
-    without a global Node or a global package manager. That code is MIT and its notices
-    are collected from the staged runtime's own LICENSE into the archive's notice directory.
+    without a global Node or a global package manager. That code is NOT covered by the
+    Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
+    package npm bundles carries its own license text in its own package directory, so the
+    generated notice attributes each bundled component to the license that package
+    declares and names any bundled package that ships none.
 
     The archive layout is not restated here. It is read from
     cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the
@@ -401,6 +404,97 @@ function Resolve-LockEntry {
     }
 }
 
+# Write-NPMLicenseCoverage records, from the staged tree rather than from an assumption,
+# how many of the packages npm bundles ship their own license text and which ship none.
+#
+# The staged npm LICENSE licenses the npm application and then states that npm's bundled
+# Node package dependencies are licensed on their respective license terms, so the only
+# place a bundled component's license text can come from is that package's own directory.
+# A package that ships none is named here with the license its own manifest declares:
+# implying coverage this archive does not carry is precisely the false claim the notice
+# must not make.
+#
+# The enumeration is the staged filesystem rather than a list carried here, because a
+# runtime staging a different npm ships a different tree. Names are ordered with an
+# ordinal comparison because Sort-Object would collate case-insensitively and disagree
+# with the shell packager's row order for the same tree.
+function Write-NPMLicenseCoverage {
+    param(
+        [string]$StagedNPMRoot,
+        [string]$NPMRoot,
+        [string]$NPMModules,
+        [System.Collections.Generic.List[string]]$Lines
+    )
+
+    # The two archive-relative paths share the npm root prefix, so the dependency directory
+    # name is read out of the layout contract rather than written into this script.
+    $modulesRel = $NPMModules.Substring($NPMRoot.Length + 1)
+    $modulesPath = Join-Path $StagedNPMRoot ($modulesRel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    if (-not (Test-Path -LiteralPath $modulesPath -PathType Container)) {
+        $Lines.Add('  (this npm tree bundles no third-party packages)')
+        return
+    }
+
+    # npm bundles its dependencies as ordinary package directories, scoped names one level
+    # down.
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in Get-ChildItem -LiteralPath $modulesPath -Directory -Force) {
+        if ($entry.Name.StartsWith('@')) {
+            foreach ($scoped in Get-ChildItem -LiteralPath $entry.FullName -Directory -Force) {
+                $names.Add("$($entry.Name)/$($scoped.Name)")
+            }
+            continue
+        }
+        $names.Add($entry.Name)
+    }
+    $names.Sort([System.StringComparer]::Ordinal)
+
+    $uncovered = [System.Collections.Generic.List[string]]::new()
+    $shippedCount = 0
+    foreach ($name in $names) {
+        $dir = Join-Path $modulesPath ($name -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+        $manifest = Read-Manifest $dir
+        $hasText = @(Get-ChildItem -LiteralPath $dir -File -Force |
+            Where-Object { $_.Name -match '(?i)^licen[sc]e' }).Count -gt 0
+        if ($hasText) { $shippedCount++; continue }
+        $declared = Get-JsonField $manifest 'license'
+        if ($declared -isnot [string] -or -not $declared) { $declared = '(not declared by its package.json)' }
+        $shown = Get-JsonField $manifest 'version'
+        if ($shown -isnot [string] -or -not $shown) { $shown = '(not declared)' }
+        $uncovered.Add("| $name | $shown | $declared | no |")
+    }
+
+    if ($names.Count -eq 0) {
+        $Lines.Add('  (this npm tree bundles no third-party packages)')
+    } elseif ($uncovered.Count -eq 0) {
+        $Lines.Add("  $($names.Count) bundled packages, all of them shipping a license text in their own package directory.")
+        $Lines.Add('  Every one of them carries its license text where the package itself ships it, so')
+        $Lines.Add('  no bundled package depends on a notice this archive does not carry.')
+    } else {
+        $Lines.Add("  $($names.Count) bundled packages, $shippedCount of them shipping a license text in their own package directory.")
+        $Lines.Add("  The $($uncovered.Count) below ship NO license text anywhere in this archive. They are")
+        $Lines.Add('  named here rather than left to be assumed covered. The license column is what')
+        $Lines.Add('  each package.json declares; this archive redistributes no license text for them:')
+        $Lines.Add('')
+        $Lines.Add('| bundled package | bundled version | declared license | license text shipped |')
+        $Lines.Add('| --- | --- | --- | --- |')
+        foreach ($row in $uncovered) { $Lines.Add($row) }
+    }
+}
+
+# Read-Manifest reads one staged package.json, answering an empty result for a package
+# that does not have one: a bundled directory without a manifest is reported as
+# undeclared rather than failing packaging.
+function Read-Manifest([string]$PackageDir) {
+    $file = Join-Path $PackageDir 'package.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
 # Write-ThirdPartyNotices records, factually, what the archive redistributes, what it
 # deliberately does not, and who owns what. It states the licenses the redistributed
 # components declare, it asserts no redistribution right nobody has confirmed, and it
@@ -414,6 +508,9 @@ function Write-ThirdPartyNotices {
         [string]$BridgeManifest,
         [string]$ModulesDir,
         [string]$PrivateNPMRoot,
+        [string]$PrivateNPMLicense,
+        [string]$PrivateNPMModules,
+        [string]$StagedNPMRoot,
         [string]$PrivateRuntime,
         [string]$NodeVersion,
         [string]$NodeSourceKind,
@@ -443,6 +540,7 @@ function Write-ThirdPartyNotices {
     $lines.Add('- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds')
     $lines.Add('  the Node.js license grant together with the notices for the components Node')
     $lines.Add('  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.')
+    $lines.Add('  That grant is Node''s own and does not extend to the npm tree below.')
     $lines.Add('- The runtime ships with its own bundled npm, and so does this archive, at')
     # ${...} rather than a bare $PrivateNPMRoot: PowerShell reads a colon straight
     # after a variable name as part of that name and rejects the reference.
@@ -450,8 +548,21 @@ function Write-ThirdPartyNotices {
     $lines.Add('  operator needs neither a global Node nor a global package manager.')
     $lines.Add('- That npm tree, together with the third-party packages npm bundles inside it, IS')
     $lines.Add('  third-party package code shipped by this archive, and it is the only such code')
-    $lines.Add('  here. It is MIT licensed under the same Node distribution license staged in this')
-    $lines.Add('  archive, whose notices cover those bundled components.')
+    $lines.Add('  here. It is NOT licensed under the Node.js MIT grant. npm ships its own license')
+    $lines.Add('  text inside the staged npm tree, at')
+    $lines.Add("  $PrivateNPMLicense")
+    $lines.Add('  That text licenses the npm application under the Artistic License 2.0 and states')
+    $lines.Add('  that npm''s bundled Node package dependencies are licensed on their respective')
+    $lines.Add('  license terms.')
+    $lines.Add('- The packages npm bundles under')
+    $lines.Add("  $PrivateNPMModules")
+    $lines.Add('  each ship their own license text in their own package directory, so each bundled')
+    $lines.Add('  component is attributed to the license that package declares. The Node')
+    $lines.Add('  distribution license does not carry those texts, and no coverage by it is')
+    $lines.Add('  claimed here. What the staged tree actually contains:')
+    Write-NPMLicenseCoverage -StagedNPMRoot $StagedNPMRoot `
+        -NPMRoot $PrivateNPMRoot -NPMModules $PrivateNPMModules -Lines $lines
+    $lines.Add('')
     $lines.Add('- Components the staged runtime reports about itself:')
     $versions = (Invoke-Tool -Command $PrivateRuntime -Arguments @('-p', 'JSON.stringify(process.versions)')) | ConvertFrom-Json
     foreach ($entry in ($versions.PSObject.Properties | Sort-Object Name)) {
@@ -647,6 +758,9 @@ try {
         -SDKPackageName ([string]$layout.sdk_package_name) `
         -ModulesDir ([string]$layout.bridge_modules) `
         -PrivateNPMRoot ([string]$layout.private_npm_root) `
+        -PrivateNPMLicense ([string]$layout.private_npm_license) `
+        -PrivateNPMModules ([string]$layout.private_npm_modules) `
+        -StagedNPMRoot $npmTarget `
         -PrivateRuntime $privateRuntime `
         -NodeVersion $nodeVersion -NodeSourceKind $runtimeSource.Kind `
         -NodeSource $runtimeSource.Label -Platform $layout.platform `

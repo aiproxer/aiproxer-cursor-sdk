@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,6 +50,24 @@ func TestArchive_MatchesDesignLayoutBlock(t *testing.T) {
 			require.Equal(t, "LICENSES", a.LicensesDir())
 		})
 	}
+}
+
+// hasPathElements reports whether one slash-separated path contains want as a
+// consecutive run of whole path elements. Matching on elements rather than on a substring
+// is what keeps a package whose name merely starts with the wanted one from reading as a
+// match, and matching on a run rather than on one element is what keeps a scoped package
+// name from being split across two unrelated elements.
+func hasPathElements(rel string, want []string) bool {
+	elements := strings.Split(rel, "/")
+	if len(want) == 0 || len(want) > len(elements) {
+		return false
+	}
+	for start := 0; start+len(want) <= len(elements); start++ {
+		if slices.Equal(elements[start:start+len(want)], want) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestArchive_ResolvesTheOperatorProvisionedSDKTree pins where the SDK the plugin
@@ -103,14 +122,14 @@ func TestArchive_ShipsNoCursorSDKOrItsDependencyClosure(t *testing.T) {
 
 			// The SDK itself must not be archive content on any path, not only under the
 			// provisioned prefix: a packager that staged it inside the runtime's npm tree
-			// would be redistributing the same code by a different route. Matched on
-			// whole path elements, so a future package whose name merely starts with the
-			// SDK's is not a false positive.
-			sdkRel := a.ProvisionedSDKDirPath()
+			// would be redistributing the same code by a different route. Matched on the
+			// package's own path elements rather than on any one spelling of its path, so
+			// staging it anywhere is caught and a package whose name merely starts with
+			// the SDK's is not a false positive.
+			sdkElements := strings.Split(packagelayout.SDKPackageName, "/")
 			for _, rel := range entries {
-				require.False(t,
-					rel == sdkRel || strings.HasPrefix(rel, sdkRel+"/") || strings.HasSuffix(rel, "/"+sdkRel),
-					"required archive entry %s is the Cursor SDK itself", rel)
+				require.False(t, hasPathElements(rel, sdkElements),
+					"required archive entry %s contains the Cursor SDK package path", rel)
 			}
 
 			require.Contains(t, entries, a.BridgePackageJSONPath())

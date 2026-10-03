@@ -502,21 +502,28 @@ func rejectProvisionedTree(staging string, archive packagelayout.Archive) error 
 // licensingStatus is the standing redistribution statement.
 //
 // The private Node runtime is MIT and its notices ship with it, and that runtime does
-// carry third-party package code: its own bundled npm plus the dependencies npm bundles,
-// staged under the distribution LICENSE collected into LICENSES/. @cursor/sdk is
-// proprietary under Cursor's terms and its platform package bundles native binaries whose
-// license texts it does not redistribute, so this archive ships none of that: the Cursor
-// SDK dependency closure is operator-provisioned, not redistributed.
+// carry third-party package code: its own bundled npm plus the dependencies npm bundles.
+// Neither is covered by the Node.js MIT grant, so neither may be described by it. npm
+// ships its own license text inside the staged npm tree and licenses the npm application
+// under the Artistic License 2.0 while stating that its bundled Node package dependencies
+// are licensed on their respective license terms; each bundled package carries its own
+// license text in its own package directory, and any that ships none is named in the
+// staged notice rather than left to be assumed covered. @cursor/sdk is proprietary under
+// Cursor's terms and its platform package bundles native binaries whose license texts it
+// does not redistribute, so this archive ships none of that: the Cursor SDK dependency
+// closure is operator-provisioned, not redistributed.
 //
 // The non-redistribution claim is therefore scoped to the Cursor SDK and its closure. A
 // bare "no third-party package code ships in this archive" would be false of the archive
 // this tool writes and would contradict the npm disclosure in the same string, and it
 // would leave an auditor unable to tell what third-party code the archive does ship.
-const licensingStatus = "private Node runtime, including its bundled npm and the third-party " +
-	"dependencies npm bundles with it, is MIT, with those notices staged in LICENSES/ from the " +
-	"shipped runtime LICENSE; the Cursor SDK is proprietary under Cursor's terms and is not " +
-	"redistributed in this archive, which therefore ships no Cursor SDK and no Cursor SDK " +
-	"dependency closure"
+const licensingStatus = "the private Node runtime is MIT, with those notices staged in LICENSES/ from " +
+	"the shipped runtime LICENSE; the runtime's bundled npm and the third-party packages npm bundles " +
+	"with it ship as well, npm under its own Artistic-2.0 license text inside the staged npm tree and " +
+	"each bundled package under its own license text in its own package directory, with any bundled " +
+	"package shipping none named in LICENSES/THIRD-PARTY-NOTICES.md; the Cursor SDK is proprietary under " +
+	"Cursor's terms and is not redistributed in this archive, which therefore ships no Cursor SDK and no " +
+	"Cursor SDK dependency closure"
 
 // cursorSDKRedistribution is the non-redistribution position, recorded in every
 // archive so nothing the plugin ships can be read as asserting a right it does not

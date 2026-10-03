@@ -120,17 +120,22 @@ What the packager stages, and only this:
   command names is the real one. A runtime staged with no npm beside it is a packaging failure naming
   `--node-dist`, because without it the documented command would need a global package manager.
   **This npm tree and the packages npm bundles inside it are the third-party package code an archive
-  actually ships** — the great majority of its files by count. They are MIT, covered by the distribution
-  `LICENSE` collected into `LICENSES/`, and they ship for exactly the reason above. No artifact here claims
-  an archive is free of third-party package code; it is not.
+  actually ships** — the great majority of its files by count. They are **not** covered by the Node.js
+  MIT grant. npm is separately licensed: its own `LICENSE` ships inside the staged tree at
+  `private/node/{lib/,}node_modules/npm/LICENSE` and licenses the npm application under the Artistic
+  License 2.0 while stating that npm's bundled Node package dependencies are licensed on their
+  respective license terms, and each bundled package carries its own license text in its own package
+  directory under `private/node/{lib/,}node_modules/npm/node_modules/`. They ship for exactly the
+  reason above. No artifact here claims an archive is free of third-party package code; it is not.
 - **License and provenance notices** under `LICENSES/`: the Node distribution `LICENSE` (which contains
-  the Node grant together with the notices for the components Node bundles, npm included), this
-  repository's `LICENSE`, and a generated `THIRD-PARTY-NOTICES.md` recording what the runtime reports
-  about itself, the locked dependency closure the operator will provision, and the non-redistribution
-  position on the Cursor SDK — scoped by name to the Cursor SDK and its closure, because the archive does
-  ship third-party code: that npm tree. Staging a runtime without its license notices is a packaging
-  failure, not a warning, and both verifiers fail an install tree whose `LICENSES/` carries no notice
-  rather than reporting a count of zero as evidence that they looked.
+  the Node grant together with the notices for the components Node bundles, npm's Artistic-2.0 notice
+  among them), this repository's `LICENSE`, and a generated `THIRD-PARTY-NOTICES.md` recording what the
+  runtime reports about itself, the license text each bundled npm package ships under its own directory
+  plus the ones that ship none, the locked dependency closure the operator will provision, and the
+  non-redistribution position on the Cursor SDK — scoped by name to the Cursor SDK and its closure,
+  because the archive does ship third-party code: that npm tree. Staging a runtime without its license
+  notices is a packaging failure, not a warning, and both verifiers fail an install tree whose
+  `LICENSES/` carries no notice rather than reporting a count of zero as evidence that they looked.
 - **Checksums over every archive file**, plugin-private files included, in `sha256sum` line order so an
   operator can check them with the platform tool of their choice.
 
@@ -210,11 +215,15 @@ closure, `scripts/verify-package --tree-state shipped` fails an archive that con
 
 The claim is scoped to the Cursor SDK on purpose. The archive **does** ship third-party package code: the
 private runtime's own bundled npm and the packages npm bundles inside it, staged whole from the pinned Node
-distribution and MIT-licensed under the `LICENSE` collected into `LICENSES/`. By file count that is the bulk
-of an archive, and it is what makes operator provisioning work without a global toolchain. "This archive ships
-no third-party package code" is false of the archive these scripts build, so no document here says it; what
-each artifact states instead is which third-party code ships, under which license, and that the Cursor SDK is
-not among it.
+distribution. npm is licensed separately from Node.js — its own `LICENSE` ships inside the staged tree and
+licenses the npm application under the Artistic License 2.0 — and each package npm bundles is licensed on its
+own terms by a license text in its own package directory, so each is attributed to the license that package
+declares. `LICENSES/THIRD-PARTY-NOTICES.md` is generated from the staged tree and names every bundled
+package that ships no license text of its own, so the notice never implies coverage the archive does not
+carry. By file count that npm tree is the bulk of an archive, and it is what makes operator provisioning
+work without a global toolchain. "This archive ships no third-party package code" is false of the archive
+these scripts build, so no document here says it; what each artifact states instead is which third-party
+code ships, under which license, and that the Cursor SDK is not among it.
 
 Because the tree is the operator's, it is also **outside the shipped checksum record**: the plugin
 authenticates what it ships, the operator authenticates what they provisioned, and both verifiers say so in
@@ -251,11 +260,13 @@ Stated rather than left to be discovered:
 
 ### Licensing status
 
-The private Node runtime, including the npm it bundles and the packages npm bundles inside that npm, is
-MIT and its notices ship with it in `LICENSES/nodejs-LICENSE`. That npm tree is the third-party package code
-this archive redistributes. The Cursor SDK is proprietary and is **not** shipped; see
-[Redistribution posture](#redistribution-posture) for the decision, the command, and where the position is
-recorded inside every archive.
+The private Node runtime is MIT and its notices ship with it in `LICENSES/nodejs-LICENSE`. The npm it bundles
+and the packages npm bundles inside that npm are shipped too, and they are **not** under that MIT grant: npm
+licenses its own application under the Artistic License 2.0 in a `LICENSE` inside the staged npm tree, and each
+package npm bundles is licensed on its own terms by the license text in its own package directory. That npm
+tree is the third-party package code this archive redistributes. The Cursor SDK is proprietary and is **not**
+shipped; see [Redistribution posture](#redistribution-posture) for the decision, the command, and where the
+position is recorded inside every archive.
 
 ### Building and verifying an archive
 
