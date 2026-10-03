@@ -36,8 +36,16 @@ private/node/{lib/,}node_modules/npm/         that runtime's own bundled npm
 There is **no** `private/bridge/node_modules/`. The Cursor SDK is proprietary, its
 platform package bundles native binaries whose license texts it does not redistribute,
 and no redistribution right for any of it has been verified. The plugin therefore ships
-the manifest and the lockfile that pin the SDK and no third-party package code at all.
-You provision that tree yourself; see below.
+the manifest and the lockfile that pin the SDK, and neither the SDK nor any package that
+exists only to satisfy it. You provision that tree yourself; see below.
+
+To be precise about what third-party code this archive does ship, because most of it by
+file count is the private Node runtime's own bundled npm and the packages npm bundles
+inside it (`private/node/{lib/,}node_modules/npm/node_modules/`). Those ship on purpose —
+they are what lets the provisioning command run with no global Node and no global package
+manager — and they are MIT, covered by the distribution `LICENSE` staged as
+`LICENSES/nodejs-LICENSE`. The archive is not free of third-party package code; it ships
+exactly that, and no notice in it claims otherwise.
 
 The host binary is unchanged by any of this. Cursor support is an optional plugin.
 
@@ -87,9 +95,11 @@ which prints it whenever the SDK is missing. It reads, per platform:
 | Windows | `..\node\node.exe ..\node\node_modules\npm\bin\npm-cli.js ci --omit=dev` |
 | Linux | `../node/node ../node/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev` |
 
-Both spellings work in PowerShell, `cmd`, and any POSIX shell; the two paths are
-relative to the directory you just changed into, so nothing outside the plugin root is
-involved.
+The slash spelling is the POSIX one: it works in every POSIX shell, and on Windows in
+PowerShell and `cmd` too, since Windows accepts forward slashes in a path. The backslash
+spelling is Windows-only — a POSIX shell reads `\` as an escape character, so
+`..\node\node.exe` is not a path there. Either way the paths are relative to the directory
+you just changed into, so nothing outside the plugin root is involved.
 
 Notes that matter:
 
@@ -120,8 +130,10 @@ Two tree states are checked, and both are enforced rather than advisory:
   provisioned SDK has to resolve at the pinned version, and the private runtime and
   launcher have to run.
 - `--tree-state shipped` audits a released archive as it arrives: it must contain no
-  third-party package code at all. A freshly unpacked archive is expected to *fail*
-  installed-state verification with the provisioning command, and that is correct.
+  Cursor SDK and nothing that exists only to satisfy it. (The private runtime's bundled
+  npm is third-party package code and is expected — it is what the provisioning command
+  runs.) A freshly unpacked archive is expected to *fail* installed-state verification
+  with the provisioning command, and that is correct.
 
 The report states the trust split explicitly: `checksums.sha256` covers the shipped files
 only, so the plugin authenticates what it ships and you authenticate what you
@@ -135,7 +147,7 @@ another Cursor integration, to a system Node, or to another package manager.
 | Symptom | What it means | What to do |
 | --- | --- | --- |
 | `the Cursor SDK is not provisioned` | `private/bridge/node_modules/@cursor/sdk` is absent | Run the provisioning command above. |
-| `the provisioned Cursor SDK is X but the shipped ... pins Y` | The tree was provisioned against a different pin, or edited | Re-run the provisioning command. |
+| `the provisioned Cursor SDK is X but the shipped ... pins Y` | The declared version in `private/bridge/node_modules/@cursor/sdk/package.json` is not the version the shipped bridge manifest pins | Re-run the provisioning command. |
 | `private runtime file "..." not found` | The archive is incomplete | Reinstall from a complete archive. |
 | `the private runtime or the private bridge launcher is missing` | The archive is incomplete | Reinstall from a complete archive. |
 | `install root ... is writable beyond its owner` | Any local user can replace a companion | Move the plugin root somewhere owner-only. |
@@ -149,6 +161,13 @@ The bridge's own `doctor` reaches the same answers without the Go tooling:
 
 It exits 78 (`EX_CONFIG`) when a prerequisite is missing, and 0 with `doctor: ok` when
 the tree is provisioned and the private runtime answers.
+
+The version comparison behind that second row is a **string comparison of one declared
+`version` field** against the pin in the shipped bridge manifest. It is not a content
+check: it does not hash the provisioned tree, and nothing in this archive records a
+digest for it. A tree whose `@cursor/sdk` declares the pinned version therefore passes
+both the verifier and `doctor` whatever else is in it. Treat a version match as "the
+right version is declared", not as "the right bytes are installed".
 
 ## Updating and rolling back
 
@@ -169,6 +188,16 @@ decides the version you end up with, and verification tells you which one you ha
 - **You authenticate what you provisioned.** `private/bridge/node_modules/` is outside
   the checksum record by design. `LICENSES/THIRD-PARTY-NOTICES.md` inside the archive
   states this and names the SDK as not redistributed.
+- **The content authenticity of the tree you provision is yours to establish.** The
+  split above is not a formality and it does not extend further than it reads: this
+  project ships a lockfile and a version string, and nothing more. It never signs,
+  hashes, or otherwise attests to a single byte of the provisioned tree, so no verdict
+  either verifier prints is evidence about what is actually on disk there. If that
+  matters to you, verify the tree yourself against a source you trust — npm's own
+  integrity data in the lockfile is the natural starting point — and re-provision from a
+  clean tree whenever you cannot. Provisioning under your own acceptance of
+  [Cursor's Terms of Service](https://cursor.com/terms-of-service) is where that
+  responsibility starts; it does not end there.
 - **The private runtime's provenance is recorded.** `compatibility.json`
   `private_runtime_source` says whether the shipped runtime came from an official Node
   distribution, a supplied executable, or the build machine's `PATH`, and an archive

@@ -100,11 +100,12 @@ What the packager stages, and only this:
 - **Production JavaScript only.** `npm ci` and `npm run build` run in `bridge-node/`; the dev toolchain
   (TypeScript, tsx, esbuild) never enters the archive. `TestPackageArchive` fails if any dev dependency is
   staged.
-- **The bridge manifest and the lockfile, and no dependency closure.** `private/bridge/package.json` pins
-  the SDK version the bridge verifies at run time, and `private/bridge/package-lock.json` pins the exact
-  closure and the `undici` override, so an operator's `npm ci` resolves the versions this release was built
-  against. `cmd/lip-cursor-sdk-packaging render` refuses to describe a staged tree that carries third-party
-  package code, so a packager that staged one fails instead of publishing a bundle it must not ship.
+- **The bridge manifest and the lockfile, and no Cursor SDK dependency closure.**
+  `private/bridge/package.json` pins the SDK version the bridge verifies at run time, and
+  `private/bridge/package-lock.json` pins the exact closure and the `undici` override, so an operator's
+  `npm ci` resolves the versions this release was built against. `cmd/lip-cursor-sdk-packaging render`
+  refuses to describe a staged tree that carries that closure, so a packager that staged one fails instead
+  of publishing a bundle it must not ship.
 - **The private Node runtime together with its own bundled npm**, taken from an official Node
   distribution when one is supplied (`--node-dist <zip|tar.gz|dir>`, digest-checked against
   `nodejs.org/dist/<version>/SHASUMS256.txt` by the release operator), otherwise from
@@ -118,13 +119,18 @@ What the packager stages, and only this:
   `node_modules/npm` on Windows), so nothing inside it is renamed and the entry point the provisioning
   command names is the real one. A runtime staged with no npm beside it is a packaging failure naming
   `--node-dist`, because without it the documented command would need a global package manager.
+  **This npm tree and the packages npm bundles inside it are the third-party package code an archive
+  actually ships** — the great majority of its files by count. They are MIT, covered by the distribution
+  `LICENSE` collected into `LICENSES/`, and they ship for exactly the reason above. No artifact here claims
+  an archive is free of third-party package code; it is not.
 - **License and provenance notices** under `LICENSES/`: the Node distribution `LICENSE` (which contains
   the Node grant together with the notices for the components Node bundles, npm included), this
   repository's `LICENSE`, and a generated `THIRD-PARTY-NOTICES.md` recording what the runtime reports
   about itself, the locked dependency closure the operator will provision, and the non-redistribution
-  position on the Cursor SDK. Staging a runtime without its license notices is a packaging failure, not a
-  warning, and both verifiers fail an install tree whose `LICENSES/` carries no notice rather than
-  reporting a count of zero as evidence that they looked.
+  position on the Cursor SDK — scoped by name to the Cursor SDK and its closure, because the archive does
+  ship third-party code: that npm tree. Staging a runtime without its license notices is a packaging
+  failure, not a warning, and both verifiers fail an install tree whose `LICENSES/` carries no notice
+  rather than reporting a count of zero as evidence that they looked.
 - **Checksums over every archive file**, plugin-private files included, in `sha256sum` line order so an
   operator can check them with the platform tool of their choice.
 
@@ -166,7 +172,7 @@ Both assembled platforms have enforced evidence rather than a maintainer's word:
 platform claim is a fact about a native run, so a new platform needs a new native runner.
 
 Each natively validated platform's evidence is `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`,
-which covers an archive content audit (no third-party package code anywhere in it), checksum coverage of
+which covers an archive content audit (no Cursor SDK and no SDK dependency closure in it), checksum coverage of
 shipped private files, a tampered shipped file, a missing companion, a missing private runtime (in the
 verifier and in the launcher, which exits 78), an installed tree that was never provisioned, a tree
 provisioned with the shipped runtime and verified end to end, a provisioned tree at the wrong SDK version,
@@ -189,22 +195,34 @@ covers them; and no script restates the archive layout or reaches a global Node.
 
 ### Redistribution posture
 
-**The Cursor SDK is not redistributed, so the archive ships no third-party package code.** `@cursor/sdk` is
-proprietary: its `LICENSE.md` states that use is subject to
+**The Cursor SDK is not redistributed, so the archive ships no Cursor SDK and none of its dependency
+closure.** `@cursor/sdk` is proprietary: its `LICENSE.md` states that use is subject to
 [Cursor's Terms of Service](https://cursor.com/terms-of-service) and grants no redistribution right, and its
 platform package ships bundled `rg` and `cursorsandbox` binaries whose own license texts the package does not
 redistribute. No redistribution right could be verified, so the decision is not to ship it: an archive that
 staged the dependency closure would assert a right nobody has confirmed. The archive ships
 `private/bridge/package.json` and `private/bridge/package-lock.json` - the manifest and the lockfile that pin
 the SDK at `1.0.23` and `undici` at `6.28.1` - and the operator resolves the tree themselves, accepting
-Cursor's terms. `cmd/lip-cursor-sdk-packaging render` refuses to describe a staged tree that carries
-third-party package code, `scripts/verify-package --tree-state shipped` fails an archive that contains it, and
+Cursor's terms. `cmd/lip-cursor-sdk-packaging render` refuses to describe a staged tree that carries that
+closure, `scripts/verify-package --tree-state shipped` fails an archive that contains it, and
 `compatibility.json` records `cursor_sdk_bundled: false` next to an explicit non-redistribution statement and
 `LICENSES/THIRD-PARTY-NOTICES.md` restates it.
 
+The claim is scoped to the Cursor SDK on purpose. The archive **does** ship third-party package code: the
+private runtime's own bundled npm and the packages npm bundles inside it, staged whole from the pinned Node
+distribution and MIT-licensed under the `LICENSE` collected into `LICENSES/`. By file count that is the bulk
+of an archive, and it is what makes operator provisioning work without a global toolchain. "This archive ships
+no third-party package code" is false of the archive these scripts build, so no document here says it; what
+each artifact states instead is which third-party code ships, under which license, and that the Cursor SDK is
+not among it.
+
 Because the tree is the operator's, it is also **outside the shipped checksum record**: the plugin
 authenticates what it ships, the operator authenticates what they provisioned, and both verifiers say so in
-their report.
+their report. That split has an exact edge worth stating: the plugin ships a lockfile and compares one declared
+`version` string, and nothing more — no digest, hash, or signature of the provisioned tree is recorded
+anywhere in an archive. A substituted SDK that *declares* the pinned version passes the verifier and `doctor`.
+Verifying the actual content of the tree you provisioned is your responsibility; see
+[Provenance and trust](docs/installation.md#provenance-and-trust).
 
 **No plugin release has been published and none may be published from this branch:** there is no tag and no
 GitHub release, and `compatibility.json` in a built archive records no tested host artifact.
@@ -233,8 +251,9 @@ Stated rather than left to be discovered:
 
 ### Licensing status
 
-The private Node runtime, including the npm it bundles, is MIT and its notices ship with it in
-`LICENSES/nodejs-LICENSE`. The Cursor SDK is proprietary and is **not** shipped; see
+The private Node runtime, including the npm it bundles and the packages npm bundles inside that npm, is
+MIT and its notices ship with it in `LICENSES/nodejs-LICENSE`. That npm tree is the third-party package code
+this archive redistributes. The Cursor SDK is proprietary and is **not** shipped; see
 [Redistribution posture](#redistribution-posture) for the decision, the command, and where the position is
 recorded inside every archive.
 
@@ -244,7 +263,7 @@ recorded inside every archive.
 # assemble for this machine (Node 22.22.3 recommended; npm and Node are build-time only)
 scripts/package-plugin.sh --out-dir dist --node-dist node-v22.22.3-linux-x64.tar.gz   # or .ps1 on Windows
 
-# audit the archive as released: it must contain no third-party package code
+# audit the archive as released: it must contain no Cursor SDK and no SDK dependency closure
 scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64 --tree-state shipped   # or .ps1
 
 # provision the SDK exactly as an operator does, then verify the installed tree

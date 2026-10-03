@@ -11,11 +11,13 @@
     the release metadata, records a checksum over every archive file including the
     plugin-private ones, and emits a per-platform archive with its own digest.
 
-    The archive stages NO third-party package code. The Cursor SDK is proprietary and
-    is not redistributed, so neither it nor its dependency closure is shipped: the
-    operator provisions that tree once, out of band, with the runtime this archive
-    carries. The runtime's own npm is staged because the provisioning command has to
-    run without a global Node or a global package manager.
+    The archive stages NO Cursor SDK package code. The Cursor SDK is proprietary and is
+    not redistributed, so neither it nor its dependency closure is shipped: the operator
+    provisions that tree once, out of band, with the runtime this archive carries. The
+    archive does ship third-party package code - the private runtime's own bundled npm
+    and the dependencies npm bundles with it - because the provisioning command has to run
+    without a global Node or a global package manager. That code is MIT and its notices
+    are collected from the staged runtime's own LICENSE into the archive's notice directory.
 
     The archive layout is not restated here. It is read from
     cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the
@@ -282,7 +284,7 @@ function Resolve-PrivateRuntimeSource([string]$Dist, [string]$Runtime, [string]$
 }
 
 # Write-LockedInventory records what the shipped lockfile pins and which half of it the
-# provisioning command actually installs. The archive stages no third-party package code,
+# provisioning command actually installs. The archive stages no Cursor SDK package code,
 # so this is the inventory of what the operator's npm will resolve rather than of what
 # the archive carries: naming the pinned versions is still evidence, and stating the
 # attribution next to it is what keeps it honest.
@@ -411,6 +413,7 @@ function Write-ThirdPartyNotices {
         [string]$SDKPackageName,
         [string]$BridgeManifest,
         [string]$ModulesDir,
+        [string]$PrivateNPMRoot,
         [string]$PrivateRuntime,
         [string]$NodeVersion,
         [string]$NodeSourceKind,
@@ -440,10 +443,15 @@ function Write-ThirdPartyNotices {
     $lines.Add('- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds')
     $lines.Add('  the Node.js license grant together with the notices for the components Node')
     $lines.Add('  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.')
-    $lines.Add('- The runtime ships with its own bundled npm, and so does this archive: that is')
-    $lines.Add('  what the provisioning command below runs, so an operator needs neither a global')
-    $lines.Add('  Node nor a global package manager. npm is MIT licensed under the same Node')
-    $lines.Add('  distribution license staged here.')
+    $lines.Add('- The runtime ships with its own bundled npm, and so does this archive, at')
+    # ${...} rather than a bare $PrivateNPMRoot: PowerShell reads a colon straight
+    # after a variable name as part of that name and rejects the reference.
+    $lines.Add("  ${PrivateNPMRoot}: that is what the provisioning command below runs, so an")
+    $lines.Add('  operator needs neither a global Node nor a global package manager.')
+    $lines.Add('- That npm tree, together with the third-party packages npm bundles inside it, IS')
+    $lines.Add('  third-party package code shipped by this archive, and it is the only such code')
+    $lines.Add('  here. It is MIT licensed under the same Node distribution license staged in this')
+    $lines.Add('  archive, whose notices cover those bundled components.')
     $lines.Add('- Components the staged runtime reports about itself:')
     $versions = (Invoke-Tool -Command $PrivateRuntime -Arguments @('-p', 'JSON.stringify(process.versions)')) | ConvertFrom-Json
     foreach ($entry in ($versions.PSObject.Properties | Sort-Object Name)) {
@@ -457,8 +465,10 @@ function Write-ThirdPartyNotices {
     $lines.Add('  redistribution right. Its platform package additionally ships bundled native')
     $lines.Add('  binaries (rg and cursandbox) whose own license texts the package does not')
     $lines.Add('  redistribute.')
-    $lines.Add("- This archive therefore contains no $SDKPackageName and no dependency closure of")
-    $lines.Add('  any kind. The checksums in this archive cover the shipped files only.')
+    $lines.Add("- This archive therefore contains no $SDKPackageName and none of its dependency")
+    $lines.Add('  closure. The scope of that claim is the Cursor SDK and its closure: the')
+    $lines.Add('  third-party package code this archive does ship is the npm tree named above, and')
+    $lines.Add('  nothing else. The checksums in this archive cover the shipped files only.')
     $lines.Add("- The operator obtains the SDK themselves, accepting Cursor's terms, and")
     $lines.Add('  provisions it once with the runtime this archive ships:')
     $lines.Add('')
@@ -621,8 +631,8 @@ try {
 
     # 5. Closed host manifest and release metadata, both derived from the staged
     #    tree rather than described independently of it. The renderer refuses to describe
-    #    a tree carrying third-party package code, so a packager that staged one fails
-    #    here rather than publishing a bundle it must not ship.
+    #    a tree carrying the Cursor SDK dependency closure, so a packager that staged one
+    #    fails here rather than publishing a bundle it must not ship.
     $exeDigest = Read-FileSHA256 $outerExe
     Invoke-Tool -Command 'go' -Arguments @(
         'run', './cmd/lip-cursor-sdk-packaging', 'render',
@@ -636,6 +646,7 @@ try {
         -BridgeManifest (Join-Path $staging ($layout.bridge_package_json -replace '/', $sep)) `
         -SDKPackageName ([string]$layout.sdk_package_name) `
         -ModulesDir ([string]$layout.bridge_modules) `
+        -PrivateNPMRoot ([string]$layout.private_npm_root) `
         -PrivateRuntime $privateRuntime `
         -NodeVersion $nodeVersion -NodeSourceKind $runtimeSource.Kind `
         -NodeSource $runtimeSource.Label -Platform $layout.platform `

@@ -31,8 +31,8 @@ type provisioningTreeOptions struct {
 // content rule checkable rather than assumed.
 //
 // The Cursor SDK is proprietary and is not redistributed, so a released archive must
-// contain no third-party package code at all. A packager that staged the dependency
-// closure would produce an archive asserting a redistribution right nobody has
+// contain no Cursor SDK and none of its dependency closure. A packager that staged
+// that closure would produce an archive asserting a redistribution right nobody has
 // verified, and nothing downstream would notice unless verification could check for it.
 // So the shipped-state audit has to reject the tree the operator gets before anyone
 // unpacks it.
@@ -45,7 +45,7 @@ func TestPackageArchive_VerifierRejectsAShippedArchiveCarryingTheSDK(t *testing.
 		t.Run(impl, func(t *testing.T) {
 			t.Parallel()
 
-			// A shipped archive with no third-party code raises nothing about the
+			// A shipped archive with no Cursor SDK code raises nothing about the
 			// redistribution posture. The synthetic tree is deliberately incomplete -
 			// it has no runtime and no launcher to probe - so the evidence is the
 			// absence of the finding, not a clean exit status.
@@ -53,9 +53,9 @@ func TestPackageArchive_VerifierRejectsAShippedArchiveCarryingTheSDK(t *testing.
 			report, _ := runVerifyScriptImpl(t, impl, shipped, nil, []string{"--tree-state", "shipped"})
 			for _, finding := range verifyFindings(report) {
 				require.NotContains(t, strings.ToLower(finding), "not redistributed",
-					"a shipped archive with no third-party code must not raise the redistribution finding:\n%s", report)
+					"a shipped archive with no Cursor SDK code must not raise the redistribution finding:\n%s", report)
 				require.NotContains(t, finding, archive.BridgeModulesPath()+"/",
-					"a shipped archive with no third-party code must not raise a provisioned-tree finding:\n%s", report)
+					"a shipped archive with no Cursor SDK code must not raise a provisioned-tree finding:\n%s", report)
 			}
 			require.Contains(t, report, "sdk: not redistributed, required 1.0.23 at run time")
 			require.Contains(t, report, archive.PrivateRuntimeNPMCLIPath(),

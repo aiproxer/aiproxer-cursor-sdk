@@ -52,7 +52,7 @@ func TestArchive_MatchesDesignLayoutBlock(t *testing.T) {
 }
 
 // TestArchive_ResolvesTheOperatorProvisionedSDKTree pins where the SDK the plugin
-// does not redistribute lands. The archive stages no third-party package code, so
+// does not redistribute lands. The archive stages no Cursor SDK package code, so
 // this tree exists only after the operator provisions it, and every consumer that
 // has to talk about it - the verifier, the launcher preflight, the metadata, and
 // the checksum scope - resolves it here rather than spelling it out.
@@ -69,13 +69,19 @@ func TestArchive_ResolvesTheOperatorProvisionedSDKTree(t *testing.T) {
 	require.Equal(t, "@cursor/sdk", packagelayout.SDKPackageName)
 }
 
-// TestArchive_ShipsNoThirdPartyPackageCode is the archive content rule: the
-// Cursor SDK is proprietary and is not redistributed, so the dependency closure
-// is not in the archive either. What the archive does ship is the pair the
-// operator provisions against - the bridge manifest and the lockfile that pins the
-// SDK - plus the private runtime's own bundled npm, without which the documented
-// provisioning command could not run without a global package manager.
-func TestArchive_ShipsNoThirdPartyPackageCode(t *testing.T) {
+// TestArchive_ShipsNoCursorSDKOrItsDependencyClosure is the archive content rule: the
+// Cursor SDK is proprietary and is not redistributed, so neither it nor its dependency
+// closure is in the archive either.
+//
+// The rule is scoped to the Cursor SDK and what it would pull in. It is not "the archive
+// ships no third-party package code": the archive deliberately ships the private runtime's
+// own bundled npm and the dependencies npm bundles with it, which are third-party package
+// code under the staged Node distribution LICENSE. What the archive must not ship is the
+// SDK or anything that exists only to satisfy it, and what it must ship alongside that
+// non-redistribution is the pair the operator provisions against - the bridge manifest and
+// the lockfile that pins the SDK - plus that npm, without which the documented provisioning
+// command could not run without a global package manager.
+func TestArchive_ShipsNoCursorSDKOrItsDependencyClosure(t *testing.T) {
 	t.Parallel()
 
 	for _, platform := range packagelayout.SupportedPlatforms() {
@@ -95,11 +101,35 @@ func TestArchive_ShipsNoThirdPartyPackageCode(t *testing.T) {
 					"required archive entry %s is inside the operator-provisioned tree", rel)
 			}
 
+			// The SDK itself must not be archive content on any path, not only under the
+			// provisioned prefix: a packager that staged it inside the runtime's npm tree
+			// would be redistributing the same code by a different route. Matched on
+			// whole path elements, so a future package whose name merely starts with the
+			// SDK's is not a false positive.
+			sdkRel := a.ProvisionedSDKDirPath()
+			for _, rel := range entries {
+				require.False(t,
+					rel == sdkRel || strings.HasPrefix(rel, sdkRel+"/") || strings.HasSuffix(rel, "/"+sdkRel),
+					"required archive entry %s is the Cursor SDK itself", rel)
+			}
+
 			require.Contains(t, entries, a.BridgePackageJSONPath())
 			require.Contains(t, entries, a.BridgePackageLockPath(),
 				"the lockfile that pins the SDK has to ship: it is what the operator provisions against")
 			require.Contains(t, entries, a.PrivateRuntimeNPMCLIPath(),
 				"provisioning has to run on the shipped runtime's own npm, not a global one")
+
+			// The bundled npm is the third-party package code this archive does ship, so
+			// it has to live under the private runtime rather than under the bridge: the
+			// two `node_modules` trees are different trees, and conflating them is the
+			// mistake a "no third-party package code" claim would hide.
+			require.True(t, strings.HasPrefix(a.PrivateRuntimeNPMCLIPath(), a.PrivateRuntimeNPMRootPath()+"/"),
+				"the shipped npm entry point %s is inside the shipped npm root %s",
+				a.PrivateRuntimeNPMCLIPath(), a.PrivateRuntimeNPMRootPath())
+			require.NotEqual(t, a.BridgeModulesPath(), a.PrivateRuntimeNPMRootPath(),
+				"the shipped bundled npm and the operator-provisioned tree are different trees")
+			require.False(t, strings.HasPrefix(a.PrivateRuntimeNPMRootPath(), a.BridgeModulesPath()),
+				"the bundled npm must not be staged inside the bridge dependency path")
 		})
 	}
 }

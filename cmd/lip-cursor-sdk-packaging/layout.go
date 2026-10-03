@@ -11,9 +11,10 @@ import (
 
 // treeStates are the two states a tree under verification can be in. A shipped
 // archive is one the plugin assembled and nobody has provisioned yet, so it must
-// carry no third-party package code; an installed tree is one an operator has
-// provisioned, so the SDK has to resolve at the pinned version. Both verifiers
-// accept this report's list, so neither spells a state of its own.
+// carry no Cursor SDK and nothing that exists only to satisfy it; an installed tree
+// is one an operator has provisioned, so the SDK has to resolve at the pinned
+// version. Both verifiers accept this report's list, so neither spells a state of its
+// own.
 var treeStates = []string{"shipped", "installed"}
 
 // report is the JSON shape the packaging scripts consume.

@@ -89,7 +89,8 @@ type compatibility struct {
 	CursorSDKRequiredVersion string `json:"cursor_sdk_required_version"`
 	// CursorSDKBundled is false in every archive this tool writes. The Cursor SDK is
 	// proprietary and is not redistributed: the archive ships the manifest and the
-	// lockfile that pin it and no third-party package code at all.
+	// lockfile that pin it and neither the SDK nor its dependency closure. The third-party
+	// package code this archive does ship is the private runtime's own bundled npm.
 	CursorSDKBundled bool `json:"cursor_sdk_bundled"`
 	// CursorSDKProvisioningCommand is the exact command that provisions the pinned SDK
 	// with the runtime the archive ships.
@@ -498,14 +499,24 @@ func rejectProvisionedTree(staging string, archive packagelayout.Archive) error 
 		archive.BridgeModulesPath(), archive.ProvisionCommand(""))
 }
 
-// licensingStatus is the standing redistribution statement. The private Node
-// runtime - the executable and its own bundled npm - is MIT and its notices ship with
-// it. @cursor/sdk is proprietary under Cursor's terms and its platform package bundles
-// native binaries whose license texts it does not redistribute, so this archive ships
-// none of it: the dependency closure is operator-provisioned, not redistributed.
-const licensingStatus = "private Node runtime, including its bundled npm, is MIT with its bundled " +
-	"third-party notices in LICENSES/; the Cursor SDK is proprietary under Cursor's terms and is " +
-	"not redistributed in this archive, so no third-party package code ships in it"
+// licensingStatus is the standing redistribution statement.
+//
+// The private Node runtime is MIT and its notices ship with it, and that runtime does
+// carry third-party package code: its own bundled npm plus the dependencies npm bundles,
+// staged under the distribution LICENSE collected into LICENSES/. @cursor/sdk is
+// proprietary under Cursor's terms and its platform package bundles native binaries whose
+// license texts it does not redistribute, so this archive ships none of that: the Cursor
+// SDK dependency closure is operator-provisioned, not redistributed.
+//
+// The non-redistribution claim is therefore scoped to the Cursor SDK and its closure. A
+// bare "no third-party package code ships in this archive" would be false of the archive
+// this tool writes and would contradict the npm disclosure in the same string, and it
+// would leave an auditor unable to tell what third-party code the archive does ship.
+const licensingStatus = "private Node runtime, including its bundled npm and the third-party " +
+	"dependencies npm bundles with it, is MIT, with those notices staged in LICENSES/ from the " +
+	"shipped runtime LICENSE; the Cursor SDK is proprietary under Cursor's terms and is not " +
+	"redistributed in this archive, which therefore ships no Cursor SDK and no Cursor SDK " +
+	"dependency closure"
 
 // cursorSDKRedistribution is the non-redistribution position, recorded in every
 // archive so nothing the plugin ships can be read as asserting a right it does not

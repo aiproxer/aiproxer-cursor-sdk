@@ -10,11 +10,13 @@
 # metadata, records a checksum over every archive file including the plugin-private
 # ones, and emits a per-platform archive with its own digest.
 #
-# The archive stages NO third-party package code. The Cursor SDK is proprietary and is
-# not redistributed, so neither @cursor/sdk nor its dependency closure is shipped: the
+# The archive stages NO Cursor SDK package code. The Cursor SDK is proprietary and is not
+# redistributed, so neither @cursor/sdk nor its dependency closure is shipped: the
 # operator provisions that tree once, out of band, with the runtime this archive carries.
-# The runtime's own npm is staged because the provisioning command has to run without a
-# global Node or a global package manager.
+# The archive does ship third-party package code - the private runtime's own bundled npm
+# and the dependencies npm bundles with it - because the provisioning command has to run
+# without a global Node or a global package manager. That code is MIT and its notices are
+# collected from the staged runtime's own LICENSE into the archive's notice directory.
 #
 # The archive layout is not restated here. It is read from
 # cmd/lip-cursor-sdk-packaging, which reports internal/packagelayout, so the packager,
@@ -188,6 +190,7 @@ find_node_license() {
 write_third_party_notices() {
   local path="$1" lockfile="$2" bridge_manifest="$3" runtime="$4" node_version="$5" node_kind="$6"
   local node_label="$7" platform_tag="$8" provision_command="$9" sdk_package="${10}"
+  local modules_dir="${11}" npm_root="${12}"
 
   {
     printf '# Third-party notices\n\n'
@@ -198,28 +201,33 @@ write_third_party_notices() {
     printf 'Private Node runtime: %s (source kind: %s, source: %s)\n\n' "$node_version" "$node_kind" "$node_label"
     printf '## Private Node runtime\n\n'
     if [ "$node_kind" != 'official-distribution' ]; then
-      printf -- '- This runtime was staged from the build machine'"'"'s toolchain, not from an\n'
-      printf '  official Node distribution, and no distribution digest backs it. Re-stage\n'
+      printf -- '- This runtime was staged from the build machine'"'"'s toolchain, not from an official\n'
+      printf '  Node distribution, and no distribution digest backs it. Re-stage\n'
       printf '  with --node-dist <official archive> before publishing so the provenance of the\n'
       printf '  shipped runtime can be checked against the release SHASUMS256.txt.\n'
     fi
     printf -- '- Node.js is MIT licensed. The distribution LICENSE staged in this archive holds\n'
     printf '  the Node.js license grant together with the notices for the components Node\n'
     printf '  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.\n'
-    printf -- '- The runtime ships with its own bundled npm, and so does this archive: that is\n'
-    printf '  what the provisioning command below runs, so an operator needs neither a global\n'
-    printf '  Node nor a global package manager. npm is MIT licensed under the same Node\n'
-    printf '  distribution license staged here.\n'
+    printf -- '- The runtime ships with its own bundled npm, and so does this archive, at\n'
+    printf '  %s: that is what the provisioning command below runs, so an\n' "$npm_root"
+    printf '  operator needs neither a global Node nor a global package manager.\n'
+    printf -- '- That npm tree, together with the third-party packages npm bundles inside it, IS\n'
+    printf '  third-party package code shipped by this archive, and it is the only such code\n'
+    printf '  here. It is MIT licensed under the same Node distribution license staged in this\n'
+    printf '  archive, whose notices cover those bundled components.\n'
     printf -- '- Components the staged runtime reports about itself:\n'
     "$runtime" -p 'Object.entries(process.versions).map(([k,v])=>`  - ${k} ${v}`).join("\n")' | LC_ALL=C sort
     printf '\n## Cursor SDK: not redistributed, operator-provisioned\n\n'
-    printf -- '- $sdk_package is proprietary. Its LICENSE.md states that use is subject to\n'
+    printf -- '- %s is proprietary. Its LICENSE.md states that use is subject to\n' "$sdk_package"
     printf "  Cursor's Terms of Service (https://cursor.com/terms-of-service) and it grants no\n"
     printf '  redistribution right. Its platform package additionally ships bundled native\n'
     printf '  binaries (rg and cursandbox) whose own license texts the package does not\n'
     printf '  redistribute.\n'
-    printf -- '- This archive therefore contains no $sdk_package and no dependency closure of\n'
-    printf '  any kind. The checksums in this archive cover the shipped files only.\n'
+    printf -- '- This archive therefore contains no %s and none of its dependency\n' "$sdk_package"
+    printf '  closure. The scope of that claim is the Cursor SDK and its closure: the\n'
+    printf '  third-party package code this archive does ship is the npm tree named above, and\n'
+    printf '  nothing else. The checksums in this archive cover the shipped files only.\n'
     printf -- '- The operator obtains the SDK themselves, accepting Cursor'"'"'s terms, and\n'
     printf '  provisions it once with the runtime this archive ships:\n\n'
     printf '      %s\n\n' "$provision_command"
@@ -229,6 +237,7 @@ write_third_party_notices() {
     printf '  unsupported.\n'
     printf -- '- Provisioning is an install-time operator step. The plugin never installs\n'
     printf '  anything, runs no package manager, and downloads nothing.\n'
+    printf -- '- Provisioning writes %s in the install tree.\n' "$modules_dir"
     printf -- '- The provisioned tree is operator-attributable: it is resolved by the\n'
     printf "  operator's npm from the shipped lockfile, it is outside this project's\n"
     printf '  checksum record, and no notice in this archive covers it.\n\n'
@@ -243,7 +252,7 @@ write_third_party_notices() {
 }
 
 # write_locked_inventory records what the shipped lockfile pins and which half of it the
-# provisioning command actually installs. The archive stages no third-party package code,
+# provisioning command actually installs. The archive stages no Cursor SDK package code,
 # so this is the inventory of what the operator's npm will resolve rather than of what
 # the archive carries: naming the pinned versions is still evidence, and stating the
 # attribution next to it is what keeps it honest.
@@ -356,6 +365,7 @@ bridge_package_dir="$(layout_report bridge_package_dir)"
 bridge_entry="$(layout_report bridge_entry)"
 bridge_dist="$(layout_report bridge_dist)"
 sdk_package_name="$(layout_report sdk_package_name)"
+bridge_modules="$(layout_report bridge_modules)"
 bridge_package_json="$(layout_report bridge_package_json)"
 bridge_package_lock="$(layout_report bridge_package_lock)"
 private_npm_root="$(layout_report private_npm_root)"
@@ -512,8 +522,8 @@ cp -R "$npm_source" "$staging/$private_npm_root"
 
 # 5. Closed host manifest and release metadata, both derived from the staged tree
 #    rather than described independently of it. The renderer refuses to describe a tree
-#    carrying third-party package code, so a packager that staged one fails here rather
-#    than publishing a bundle it must not ship.
+#    carrying the Cursor SDK dependency closure, so a packager that staged one fails here
+#    rather than publishing a bundle it must not ship.
 exe_digest="$(sha256_of "$outer_exe")"
 (cd "$repo_root" && GOWORK=off go run ./cmd/lip-cursor-sdk-packaging render \
   -repo "$repo_root" -staging "$staging" -platform "$layout_platform" \
@@ -522,7 +532,8 @@ exe_digest="$(sha256_of "$outer_exe")"
 write_third_party_notices "$staging/$licenses_dir/THIRD-PARTY-NOTICES.md" \
   "$staging/$bridge_package_lock" "$staging/$bridge_package_json" "$private_runtime_path" \
   "$node_version" "$runtime_kind" "$runtime_label" "$layout_platform" \
-  "$sdk_provision_command" "$sdk_package_name"
+  "$sdk_provision_command" "$sdk_package_name" \
+  "$bridge_modules" "$private_npm_root"
 
 # 6. Checksums over every archive file, plugin-private files included. The record
 #    cannot cover itself, so it is written last.

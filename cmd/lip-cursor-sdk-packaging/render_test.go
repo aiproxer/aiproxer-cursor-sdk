@@ -184,10 +184,10 @@ func TestRender_DoesNotClaimAReleaseExists(t *testing.T) {
 //
 // The SDK is proprietary and no redistribution right for it or for the native binaries
 // its platform package bundles has been verified, so the archive ships the manifest and
-// the lockfile that pin the SDK and no third-party code at all. A record that only
-// named a version would read as "this is what the archive ships"; the record has to say
-// the SDK is required at run time, not bundled, give the one command that provisions
-// it, and state the non-redistribution position explicitly.
+// the lockfile that pin the SDK and neither the SDK nor its dependency closure. A record
+// that only named a version would read as "this is what the archive ships"; the record
+// has to say the SDK is required at run time, not bundled, give the one command that
+// provisions it, and state the non-redistribution position explicitly.
 func TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled(t *testing.T) {
 	t.Parallel()
 
@@ -200,7 +200,7 @@ func TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled(t *testing.T) {
 	require.Equal(t, "1.0.23", compatibility["cursor_sdk_required_version"],
 		"the required version is the pin the bridge verifies at run time")
 	require.Equal(t, false, compatibility["cursor_sdk_bundled"],
-		"the archive ships no third-party package code, so the SDK is not bundled")
+		"the archive ships no Cursor SDK and none of its dependency closure")
 	require.Equal(t, archive.ProvisionCommand(""), compatibility["cursor_sdk_provisioning_command"],
 		"the record has to carry the exact provisioning command an operator runs")
 	require.NotContains(t, compatibility, "cursor_sdk_version",
@@ -225,12 +225,12 @@ func TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled(t *testing.T) {
 // TestRender_RefusesAStagedOperatorProvisionedTree keeps a staged dependency tree an
 // explicit packaging failure.
 //
-// The archive must not ship third-party package code: @cursor/sdk is proprietary and
-// its platform package bundles native binaries whose license texts it does not
-// redistribute, so staging the closure would assert a redistribution right nobody has
-// verified. A renderer that described such a tree anyway would produce release metadata
-// that reads as a redistributable bundle, which is the exact thing the archive must not
-// be.
+// The archive must not ship the Cursor SDK's dependency closure: @cursor/sdk is
+// proprietary and its platform package bundles native binaries whose license texts it
+// does not redistribute, so staging the closure would assert a redistribution right
+// nobody has verified. A renderer that described such a tree anyway would produce
+// release metadata that reads as a redistributable bundle, which is the exact thing the
+// archive must not be.
 func TestRender_RefusesAStagedOperatorProvisionedTree(t *testing.T) {
 	t.Parallel()
 

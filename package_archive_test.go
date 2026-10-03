@@ -84,11 +84,11 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, entry, "runDoctor")
 		require.FileExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgeDistPath()), "main.js"))
 
-		// The archive ships no third-party package code at all. The Cursor SDK is
-		// proprietary and is not redistributed, so neither it nor its dependency
-		// closure may appear; what ships is the manifest and the lockfile that pin it,
-		// plus the runtime's own npm so the provisioning command needs no global
-		// package manager.
+		// The archive ships no Cursor SDK and none of its dependency closure. The SDK is
+		// proprietary and is not redistributed, so neither may appear; what ships is the
+		// manifest and the lockfile that pin it, plus the runtime's own bundled npm - which
+		// is third-party package code, staged precisely so the provisioning command needs
+		// no global package manager.
 		require.NoDirExists(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgeModulesPath())),
 			"the archive must not ship the operator-provisioned dependency tree")
 		for rel := range walkRelativeFiles(t, built.installRoot) {
