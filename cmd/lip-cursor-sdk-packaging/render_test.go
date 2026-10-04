@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +26,7 @@ type stagedRelease struct {
 	root           string
 	release        string
 	template       string
+	goMod          string
 	exe            string
 	runtime        string
 	entry          string
@@ -37,7 +39,26 @@ type stagedRelease struct {
 	nodeSource     string
 	nodeSourceKind string
 	nodeVersion    string
+	// sourceRevision and sourceModified are the source state the harness resolved from
+	// the tree it builds in, which is what a packager passes when the toolchain stamped
+	// nothing into the executable. sourceModified is the tri-state the record has to be
+	// able to keep: "true", "false", "unknown", or absent for "not established".
+	sourceRevision string
+	sourceModified string
+	// testedHosts are the host artifact digests the caller supplies as release
+	// evidence. A staged tree carries none by default: the packager has no host
+	// artifact to certify against, and a record that named one anyway would be
+	// inventing evidence.
+	testedHosts []string
 }
+
+// rootModule and acpModule are the published host contracts the plugin pins, and
+// hostPinVersion is the real released version this repository builds against.
+const (
+	rootModule     = "github.com/matdev83/go-llm-interactive-proxy"
+	acpModule      = rootModule + "/connector-support/acp"
+	hostPinVersion = "v0.1.0-rc.1"
+)
 
 func TestRender_PreservesManifestIdentityAndNativePlatformClaim(t *testing.T) {
 	t.Parallel()
@@ -83,7 +104,7 @@ func TestRender_PreservesManifestIdentityAndNativePlatformClaim(t *testing.T) {
 
 	// The compatibility record reports the same identity plus the facts a
 	// maintainer or operator needs to audit the private runtime.
-	require.Equal(t, "golip.cursorsdk.compatibility/v1", compatibility["schema"])
+	require.Equal(t, "golip.cursorsdk.compatibility/v2", compatibility["schema"])
 	require.Equal(t, "io.golip.backend.cursorsdk", compatibility["plugin_id"])
 	require.Equal(t, "0.1.0", compatibility["plugin_version"])
 	require.Equal(t, lay.buildID, compatibility["build_id"])
@@ -138,10 +159,505 @@ func TestRender_RecordsPrivateRuntimeAndSDKMetadataFromTheStagedTree(t *testing.
 			require.Equal(t, tc.wants, compatibility["private_runtime_source"])
 			require.NotEmpty(t, compatibility["private_runtime_sha256"])
 			require.Equal(t, lay.platform, compatibility["native_platform_assembled"])
-			require.Equal(t, "", compatibility["tested_host_artifact_sha256"])
+			require.Equal(t, "uncertified", compatibility["host_certification_state"])
 			require.NotEmpty(t, compatibility["licensing_status"])
 		})
 	}
+}
+
+// TestRender_RecordsTheExactPinnedHostContractVersions keeps the record's host
+// compatibility exact and derived.
+//
+// The plugin builds against published Go-LIP modules, and the versions it was built
+// against are the ones a reader of the archive has to be able to check. A record that
+// named the module paths without their versions would leave "compatible host" a claim
+// rather than a fact, so the versions are read from the plugin's own module manifest -
+// the same manifest `go build` resolved - instead of being supplied by a caller who
+// could name any version at all.
+func TestRender_RecordsTheExactPinnedHostContractVersions(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	_, compatibility := renderAndRead(t, lay)
+
+	require.Equal(t, rootModule, compatibility["published_root_module"])
+	require.Equal(t, hostPinVersion, compatibility["host_contract_root_version"])
+	require.Equal(t, acpModule, compatibility["published_acp_module"])
+	require.Equal(t, hostPinVersion, compatibility["host_contract_acp_version"])
+}
+
+// TestRender_RefusesARecordItCannotPinToAReleasedHostContract keeps a record that
+// could not name the contracts it was built against from being written at all.
+//
+// A missing pin, and a `replace` that redirects the build away from the released
+// module, both produce an archive whose "supported host" line cannot be audited. The
+// replace case is the dangerous one: a local replacement resolves fine, so nothing
+// else in packaging would notice, and the record would name a contract version the
+// bytes in the archive were never built from.
+func TestRender_RefusesARecordItCannotPinToAReleasedHostContract(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		alter func(t *testing.T, lay *stagedRelease)
+		wants string
+	}{
+		{
+			name: "ACP module not required",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchGoMod(t, lay, "\t"+acpModule+" "+hostPinVersion+"\n", "")
+			},
+			wants: acpModule,
+		},
+		{
+			name: "root module not required",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchGoMod(t, lay, "\t"+rootModule+" "+hostPinVersion+"\n", "")
+			},
+			wants: rootModule,
+		},
+		{
+			name: "root module replaced",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchGoMod(t, lay, "go 1.26.6\n", "go 1.26.6\n\nreplace "+rootModule+" => ../host\n")
+			},
+			wants: "replace",
+		},
+		{
+			name: "ACP module replaced",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchGoMod(t, lay, "go 1.26.6\n",
+					"go 1.26.6\n\nreplace "+acpModule+" => ../host/connector-support/acp\n")
+			},
+			wants: "replace",
+		},
+		{
+			name: "release metadata names no ACP module",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay, "published_acp_module: "+acpModule+"\n", "")
+			},
+			wants: "published_acp_module",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			lay := newStagedRelease(t)
+			tc.alter(t, lay)
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wants)
+		})
+	}
+}
+
+// TestRender_RecordsSourceIdentityFromTheStagedBuildStamp keeps the record's source
+// identity a fact about the bytes in the archive.
+//
+// The revision is read from the Go build stamp inside the staged outer executable, so
+// it is the revision those bytes were compiled from - not a value typed into a
+// metadata file, which would go stale the moment the next commit landed. A build made
+// outside a git work tree carries no stamp, and the record says exactly that instead
+// of naming a revision nobody can check; a build from a dirty work tree is recorded
+// as dirty, because that is what a release reviewer has to know.
+func TestRender_RecordsSourceIdentityFromTheStagedBuildStamp(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	_, compatibility := renderAndRead(t, lay)
+
+	// The fixture stages a stand-in that is not a Go binary at all, and the harness
+	// resolved nothing, so the record has to say that rather than inventing an identity.
+	require.Equal(t, "", compatibility["source_revision"])
+	require.NotContains(t, compatibility, "source_modified",
+		"an unestablished source state has to be absent, not recorded as clean")
+	require.Contains(t, stringField(compatibility, "source_stamp_evidence"), "no Go build VCS stamp")
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("source identity evidence needs git to stamp a build")
+	}
+
+	stamped := newStagedRelease(t)
+	head := commitStampedBinary(t, stamped, false)
+	_, record := renderAndRead(t, stamped)
+	require.Equal(t, head, record["source_revision"],
+		"the recorded revision is the one the staged executable was built from")
+	require.Equal(t, false, record["source_modified"])
+
+	dirty := newStagedRelease(t)
+	commitStampedBinary(t, dirty, true)
+	_, record = renderAndRead(t, dirty)
+	require.NotEmpty(t, record["source_revision"])
+	require.Equal(t, true, record["source_modified"],
+		"a build from a dirty work tree has to be recorded as dirty, not as a clean revision")
+}
+
+// TestRender_CrossChecksAndFallsBackToTheResolvedSourceRevision keeps the source
+// identity a fact about the build in the common case as well.
+//
+// The Go toolchain stamps a revision only for a build in a primary version-control
+// checkout. This project builds in linked work trees, where it stamps nothing, so the
+// packager also resolves the revision from the tree it builds in and passes it here. Two
+// things have to hold: a revision that disagrees with the stamp in the executable is a
+// packaging failure rather than a preference, and a resolved revision is recorded with
+// the evidence that says where it came from, because it was not read out of the bytes.
+func TestRender_CrossChecksAndFallsBackToTheResolvedSourceRevision(t *testing.T) {
+	t.Parallel()
+
+	t.Run("resolved revision is recorded when there is no stamp", func(t *testing.T) {
+		t.Parallel()
+
+		lay := newStagedRelease(t)
+		lay.sourceRevision = "0123456789abcdef0123456789abcdef01234567"
+		lay.sourceModified = "true"
+
+		_, record := renderAndRead(t, lay)
+		require.Equal(t, lay.sourceRevision, record["source_revision"])
+		require.Equal(t, true, record["source_modified"])
+		require.Contains(t, stringField(record, "source_stamp_evidence"),
+			"resolved from the version-control state of the tree")
+	})
+
+	t.Run("a resolved revision that is not a revision is refused", func(t *testing.T) {
+		t.Parallel()
+
+		for _, revision := range []string{"HEAD", "chore/platform-and-script-scope", "v0.1.0", "012345", "nothex!!"} {
+			lay := newStagedRelease(t)
+			lay.sourceRevision = revision
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err, "revision %q was recorded as a source revision", revision)
+			require.Contains(t, err.Error(), "source-revision")
+		}
+	})
+
+	t.Run("a modified state without a revision is refused", func(t *testing.T) {
+		t.Parallel()
+
+		for _, state := range []string{"true", "false"} {
+			lay := newStagedRelease(t)
+			lay.sourceModified = state
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "-source-modified")
+		}
+	})
+
+	t.Run("an unrecognised source state is refused", func(t *testing.T) {
+		t.Parallel()
+
+		for _, state := range []string{"yes", "clean", "dirty", "1", "maybe"} {
+			lay := newStagedRelease(t)
+			lay.sourceRevision = "0123456789abcdef0123456789abcdef01234567"
+			lay.sourceModified = state
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err, "source state %q was accepted", state)
+			require.Contains(t, err.Error(), "unknown")
+		}
+	})
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("the cross-check evidence needs git to stamp a build")
+	}
+
+	t.Run("a resolved revision that contradicts the stamp fails packaging", func(t *testing.T) {
+		t.Parallel()
+
+		lay := newStagedRelease(t)
+		head := commitStampedBinary(t, lay, false)
+		lay.sourceRevision = strings.Repeat("ab", 20)
+		if strings.HasPrefix(head, strings.Repeat("ab", 20)) {
+			lay.sourceRevision = strings.Repeat("cd", 20)
+		}
+		lay.sourceModified = "true"
+
+		err := runRenderCmd(t, lay)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "-source-revision")
+		require.Contains(t, err.Error(), head)
+	})
+
+	t.Run("a resolved cleanliness that contradicts the stamp fails packaging", func(t *testing.T) {
+		t.Parallel()
+
+		lay := newStagedRelease(t)
+		head := commitStampedBinary(t, lay, false)
+		lay.sourceRevision = head
+		lay.sourceModified = "true"
+
+		err := runRenderCmd(t, lay)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "vcs.modified")
+	})
+
+	t.Run("an unresolved cleanliness beside a stamp is not a contradiction", func(t *testing.T) {
+		t.Parallel()
+
+		lay := newStagedRelease(t)
+		head := commitStampedBinary(t, lay, false)
+		lay.sourceRevision = head
+		lay.sourceModified = "unknown"
+
+		_, record := renderAndRead(t, lay)
+		require.Equal(t, head, record["source_revision"])
+		require.Equal(t, false, record["source_modified"],
+			"the stamp states the state, so the record states it rather than nothing")
+		require.Contains(t, stringField(record, "source_stamp_evidence"), "Go build VCS stamp")
+	})
+
+	t.Run("a resolved revision that agrees with the stamp is kept", func(t *testing.T) {
+		t.Parallel()
+
+		lay := newStagedRelease(t)
+		head := commitStampedBinary(t, lay, false)
+		lay.sourceRevision = head
+
+		_, record := renderAndRead(t, lay)
+		require.Equal(t, head, record["source_revision"])
+		require.Contains(t, stringField(record, "source_stamp_evidence"), "Go build VCS stamp",
+			"with a stamp in the executable, the record cites the stamp")
+	})
+}
+
+// TestRender_NeverRecordsAnUnestablishedSourceStateAsClean keeps cleanliness a tri-state.
+//
+// A build nobody could establish the state of is not a clean build, and a record that says
+// it is has turned an absence of evidence into a statement about the artifact. The three
+// states have to stay distinct: a dirty tree, a clean tree, and a state nothing
+// established - where the last one leaves the field out of the record entirely and says so
+// in words, next to the revision it did establish.
+func TestRender_NeverRecordsAnUnestablishedSourceStateAsClean(t *testing.T) {
+	t.Parallel()
+
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+
+	for _, tc := range []struct {
+		name     string
+		revision string
+		modified string
+		wants    any
+	}{
+		{name: "no identity at all", wants: nil},
+		{name: "revision with no state supplied", revision: revision, wants: nil},
+		{name: "revision with an explicit unknown state", revision: revision, modified: "unknown", wants: nil},
+		{name: "revision resolved clean", revision: revision, modified: "false", wants: false},
+		{name: "revision resolved dirty", revision: revision, modified: "true", wants: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			lay := newStagedRelease(t)
+			lay.sourceRevision = tc.revision
+			lay.sourceModified = tc.modified
+
+			_, record := renderAndRead(t, lay)
+			if tc.wants == nil {
+				require.NotContains(t, record, "source_modified",
+					"an unestablished source state must be absent from the record, not false")
+				return
+			}
+			require.Equal(t, tc.wants, record["source_modified"])
+			if tc.modified == "unknown" {
+				require.Contains(t, stringField(record, "source_stamp_evidence"), "could not be established",
+					"an unknown state has to say that it could not be established")
+			}
+		})
+	}
+}
+
+// TestRender_RecordsHostCertificationWithoutInventingEvidence keeps the host
+// certification line honest in both directions.
+//
+// No host artifact has been certified, so the record carries no host digest and states
+// why. The mechanism that will carry real evidence later is a caller-supplied digest,
+// validated as a digest: a certified claim with nothing behind it, an uncertified
+// claim carrying a digest, and an unparsable digest all fail the render instead of
+// producing a record that reads as evidence nobody produced.
+func TestRender_RecordsHostCertificationWithoutInventingEvidence(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	_, compatibility := renderAndRead(t, lay)
+
+	require.Equal(t, "uncertified", compatibility["host_certification_state"])
+	require.NotEmpty(t, compatibility["host_certification_reason"],
+		"an uncertified record has to say why, or it reads as an oversight")
+	require.Empty(t, compatibility["tested_host_artifacts"])
+	require.NotContains(t, compatibility, "tested_host_artifact_sha256",
+		"an empty digest field could only ever record the absence of a certification")
+
+	t.Run("certified with a supplied digest", func(t *testing.T) {
+		t.Parallel()
+
+		certified := newStagedRelease(t)
+		patchRelease(t, certified, "host_certification: uncertified", "host_certification: certified")
+		patchRelease(t, certified,
+			"host_certification_reason: no downloadable host binary release exists to certify against",
+			"host_certification_reason:")
+		certified.testedHosts = []string{strings.Repeat("cd", 32)}
+
+		_, record := renderAndRead(t, certified)
+		require.Equal(t, "certified", record["host_certification_state"])
+		require.Equal(t, []any{strings.Repeat("cd", 32)}, record["tested_host_artifacts"])
+	})
+
+	for _, tc := range []struct {
+		name  string
+		alter func(t *testing.T, lay *stagedRelease)
+		wants string
+	}{
+		{
+			name: "certified without any digest",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
+				patchRelease(t, lay,
+					"host_certification_reason: no downloadable host binary release exists to certify against",
+					"host_certification_reason:")
+			},
+			wants: "-tested-host",
+		},
+		{
+			name: "uncertified with a digest",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				lay.testedHosts = []string{strings.Repeat("cd", 32)}
+			},
+			wants: "-tested-host",
+		},
+		{
+			name: "digest is not a digest",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
+				patchRelease(t, lay,
+					"host_certification_reason: no downloadable host binary release exists to certify against",
+					"host_certification_reason:")
+				lay.testedHosts = []string{"v0.1.0"}
+			},
+			wants: "sha256",
+		},
+		{
+			// Hexadecimal of the right alphabet but the wrong length: the shape check
+			// has to be about the whole digest, not only about whether it is hex.
+			name: "digest is hex but the wrong length",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
+				patchRelease(t, lay,
+					"host_certification_reason: no downloadable host binary release exists to certify against",
+					"host_certification_reason:")
+				lay.testedHosts = []string{strings.Repeat("ab", 31)}
+			},
+			wants: "64 lowercase hex characters",
+		},
+		{
+			name: "digest is hex but one character too long",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
+				patchRelease(t, lay,
+					"host_certification_reason: no downloadable host binary release exists to certify against",
+					"host_certification_reason:")
+				lay.testedHosts = []string{strings.Repeat("ab", 32) + "a"}
+			},
+			wants: "64 lowercase hex characters",
+		},
+		{
+			name: "unknown certification state",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay, "host_certification: uncertified", "host_certification: approved")
+			},
+			wants: "host_certification",
+		},
+		{
+			name: "uncertified without a reason",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				patchRelease(t, lay,
+					"host_certification_reason: no downloadable host binary release exists to certify against",
+					"host_certification_reason:")
+			},
+			wants: "host_certification_reason",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			lay := newStagedRelease(t)
+			tc.alter(t, lay)
+
+			err := runRenderCmd(t, lay)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wants)
+		})
+	}
+}
+
+// TestRender_RecordsPackageVerificationAsUnperformed keeps the release record from
+// claiming a verification that has not happened.
+//
+// The packager writes this record before any verification can run: verification is a
+// separate step against an assembled tree, so a "verified" or "passed" state recorded
+// here would describe a check nobody performed. The record therefore states that
+// nothing has been verified yet, names the command that does the verification for each
+// tree state, and stays that way until an auditor attaches a real report.
+func TestRender_RecordsPackageVerificationAsUnperformed(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	_, compatibility := renderAndRead(t, lay)
+
+	require.Equal(t, "not-performed", compatibility["package_verification_state"])
+	require.Equal(t, false, compatibility["package_verification_performed"])
+	require.NotEmpty(t, compatibility["package_verification_reason"])
+	require.NotContains(t, compatibility, "package_verification",
+		"a bare command name reads as a verification that happened")
+
+	verifier := "scripts/verify-package.sh"
+	if lay.goos() == "windows" {
+		verifier = "scripts/verify-package.ps1"
+	}
+	require.Contains(t, stringField(compatibility, "package_verification_shipped_command"),
+		verifier+" --package-root <plugin-root> --tree-state shipped")
+	require.Contains(t, stringField(compatibility, "package_verification_installed_command"),
+		verifier+" --package-root <plugin-root> --tree-state installed")
+
+	// Nothing in the record may read as a passing verification.
+	body := strings.ToLower(mustJSON(t, compatibility))
+	for _, claim := range []string{"pass", "verified\": true", "\"verified\"", "succeeded"} {
+		require.NotContains(t, body, claim,
+			"the record may not label a check that has not run; field value: %s", claim)
+	}
+}
+
+// TestRender_RecordsTheDeclaredPlatformsAndTheOnesThisArchiveDidNotAssemble keeps
+// the platform evidence in the record rather than only in the build log.
+//
+// One archive is assembled and verified natively, and it narrows the manifest to that
+// one platform. The platforms the template declares are the project's claims, and the
+// ones this artifact is not evidence for have to be readable without the CI log -
+// otherwise a reader of a single archive cannot tell a deliberate limit from an
+// oversight.
+func TestRender_RecordsTheDeclaredPlatformsAndTheOnesThisArchiveDidNotAssemble(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	_, compatibility := renderAndRead(t, lay)
+
+	require.Equal(t, []any{"linux/amd64", "windows/amd64"}, compatibility["declared_platforms"],
+		"the declared set is recorded sorted, so the record is stable across runs")
+
+	notAssembled := make([]string, 0, 2)
+	for _, platform := range decodeList(t, compatibility["declared_platforms_not_assembled"]) {
+		notAssembled = append(notAssembled, platform.(string))
+	}
+	require.NotContains(t, notAssembled, lay.platform,
+		"an archive assembled natively on this platform is evidence for it")
+
+	assembled := append([]string{lay.platform}, notAssembled...)
+	slices.Sort(assembled)
+	declared := packagelayout.SupportedPlatforms()
+	slices.Sort(declared)
+	require.Equal(t, declared, assembled,
+		"the declared set and the assembled one have to partition the declared platforms")
 }
 
 // TestRender_RefusesAnUnnamedRuntimeSourceKind keeps the recorded provenance from
@@ -497,10 +1013,28 @@ func newStagedRelease(tb testing.TB) *stagedRelease {
 		"tag: cursorsdk-v0.1.0",
 		"profiles:",
 		"  - full",
-		"published_root_module: github.com/matdev83/go-llm-interactive-proxy",
+		"published_root_module: " + rootModule,
+		"published_acp_module: " + acpModule,
 		"replace_policy: released-dependency-pins-no-replace",
 		"private_companions:",
 		"  - bridge-node",
+		"host_certification: uncertified",
+		"host_certification_reason: no downloadable host binary release exists to certify against",
+		"",
+	}, "\n"))
+	// The plugin module manifest is a build input too: the exact released host
+	// contract versions the record names are the ones this module requires, so the
+	// renderer reads them here rather than taking a caller-supplied string.
+	lay.goMod = writeFile(tb, filepath.Join(repo, "go.mod"), strings.Join([]string{
+		"module github.com/aiproxer/aiproxer-cursor-sdk",
+		"",
+		"go 1.26.6",
+		"",
+		"require (",
+		"\t" + rootModule + " " + hostPinVersion,
+		"\t" + acpModule + " " + hostPinVersion,
+		"\tgithub.com/stretchr/testify v1.12.1",
+		")",
 		"",
 	}, "\n"))
 	lay.template = writeFile(tb, filepath.Join(repo, "manifest", "template.backendplugin.json"), strings.Join([]string{
@@ -544,7 +1078,7 @@ func renderAndRead(tb testing.TB, lay *stagedRelease) (map[string]any, map[strin
 func runRenderCmd(tb testing.TB, lay *stagedRelease) error {
 	tb.Helper()
 
-	cmd := exec.Command(goToolPath(tb), "run", ".",
+	args := []string{
 		"render",
 		"-repo", filepath.Dir(lay.release),
 		"-staging", lay.root,
@@ -552,7 +1086,18 @@ func runRenderCmd(tb testing.TB, lay *stagedRelease) error {
 		"-exe-sha256", lay.exeSHA256,
 		"-node-source", lay.nodeSource,
 		"-node-source-kind", lay.nodeSourceKind,
-	)
+	}
+	for _, digest := range lay.testedHosts {
+		args = append(args, "-tested-host", digest)
+	}
+	if lay.sourceRevision != "" {
+		args = append(args, "-source-revision", lay.sourceRevision)
+	}
+	if lay.sourceModified != "" {
+		args = append(args, "-source-modified", lay.sourceModified)
+	}
+	argv := append([]string{"run", "."}, args...)
+	cmd := exec.Command(goToolPath(tb), argv...)
 	cmd.Dir = thisFileDir(tb)
 	cmd.Env = append(cmd.Environ(), "GOWORK=off")
 	out, err := cmd.CombinedOutput()
@@ -560,6 +1105,26 @@ func runRenderCmd(tb testing.TB, lay *stagedRelease) error {
 		return &renderError{output: string(out), err: err}
 	}
 	return nil
+}
+
+// patchRelease rewrites one line of the fixture release metadata, so a case can
+// declare a release posture the shipped file does not.
+func patchRelease(tb testing.TB, lay *stagedRelease, old, replacement string) {
+	tb.Helper()
+
+	body := readFile(tb, lay.release)
+	require.Contains(tb, body, old)
+	writeFile(tb, lay.release, strings.Replace(body, old, replacement, 1))
+}
+
+// patchGoMod rewrites the fixture module manifest, so a case can drop or replace a
+// pinned host contract.
+func patchGoMod(tb testing.TB, lay *stagedRelease, old, replacement string) {
+	tb.Helper()
+
+	body := readFile(tb, lay.goMod)
+	require.Contains(tb, body, old)
+	writeFile(tb, lay.goMod, strings.Replace(body, old, replacement, 1))
 }
 
 // renderError carries the renderer's diagnostics so assertions can read them.
@@ -608,6 +1173,55 @@ func buildRuntimeStub(tb testing.TB, version string) string {
 	raw, err := cmd.CombinedOutput()
 	require.NoError(tb, err, "build runtime stub: %s", raw)
 	return out
+}
+
+// commitStampedBinary builds the outer executable inside a git work tree, so the Go
+// toolchain stamps the revision it was built from into the binary, and installs that
+// binary as the staged outer executable. It returns the revision the record has to
+// carry.
+//
+// dirty adds an uncommitted edit before the build, which is what makes the toolchain
+// stamp the binary as modified. A record that named the revision without saying so
+// would present a build that does not match its own source as a clean one.
+func commitStampedBinary(tb testing.TB, lay *stagedRelease, dirty bool) string {
+	tb.Helper()
+
+	dir := tb.TempDir()
+	writeFile(tb, filepath.Join(dir, "go.mod"), "module outerstub\n\ngo 1.26\n")
+	source := "package main\n\nfunc main() {}\n"
+	writeFile(tb, filepath.Join(dir, "main.go"), source)
+
+	git := func(args ...string) string {
+		tb.Helper()
+
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=packaging", "GIT_AUTHOR_EMAIL=packaging@example.invalid",
+			"GIT_COMMITTER_NAME=packaging", "GIT_COMMITTER_EMAIL=packaging@example.invalid",
+			"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull)
+		out, err := cmd.CombinedOutput()
+		require.NoError(tb, err, "git %s: %s", strings.Join(args, " "), out)
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	git("add", "-A")
+	git("commit", "-qm", "staged outer executable")
+	head := git("rev-parse", "HEAD")
+	if dirty {
+		writeFile(tb, filepath.Join(dir, "main.go"), source+"\n// uncommitted edit\n")
+	}
+
+	out := filepath.Join(dir, "outer"+packagelayout.ExeSuffixFor(runtime.GOOS))
+	cmd := exec.Command(goToolPath(tb), "build", "-o", out, ".")
+	cmd.Dir = dir
+	cmd.Env = append(cmd.Environ(), "GOWORK=off")
+	raw, err := cmd.CombinedOutput()
+	require.NoError(tb, err, "build stamped outer stub: %s", raw)
+
+	installBinaryFile(tb, filepath.Join(lay.root, filepath.FromSlash(
+		"bin/"+packagelayout.OuterExecutableName+lay.suffix())), out)
+	return head
 }
 
 func readFile(tb testing.TB, path string) string {

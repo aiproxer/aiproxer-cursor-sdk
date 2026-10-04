@@ -6,6 +6,7 @@ plugin needs before it can serve a request.
 
 - [What the archive contains](#what-the-archive-contains)
 - [Is a system Node required](#is-a-system-node-required)
+- [Supported platforms](#supported-platforms)
 - [Installing](#installing)
 - [Provisioning the Cursor SDK](#provisioning-the-cursor-sdk)
 - [Verifying the install](#verifying-the-install)
@@ -58,14 +59,35 @@ The host binary is unchanged by any of this. Cursor support is an optional plugi
 
 ## Is a system Node required
 
-**No.** The archive ships its own Node runtime, and the provisioning command runs *that*
-runtime through *that* runtime's own bundled npm. You need:
+**No. A system Node is not required, and neither is a global npm.** The archive ships its
+own Node runtime, and the provisioning command runs *that* runtime through *that*
+runtime's own bundled npm. You need:
 
 - a Go toolchain only if you want to run `scripts/verify-package` yourself; and
 - nothing else. No system Node, no global npm, no pnpm or yarn.
 
 The archive does not contain `private/bridge/node_modules/`, and installing the plugin
 does not populate it. Provisioning is a deliberate, separate step.
+
+## Supported platforms
+
+Two platforms are shipped, and they are the only two. Each one is assembled, verified,
+and has its private runtime run natively on a runner of its own; there is no cross-compiled
+artifact and no unverified claim.
+
+| Platform | Archive | Bundled npm inside the runtime | Evidence |
+| --- | --- | --- | --- |
+| `windows/amd64` | `cursorsdk-<version>-windows-amd64.zip` | `../node/node_modules/npm/bin/npm-cli.js` | `windows-latest` leg of the `package` lane in [`.github/workflows/verify.yml`](../.github/workflows/verify.yml) |
+| `linux/amd64` | `cursorsdk-<version>-linux-amd64.tar.gz` | `../node/lib/node_modules/npm/bin/npm-cli.js` | `ubuntu-latest` leg of the same lane |
+
+The two commands differ only because each Node distribution keeps its bundled npm
+somewhere different; the forward-slash spelling of both works in PowerShell and `cmd` as
+well, since Windows accepts forward slashes in a path.
+
+`windows/arm64`, `linux/arm64`, and `darwin/*` are **not** declared platforms. No native
+runner assembles or verifies them, so there is no evidence for them and no archive to
+install. macOS has fake-bridge development smoke in this repository; that is connector
+evidence, not a production claim.
 
 ## Installing
 
@@ -77,9 +99,11 @@ does not populate it. Provisioning is a deliberate, separate step.
    the manifest, verifies the outer executable's digest, and starts
    `bin/lip-backend-cursorsdk` - it never runs anything from `private/`.
 4. Put the plugin root somewhere only its owner can write. On Windows, restrict the
-   directory ACL; on Linux and macOS, `chmod 700`. Verification reports the requirement
-   rather than guessing when it cannot measure it, and a root any local user can write
-   lets that user replace a checksummed companion after you verified it.
+   directory ACL; on Linux, `chmod 700`. Verification reports the requirement rather than
+   guessing when it cannot measure it, and a root any local user can write lets that user
+   replace a checksummed companion after you verified it.
+5. Provision the SDK (next section). The plugin is inert until you do: a configured
+   instance fails with the provisioning command rather than serving anything.
 
 ## Provisioning the Cursor SDK
 
@@ -93,20 +117,22 @@ cd <plugin-root>/private/bridge
 ```
 
 The exact command is recorded in three places, so you never have to reconstruct it: the
-`sdk_provision_command` field of `compatibility.json`, the
+`cursor_sdk_provisioning_command` field of `compatibility.json`, the
 `sdk provisioning command:` line of `scripts/verify-package`, and the launcher itself,
 which prints it whenever the SDK is missing. It reads, per platform:
 
 | Platform | Command (run from `<plugin-root>/private/bridge`) |
 | --- | --- |
-| Windows | `..\node\node.exe ..\node\node_modules\npm\bin\npm-cli.js ci --omit=dev` |
+| Windows | `../node/node.exe ../node/node_modules/npm/bin/npm-cli.js ci --omit=dev` |
 | Linux | `../node/node ../node/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev` |
 
-The slash spelling is the POSIX one: it works in every POSIX shell, and on Windows in
-PowerShell and `cmd` too, since Windows accepts forward slashes in a path. The backslash
-spelling is Windows-only — a POSIX shell reads `\` as an escape character, so
-`..\node\node.exe` is not a path there. Either way the paths are relative to the directory
-you just changed into, so nothing outside the plugin root is involved.
+The slash spelling is the one the record and the launcher print: it works in every POSIX
+shell, and on Windows in PowerShell and `cmd` too, since Windows accepts forward slashes in
+a path. A backslash spelling (`..\node\node.exe ..\node\node_modules\npm\bin\npm-cli.js ci
+--omit=dev`) works on Windows too and is Windows-only — a POSIX shell reads `\` as an
+escape character, so `..\node\node.exe` is not a path there. Either way the paths are
+relative to the directory you just changed into, so nothing outside the plugin root is
+involved.
 
 Notes that matter:
 
@@ -144,7 +170,42 @@ Two tree states are checked, and both are enforced rather than advisory:
 
 The report states the trust split explicitly: `checksums.sha256` covers the shipped files
 only, so the plugin authenticates what it ships and you authenticate what you
-provisioned.
+provisioned. It also prints the record's own evidence rather than a summary of it: the
+source identity of the build (either the Go build VCS stamp the toolchain wrote inside the
+outer executable, or the revision the packager resolved from the tree it built in, with the
+record naming which), whether that build came from a tree with uncommitted changes - or
+`unknown` when nothing established it - the exact published Go-LIP module versions the
+archive was built against, the declared platforms and the ones this archive is not evidence
+for, the host certification posture with its reason, and the fact that the record itself
+says the package has not been verified (`package_verification_state: not-performed`, with
+the two runs that have to be performed). Nothing in the report claims a verification that
+did not happen: `compatibility.json` is written while the archive is assembled, before
+verification can run, so the finished report is the evidence and the record is not.
+
+That report is also where the platform claims are checked. Each archive narrows its
+manifest to the one platform it was assembled on, and a tree whose manifest claims any
+other platform is a finding.
+
+### What was actually tested, and where
+
+The per-platform behaviour described above is not a claim to be taken on trust:
+
+- `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable` assembles a real archive on
+  the runner it runs on, provisions the SDK from the registry exactly as you do, and
+  verifies the installed tree end to end. It is the evidence behind the
+  [supported platforms](#supported-platforms) table, and it runs in CI as the `package`
+  matrix in [`.github/workflows/verify.yml`](../.github/workflows/verify.yml) on
+  `windows-latest` and `ubuntu-latest`.
+- You can run the same evidence yourself with `LIP_PACKAGE_GATE=1 GOWORK=off go test -run
+  TestPackageArchive .`, or by hand with `scripts/package-plugin` followed by
+  `scripts/verify-package`.
+
+Not covered by that gate, so not claimed anywhere in these instructions: a real
+`@cursor/sdk` import from an installed archive (it needs live provider credentials; see
+`scripts/test-cursor-sdk-live.{sh,ps1}`), `cursorsandbox` execution, code signing, and any
+platform other than the two above. The packaging decision and its evidence, including the
+alternatives that were reasoned about rather than measured, are in
+[`docs/packaging.md`](packaging.md).
 
 ## When something is missing
 
@@ -209,3 +270,9 @@ decides the version you end up with, and verification tells you which one you ha
   `private_runtime_source` says whether the shipped runtime came from an official Node
   distribution, a supplied executable, or the build machine's `PATH`, and an archive
   staged from `PATH` says so in its own notices.
+- **The host is not certified.** `compatibility.json` records
+  `host_certification_state: uncertified` with the reason, and no host artifact digest:
+  no downloadable Go-LIP host binary release exists to certify this plugin against, so
+  none is invented. Nothing in this guide should be read as a statement about which host
+  version the plugin was validated on - see
+  [`docs/packaging.md`](packaging.md#host-certification).

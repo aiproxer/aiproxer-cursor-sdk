@@ -54,6 +54,22 @@
 
 .PARAMETER Platform
     os/arch to assemble. Must be the host platform.
+
+.PARAMETER TestedHost
+    Release evidence, not a build input: the sha256 of a host binary artifact this
+    archive is certified against. The renderer refuses to record it unless
+    release.yaml declares host_certification: certified, and validates the digest.
+    With no downloadable host release there is nothing to certify against, so no
+    default is invented and an archive assembled today carries no host artifact
+    digest.
+
+.DESCRIPTION
+    The source revision the release record carries is resolved from this
+    repository's own version control when git is available, and the renderer
+    cross-checks it against the stamp the Go toolchain puts inside the outer
+    executable. There is no parameter for it: the packager resolves it from the
+    tree it builds in, and an archive built outside version control simply records
+    no revision.
 #>
 [CmdletBinding()]
 param(
@@ -61,7 +77,8 @@ param(
     [string]$OutDir = '',
     [string]$NodeDist = '',
     [string]$NodeRuntime = '',
-    [string]$Platform = ''
+    [string]$Platform = '',
+    [string[]]$TestedHost = @()
 )
 
 Set-StrictMode -Version Latest
@@ -73,6 +90,39 @@ $ErrorActionPreference = 'Stop'
 # a layout report, or a rendered manifest produced inside a workspace is not this
 # repository's.
 $env:GOWORK = 'off'
+
+# Get-ResolveSourceArgs resolves the source state of the tree this build runs in, for
+# the release record.
+#
+# The Go toolchain stamps the revision into the executable only for a build in a primary
+# version-control checkout, and this project builds in linked work trees, so the stamp is
+# usually absent. Resolving it here is what puts a real revision in the record instead of
+# an absence; the renderer cross-checks it against the stamp whenever there is one, and
+# records the resolved value with the evidence that says where it came from when there is
+# not.
+#
+# The cleanliness is tri-state for the same reason the record's is: git status that
+# cannot be read is not a clean tree, so a failing status contributes 'unknown' rather
+# than an empty answer that would read as clean. A checkout with no git contributes
+# nothing at all, and the record then names no revision and no cleanliness.
+function Get-ResolveSourceArgs([string]$Repo) {
+    $git = Get-Command 'git' -ErrorAction SilentlyContinue
+    if (-not $git) { return @() }
+    $inside = & git -C $Repo rev-parse --git-dir 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $inside) { return @() }
+    $revision = (& git -C $Repo rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $revision) { return @() }
+    $sourceArgs = @('-source-revision', $revision.Trim())
+    $status = & git -C $Repo status --porcelain 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $sourceArgs += @('-source-modified', 'unknown')
+    } elseif ($status) {
+        $sourceArgs += @('-source-modified', 'true')
+    } else {
+        $sourceArgs += @('-source-modified', 'false')
+    }
+    return $sourceArgs
+}
 
 # Fail aborts packaging with a diagnosable message.
 function Fail([string]$Message) {
@@ -776,12 +826,24 @@ try {
     #    a tree carrying the Cursor SDK dependency closure, so a packager that staged one
     #    fails here rather than publishing a bundle it must not ship.
     $exeDigest = Read-FileSHA256 $outerExe
-    Invoke-Tool -Command 'go' -Arguments @(
+    $renderArgs = @(
         'run', './cmd/lip-cursor-sdk-packaging', 'render',
         '-repo', $RepoRoot, '-staging', $staging, '-platform', $layout.platform,
         '-exe-sha256', $exeDigest,
         '-node-source-kind', $runtimeSource.Kind, '-node-source', $runtimeSource.Label
-    ) -WorkingDirectory $RepoRoot | Out-Null
+    )
+    # One -tested-host per host artifact. The renderer validates each digest and
+    # refuses to record any of them unless release.yaml declares the release
+    # certified against them, so there is no path here that invents host evidence.
+    foreach ($digest in @($TestedHost)) {
+        if (-not $digest) { continue }
+        $renderArgs += @('-tested-host', $digest)
+    }
+    # The source state of the tree this build ran in. The renderer prefers the stamp
+    # inside the outer executable, uses this when there is none, and fails if the two
+    # disagree.
+    $renderArgs += @(Get-ResolveSourceArgs $RepoRoot)
+    Invoke-Tool -Command 'go' -Arguments $renderArgs -WorkingDirectory $RepoRoot | Out-Null
 
     Write-ThirdPartyNotices -Path (Join-Path $licensesDir 'THIRD-PARTY-NOTICES.md') `
         -LockFile (Join-Path $staging ($layout.bridge_package_lock -replace '/', $sep)) `

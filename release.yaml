@@ -10,7 +10,27 @@ build_id: localdev
 tag: cursorsdk-v0.1.0
 profiles:
   - full
+# The published Go-LIP modules this plugin is pinned to. Their exact versions are read
+# from go.mod at packaging time, because that is the manifest `go build` resolved: a
+# version written here could drift from the build without anything noticing, and the
+# record inside every archive would name a contract the bytes were never built from.
 published_root_module: github.com/matdev83/go-llm-interactive-proxy
+published_acp_module: github.com/matdev83/go-llm-interactive-proxy/connector-support/acp
 replace_policy: released-dependency-pins-no-replace
 private_companions:
   - bridge-node
+
+# Host certification posture. No host artifact has been certified against, so the
+# posture is `uncertified` with the reason recorded here, and compatibility.json
+# carries no host artifact digest. This is a declared decision rather than an absent
+# key: an archive has to say which of the two it is. Certifying a release flips this to
+# `certified`, empties host_certification_reason, and passes one -tested-host <sha256>
+# per host artifact to scripts/package-plugin, which validates each digest. Neither a
+# digest nor a certification is ever invented: there is no downloadable Go-LIP host
+# binary release to certify against, and host publication and release tags are deferred
+# pending separate maintainer authorization.
+host_certification: uncertified
+host_certification_reason: >-
+  no downloadable Go-LIP host binary release exists to certify this plugin against: host
+  publication and release tags are deferred pending separate maintainer authorization, so
+  no host artifact hash is recorded and none is invented
