@@ -55,6 +55,10 @@ Desktop.ini
 .claude/
 .cursor/
 .opencode/
+# CodeGraph index: a local per-machine database, never part of the source. Its own
+# .gitignore covers the data files, but the directory would still show up as untracked
+# noise in every worktree, and an index is not evidence of anything.
+.codegraph/
 
 # Local env/config overrides
 .env

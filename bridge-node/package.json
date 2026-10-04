@@ -2,7 +2,7 @@
   "name": "lip-cursor-sdk-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "Project-owned Cursor SDK NDJSON bridge for Go-LIP cursorsdk backend",
+  "description": "Plugin-owned Cursor SDK NDJSON bridge for the aiproxer-cursor-sdk cursorsdk backend plugin",
   "type": "module",
   "engines": {
     "node": ">=22.13"
