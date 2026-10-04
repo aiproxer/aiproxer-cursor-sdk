@@ -38,6 +38,15 @@
     verification that needed a global Node would prove the opposite of what it
     claims.
 
+    Every one of those executions is bounded. The staged runtime and the staged launcher
+    are executables this project ships but cannot vouch for at verification time, so one
+    that never answers has to end the run with a finding naming it rather than leave the
+    gate reporting nothing at all. The bound lives in
+    cmd/lip-cursor-sdk-packaging, not here: how long a shipped executable is given to
+    answer is part of the verdict, and an input to the verdict is not an input to a
+    script. Giving up on the launcher takes the runtime it owns with it, so a bounded wait
+    never trades a hang for a leak.
+
     The checksums cover the shipped plugin-private files, but nothing here claims the
     host authenticates them: the host's manifest digest stays the authority for the
     outer executable only.
@@ -107,13 +116,39 @@ function Read-FileSHA256([string]$Path) {
     }
 }
 
+# Join-TreePath builds a path under the install root from a name the tree supplied -
+# a checksum record entry, or a name read back off disk.
+#
+# It is deliberately not Join-Path. Join-Path is a provider cmdlet, and a provider path
+# on POSIX normalises a backslash into a separator, so a shipped file whose name contains
+# one - a backslash is an ordinary character in a POSIX file name - is rewritten into a
+# path through a directory that does not exist. The record then disagrees with the tree in
+# both directions at once: the real file reads as unlisted, and the listed one as missing.
+# [System.IO.Path]::Combine joins in the platform's own API and leaves every byte of the
+# name alone, which is the same reason the separator rewrite in Get-RelativeFiles is
+# restricted to Windows.
+function Join-TreePath([string]$Root, [string]$Rel) {
+    return [System.IO.Path]::Combine($Root, $Rel)
+}
+
 # Get-RelativeFiles returns every file under a root as a slash-separated relative
 # path. The result is wrapped in an array at the call site because PowerShell
 # unrolls a returned collection, and an empty install tree must not become $null.
+#
+# The separator is rewritten only where it is a separator. A backslash is an ordinary
+# character in a POSIX file name, and the record spells every path with forward
+# slashes - so rewriting one on POSIX turns a shipped file called "f\g" into a path
+# through a directory called "f", which is a different file that the tree does not have.
+# The reported name then disagrees with the record in both directions at once: the real
+# file reads as unlisted, and the listed one as missing. GetRelativePath already uses the
+# platform separator, so there is nothing to rewrite anywhere but Windows.
 function Get-RelativeFiles([string]$Root) {
     $files = [System.Collections.Generic.List[string]]::new()
+    $rewriteSeparator = [System.IO.Path]::DirectorySeparatorChar -eq '\'
     foreach ($full in [System.IO.Directory]::EnumerateFiles($Root, '*', [System.IO.SearchOption]::AllDirectories)) {
-        $files.Add(([System.IO.Path]::GetRelativePath($Root, $full)).Replace('\', '/'))
+        $rel = [System.IO.Path]::GetRelativePath($Root, $full)
+        if ($rewriteSeparator) { $rel = $rel.Replace('\', '/') }
+        $files.Add($rel)
     }
     return $files.ToArray()
 }
@@ -126,19 +161,75 @@ function Get-ReleaseScalar([string]$ReleaseFile, [string]$Key) {
     return ''
 }
 
-# Invoke-Probe runs one packaged executable by absolute path and captures its
-# output and exit status. It is used for the private runtime and the launcher; a
-# probe that cannot run is a finding, never a skip.
-function Invoke-Probe([string]$FilePath, [string[]]$Arguments) {
+# Invoke-Probe runs one packaged executable by absolute path under a bound the packaging
+# tool owns, and captures what it said and what it did. It is used for the private runtime and
+# the launcher; a probe that cannot run is a finding, never a skip.
+#
+# Subject names what is being probed. It is used only when the executable left its output open,
+# because that is a statement about something the verifier cannot clean up and has to name.
+#
+# The bound is neither an argument here nor an option of this script. How long a staged
+# executable is given to answer is part of the verdict, so the tool holds the bound and reports
+# the one it applied, and a finding quotes that number rather than one written down here that
+# could drift away from the bound that was enforced.
+function Invoke-Probe([string]$Subject, [string]$FilePath, [string[]]$Arguments) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $lines = & $FilePath @Arguments 2>&1 | ForEach-Object { $_.ToString() }
-        $code = $LASTEXITCODE
+        # The probed command's own output is the probe's stdout and the probe's report is its
+        # stderr, so the two are captured apart: merging them would fold the report into an
+        # answer this script is about to print into a verdict line.
+        $statusPath = Join-Path $script:ToolDir 'probe-status'
+        $output = (& $script:PackagingTool probe $FilePath @Arguments 2> $statusPath) -join "`n"
+        $status = [string](Get-Content -LiteralPath $statusPath -Raw)
     } finally {
         $ErrorActionPreference = $previous
     }
-    return [pscustomobject]@{ ExitCode = $code; Output = ($lines -join "`n") }
+
+    # An executable that settled but left its output open left a process behind holding the
+    # stream this run was reading. Terminating the tree is what released it where the tree could
+    # be reached; a descendant that left the tree cannot be reached from here at all, so what
+    # happened is reported rather than described as a cleanup.
+    $drained = (Get-ProbeField $status 'drained') -eq 'true'
+    if (-not $drained) {
+        Add-Finding "$Subject left its output open when the probe gave up on it after $(Get-ProbeField $status 'deadline') (probe cleanup incomplete); a descendant that leaves the staged executable's process tree cannot be terminated here, so its remaining output was abandoned"
+    }
+
+    return [pscustomobject]@{
+        Output   = $output
+        ExitCode = Get-ProbeField $status 'exit'
+        TimedOut = (Get-ProbeField $status 'timed_out') -eq 'true'
+        Drained  = $drained
+        Deadline = Get-ProbeField $status 'deadline'
+    }
+}
+
+# Get-ProbeField reads one field of the probe status line, which is a fixed set of
+# key=value tokens. The statuses stay strings so a line that carries none of them reads as
+# the absence of an answer rather than as a successful one.
+function Get-ProbeField([string]$Status, [string]$Name) {
+    foreach ($token in ($Status -split '\s+')) {
+        if (-not $token) { continue }
+        $parts = $token -split '=', 2
+        if ($parts.Count -eq 2 -and $parts[0] -eq $Name) { return $parts[1] }
+    }
+    return ''
+}
+
+# New-ToolDir creates the directory this run's private copy of the packaging tool is built
+# into. It is a fresh directory per run on purpose: the tool is compiled from the repository
+# being verified, so a copy left behind by an earlier run could answer for a different tree.
+function New-ToolDir {
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) ('lip-cursor-sdk-packaging-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    return $dir
+}
+
+# Remove-ToolDir discards this run's private copy of the packaging tool.
+function Remove-ToolDir {
+    if ($script:ToolDir -and (Test-Path -LiteralPath $script:ToolDir)) {
+        Remove-Item -LiteralPath $script:ToolDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # Get-JsonField reads one field of a JSON object without failing when it is absent.
@@ -196,7 +287,10 @@ function Get-PinnedSDKVersion([string]$Path, [string]$PackageName) {
 function Test-SamePath([string]$Left, [string]$Right) {
     $a = $Left -replace '^\\\\\?\\', ''
     $b = $Right -replace '^\\\\\?\\', ''
-    if (-not $b) { return $false }
+    # A side that was never reported is not the current directory. A bounded probe of a
+    # runtime that never answers reports nothing at all, and resolving that against the
+    # process's working directory would answer for wherever this script happens to run.
+    if (-not $a -or -not $b) { return $false }
     return [string]::Equals([System.IO.Path]::GetFullPath($a), [System.IO.Path]::GetFullPath($b), [System.StringComparison]::OrdinalIgnoreCase)
 }
 
@@ -217,6 +311,27 @@ $PackageRoot = (Resolve-Path -LiteralPath $PackageRoot).Path
 $envParts = ((& go env GOOS GOARCH) -join ' ').Trim() -split '\s+'
 $hostPlatform = "$($envParts[0])/$($envParts[1])"
 
+# The packaging tool answers the layout report and owns every probe bound, so it is built
+# once here and used directly. `go run` would compile it again for each question, and a
+# probe this script drove itself would be a probe whose bound the script could also choose.
+$script:ToolDir = New-ToolDir
+$packagingTool = Join-Path $script:ToolDir 'lip-cursor-sdk-packaging'
+if ($envParts[0] -eq 'windows') { $packagingTool += '.exe' }
+& go -C $RepoRoot build -o $packagingTool ./cmd/lip-cursor-sdk-packaging
+if ($LASTEXITCODE -ne 0) {
+    Remove-ToolDir
+    throw "verify-package: go build ./cmd/lip-cursor-sdk-packaging exited $LASTEXITCODE"
+}
+$script:PackagingTool = $packagingTool
+
+# Everything from here to the end of this script runs with the tool in place, and the tool is
+# this run's private copy of it. The finally is what discards that copy on every path out
+# that unwinds - a missing prerequisite, a malformed record, an unexpected failure - because a
+# verifier that leaves a compiled executable in the temporary directory has made that
+# directory part of what a later run can find. The two explicit Remove-ToolDir calls at the
+# bottom cover what finally does not: PowerShell does not run a finally block for exit.
+try {
+
 # The fixed metadata file names do not vary by platform, so the host layout report
 # locates them; the archive's own platform claim decides which report applies.
 #
@@ -227,7 +342,7 @@ $hostPlatform = "$($envParts[0])/$($envParts[1])"
 # and launcher probes, so a directory carrying its own cmd/lip-cursor-sdk-packaging
 # would make a tampered tree verify clean. -C is the switch the shell verifier's
 # `cd "$repo_root"` corresponds to.
-$hostLayout = (& go -C $RepoRoot run ./cmd/lip-cursor-sdk-packaging layout -platform $hostPlatform) | ConvertFrom-Json
+$hostLayout = (& $packagingTool layout -platform $hostPlatform) | ConvertFrom-Json
 
 $recordPath = Join-Path $PackageRoot $hostLayout.compatibility
 $script:Record = $null
@@ -275,7 +390,7 @@ if (-not $ownership.Checkable) {
 #    that names the packaged location and the operator remedy.
 $present = [System.Collections.Generic.List[string]]::new()
 foreach ($rel in $layout.required_entries) {
-    $full = Join-Path $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $full = Join-TreePath $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
     if (Test-Path -LiteralPath $full) {
         $present.Add([string]$rel)
         continue
@@ -325,6 +440,20 @@ if (-not (Test-Path -LiteralPath $checksumsPath)) {
 }
 
 $onDisk = @(Get-RelativeFiles $PackageRoot)
+# Two different lookups answer two different questions here, and only one of them was linear.
+#
+# The record's own loop asks, per listed path, whether the tree still has it, and -contains
+# scanned the whole $onDisk array every time: that is the quadratic one, and a set answers it
+# once per path. Its comparer is the case-insensitive one -contains already used, because on a
+# case-insensitive filesystem a difference in case is not a different path and reporting one
+# would be a false alarm rather than a broken install.
+#
+# The other side - the file's own digest against the record - already went through $listed,
+# which is an ordered dictionary and so a keyed lookup rather than a scan. Nothing about it is
+# quadratic, and this set does not change that.
+$onDiskSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($onDiskRel in $onDisk) { [void]$onDiskSet.Add($onDiskRel) }
+
 $mismatched = 0
 $provisionedCount = 0
 foreach ($rel in $onDisk) {
@@ -343,7 +472,7 @@ foreach ($rel in $onDisk) {
         Add-Finding "file is present but not listed in $($layout.checksums): $rel; the archive does not account for this file"
         continue
     }
-    $actual = Read-FileSHA256 (Join-Path $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar))
+    $actual = Read-FileSHA256 (Join-TreePath $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar))
     if ($actual -ne $listed[$rel]) {
         $mismatched++
         Add-Finding "checksum mismatch for ${rel}: recorded $($listed[$rel]), found $actual; reinstall the Cursor plugin package"
@@ -351,7 +480,7 @@ foreach ($rel in $onDisk) {
 }
 foreach ($rel in $checksumOrder) {
     if ($rel.StartsWith($provisionedPrefix, [System.StringComparison]::Ordinal)) { continue }
-    if ($onDisk -notcontains $rel) {
+    if (-not $onDiskSet.Contains($rel)) {
         Add-Finding "file listed in $($layout.checksums) is missing: ${rel}; reinstall the Cursor plugin package"
     }
 }
@@ -374,7 +503,7 @@ Add-Line "host digest authority: $($layout.manifest) sha256 covers $($layout.out
 $manifestPath = Join-Path $PackageRoot $layout.manifest
 if (Test-Path -LiteralPath $manifestPath) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $outerExe = Join-Path $PackageRoot ($layout.outer_executable -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $outerExe = Join-TreePath $PackageRoot ($layout.outer_executable -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
     $release = Join-Path $RepoRoot 'release.yaml'
 
     $exeRel = [string](Get-JsonField $manifest 'executable')
@@ -556,8 +685,8 @@ if ($shippedTree) {
 }
 
 if ($script:Record) {
-    $privateRuntime = Join-Path $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
-    $launcher = Join-Path $PackageRoot ($layout.launcher -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $privateRuntime = Join-TreePath $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $launcher = Join-TreePath $PackageRoot ($layout.launcher -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
 
     # The same applies to the runtime digest: it is recorded from the staged executable,
     # so it is compared against that executable rather than reported as provenance.
@@ -572,35 +701,61 @@ if ($script:Record) {
     }
 
     if ((Test-Path -LiteralPath $privateRuntime) -and (Test-Path -LiteralPath $launcher)) {
-        $selfProbe = Invoke-Probe $privateRuntime @('-p', 'process.execPath')
+        $selfProbe = Invoke-Probe 'the staged private runtime' $privateRuntime @('-p', 'process.execPath')
         $resolved = if (Test-SamePath $selfProbe.Output.Trim() $privateRuntime) { 'yes' } else { 'no' }
         Add-Line "private runtime: $privateRuntime"
         Add-Line "private runtime resolves to itself: $resolved"
-        if ($resolved -ne 'yes') {
+        if ($selfProbe.TimedOut) {
+            # A runtime that never answers has not resolved to itself; saying so would
+            # report the symptom, while the bound it broke is what an operator acts on.
+            Add-Finding "the staged private runtime did not answer its own path within $($selfProbe.Deadline) (probe timed out); a runtime that never answers is not a working private runtime"
+        } elseif ($resolved -ne 'yes') {
             Add-Finding "the staged private runtime resolved to '$($selfProbe.Output.Trim())' instead of $privateRuntime"
         }
-        $versionProbe = Invoke-Probe $privateRuntime @('--version')
-        if ($versionProbe.ExitCode -ne 0) {
+        $versionProbe = Invoke-Probe 'the staged private runtime' $privateRuntime @('--version')
+        if ($versionProbe.TimedOut) {
+            Add-Finding "the staged private runtime did not answer --version within $($versionProbe.Deadline) (probe timed out); a runtime that never answers is not a working private runtime"
+        } elseif ($versionProbe.ExitCode -ne '0') {
             Add-Finding "the staged private runtime did not run: $($versionProbe.Output)"
         }
         Add-Line "private runtime version: $($versionProbe.Output.Trim()) (recorded $(Get-JsonField $record 'private_runtime_version'))"
-        $versions = Invoke-Probe $privateRuntime @('-p', 'JSON.stringify(process.versions)')
-        if ($versions.ExitCode -eq 0) {
-            $bundled = ($versions.Output | ConvertFrom-Json).PSObject.Properties |
+        $versions = Invoke-Probe 'the staged private runtime' $privateRuntime @('-p', 'JSON.stringify(process.versions)')
+        if ($versions.TimedOut) {
+            Add-Finding "the staged private runtime did not report its bundled components within $($versions.Deadline) (probe timed out)"
+        }
+        # A staged executable is not vouched for, so its answer to the component probe is read
+        # as data and not as something that can be assumed to parse. A runtime that answered
+        # with anything but a component list is a finding, not a verifier that stops with a
+        # parser error and reports nothing at all.
+        #
+        # "A component list" means what the probe asked for: a JSON object, from a command
+        # that answered successfully. Any other JSON value parses just as cleanly and is just
+        # as useless as a component report, and the other verifier says so too - the rule is
+        # stated once, in the same words, on both sides.
+        $components = $null
+        if ($versions.ExitCode -eq '0' -and ([string]$versions.Output).Trim()) {
+            try { $components = $versions.Output | ConvertFrom-Json } catch { $components = $null }
+        }
+        if ($components -is [pscustomobject]) {
+            $bundled = $components.PSObject.Properties |
                 Where-Object { $_.Name -in @('node', 'icu', 'openssl', 'uv', 'zlib') } |
                 Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }
             Add-Line "private runtime bundled components: $($bundled -join ' ')"
+        } elseif (-not $versions.TimedOut) {
+            Add-Finding "the staged private runtime answered the bundled-components probe with $($versions.Output) rather than a component list; an executable that cannot report what it carries is not a working private runtime"
         }
 
-        # The launcher starts the packaged runtime and runs the bridge's own doctor,
-        # which resolves the installed SDK. That is an installed-tree question: on a
-        # shipped archive the bridge cannot serve a request until the operator provisions
-        # it, and the SDK requirement above is the finding that says so.
+        # The launcher starts the packaged runtime and runs the bridge's own doctor, which
+        # resolves the installed SDK. That is an installed-tree question: on a shipped
+        # archive the bridge cannot serve a request until the operator provisions it,
+        # and the SDK requirement above is the finding that says so.
         if ($shippedTree) {
             Add-Line "bridge doctor: not run; a shipped archive cannot serve a request until the operator provisions $($layout.bridge_modules)"
         } else {
-            $doctor = Invoke-Probe $launcher @('doctor')
-            if ($doctor.ExitCode -ne 0) {
+            $doctor = Invoke-Probe 'the private bridge launcher' $launcher @('doctor')
+            if ($doctor.TimedOut) {
+                Add-Finding "the private bridge launcher did not pass doctor through the private runtime within $($doctor.Deadline) (probe timed out); a launcher that never answers has no runtime behind it"
+            } elseif ($doctor.ExitCode -ne '0') {
                 Add-Finding "the private bridge launcher did not pass doctor through the private runtime: $($doctor.Output)"
             }
             Add-Line "bridge doctor (launcher -> private runtime -> bridge entry): $($doctor.Output.Trim())"
@@ -633,6 +788,10 @@ $lines = $script:Report -join "`n"
 if ($ReportPath) {
     Set-Content -LiteralPath $ReportPath -Value $lines -Encoding utf8NoBOM
 }
+} finally {
+    Remove-ToolDir
+}
+
 Write-Output $lines
 foreach ($finding in $script:Findings) { Write-Output $finding }
 if ($script:Findings.Count -gt 0) {
