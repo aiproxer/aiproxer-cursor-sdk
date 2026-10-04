@@ -322,6 +322,12 @@ func TestProbe_ReportsAChildItCannotStart(t *testing.T) {
 		"a child that never started did not time out:\n%s", status.String())
 	require.Equal(t, strconv.Itoa(probeNotFoundExit), probeStatusField(t, status.String(), "exit"),
 		"a child that never started has no successful status:\n%s", status.String())
+	// Nothing ran, so nothing was ever handed the stream and there is no descendant to
+	// have outlived it. Reporting the stream as undrained here would be a claim about a
+	// process that does not exist, and it is the claim a caller reads to decide whether
+	// something was left behind.
+	require.Equal(t, "true", probeStatusField(t, status.String(), "drained"),
+		"a child that never started cannot have left its output open:\n%s", status.String())
 	require.Contains(t, status.String(), "cannot start",
 		"the report has to say the child could not be started:\n%s", status.String())
 	require.Empty(t, output.String(), "a child that never started produced no output")

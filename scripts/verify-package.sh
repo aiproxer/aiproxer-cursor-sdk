@@ -345,8 +345,20 @@ fi
 
 # dir_mode prints the POSIX permission bits of a directory, or nothing when this
 # platform does not expose them.
+#
+# It renders them the way the PowerShell verifier does, which is what makes the two
+# reports the same document: four digits, the leading zero included, and the permission
+# bits alone. `stat -c '%a'` is not that on its own - it prints three digits for an
+# ordinary directory ("777") and folds the special bits in when they are set ("1777") -
+# and a report that says "mode 777" where the other says "mode 0777" is a difference
+# neither of the two verifiers decided anything about. The special bits are dropped on
+# purpose, because the other side has no way to see them: .NET's UnixFileMode carries the
+# nine permission bits and nothing else.
 dir_mode() {
-  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || printf ''
+  local raw
+  raw="$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || printf '')"
+  [ -n "$raw" ] || return 0
+  printf '0%03o' "$(( 0$raw & 0777 ))"
 }
 
 # path_key reduces a reported path to the form a comparison can use: forward
@@ -785,12 +797,28 @@ if [ -n "$record_json" ]; then
     if [ "$probe_timed_out" = true ]; then
       finding "the staged private runtime did not report its bundled components within $probe_deadline (probe timed out)"
     fi
-    summary=""
-    for name in node icu openssl uv zlib; do
-      value="$(printf '%s' "$components" | sed "s/.*\"$name\": *\"\([^\"]*\)\".*/\1/")"
-      [ -n "$value" ] && [ "$value" != "$components" ] && summary="$summary $name=$value"
-    done
-    line "private runtime bundled components:${summary# }"
+    # The answer is read as data, because a staged executable is not vouched for. An
+    # answer that is not a component list is a finding, not a summary of nothing - and it
+    # is the same finding the other verifier raises for the same answer, so a hostile
+    # runtime cannot be reported by one and passed by the other. The rule is stated once
+    # here: a component list is what the probe asked for, a JSON object, from a command
+    # that answered successfully.
+    component_list=false
+    if [ "$probe_exit" = 0 ]; then
+      case "$components" in
+        '{'*'}') component_list=true ;;
+      esac
+    fi
+    if [ "$component_list" = true ]; then
+      summary=""
+      for name in node icu openssl uv zlib; do
+        value="$(printf '%s' "$components" | sed "s/.*\"$name\": *\"\([^\"]*\)\".*/\1/")"
+        [ -n "$value" ] && [ "$value" != "$components" ] && summary="$summary $name=$value"
+      done
+      line "private runtime bundled components:${summary# }"
+    elif [ "$probe_timed_out" != true ]; then
+      finding "the staged private runtime answered the bundled-components probe with $components rather than a component list; an executable that cannot report what it carries is not a working private runtime"
+    fi
 
     # The launcher starts the packaged runtime and runs the bridge's own doctor, which
     # resolves the installed SDK. That is an installed-tree question: on a shipped

@@ -85,7 +85,7 @@ func probeCommand(deadline time.Duration, argv []string, stdout, status io.Write
 
 	pipe, err := newProbePipe()
 	if err != nil {
-		writeProbeStatus(status, probeNotFoundExit, false, false, deadline)
+		writeProbeStatus(status, probeNotFoundExit, false, true, deadline)
 		fmt.Fprintf(status, "%scannot open a pipe for %s: %v\n", probeStatusPrefix, argv[0], err)
 		return nil
 	}
@@ -100,9 +100,12 @@ func probeCommand(deadline time.Duration, argv []string, stdout, status io.Write
 	if err := cmd.Start(); err != nil {
 		// A staged executable that cannot be created is a prerequisite failure the
 		// operator has to read, so it is reported rather than treated as this tool's
-		// own failure.
+		// own failure. The stream counts as drained because nothing was ever handed it:
+		// no command ran, so there is no descendant that could have outlived one, and
+		// reporting an undrained stream here would be a statement about a process that
+		// does not exist.
 		pipe.release()
-		writeProbeStatus(status, probeNotFoundExit, false, false, deadline)
+		writeProbeStatus(status, probeNotFoundExit, false, true, deadline)
 		fmt.Fprintf(status, "%scannot start %s: %v\n", probeStatusPrefix, argv[0], err)
 		return nil
 	}

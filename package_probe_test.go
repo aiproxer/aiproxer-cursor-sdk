@@ -174,6 +174,36 @@ func TestPackageArchive_ProbeResultsAreReportedAsTheyHappen(t *testing.T) {
 	}
 }
 
+// TestPackageArchive_BothVerifiersReportTheSameFindingForAnUnusableComponentAnswer keeps the
+// component probe's answer a trust check on both platforms.
+//
+// The private runtime is a staged executable nobody vouched for, so what it answers with is
+// data rather than something to assume parses. One implementation parsing it defensively while
+// the other printed whatever it could pull out of it is not a cosmetic difference: it is a
+// hostile runtime that one verifier reports and the other passes, which is the drift the
+// cross-implementation comparison exists to catch. The staged answer here is one that carries
+// no component list at all, and both implementations have to say so in the same words.
+func TestPackageArchive_BothVerifiersReportTheSameFindingForAnUnusableComponentAnswer(t *testing.T) {
+	t.Parallel()
+
+	perImplementation := make(map[string][]string)
+	for _, impl := range verifierImplementations(t) {
+		root := probeTree(t, packagelayoutArchive(t))
+
+		report, code := runVerifierBounded(t, impl, repoRoot(t), root,
+			probeStagedEnvironment(t, "components:fail:2", "", ""), nil, probeTestRunBound)
+
+		require.NotEqual(t, 0, code,
+			"the %s verifier passed a runtime that answered with no component list:\n%s", impl, report)
+		require.Contains(t, report, "rather than a component list",
+			"the %s verifier has to report an answer that is not a component list:\n%s", impl, report)
+		require.NotContains(t, report, "verify-package: ok")
+
+		perImplementation[impl] = normalizedFindings(report, root)
+	}
+	requireCrossImplementationAgreement(t, perImplementation)
+}
+
 // TestPackageArchive_AProbeThatLeftOutputOpenIsReportedRatherThanWaitedFor keeps the bound
 // meaningful for a staged executable that answers and then leaves something behind.
 //

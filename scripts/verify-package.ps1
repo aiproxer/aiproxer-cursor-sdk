@@ -116,13 +116,39 @@ function Read-FileSHA256([string]$Path) {
     }
 }
 
+# Join-TreePath builds a path under the install root from a name the tree supplied -
+# a checksum record entry, or a name read back off disk.
+#
+# It is deliberately not Join-Path. Join-Path is a provider cmdlet, and a provider path
+# on POSIX normalises a backslash into a separator, so a shipped file whose name contains
+# one - a backslash is an ordinary character in a POSIX file name - is rewritten into a
+# path through a directory that does not exist. The record then disagrees with the tree in
+# both directions at once: the real file reads as unlisted, and the listed one as missing.
+# [System.IO.Path]::Combine joins in the platform's own API and leaves every byte of the
+# name alone, which is the same reason the separator rewrite in Get-RelativeFiles is
+# restricted to Windows.
+function Join-TreePath([string]$Root, [string]$Rel) {
+    return [System.IO.Path]::Combine($Root, $Rel)
+}
+
 # Get-RelativeFiles returns every file under a root as a slash-separated relative
 # path. The result is wrapped in an array at the call site because PowerShell
 # unrolls a returned collection, and an empty install tree must not become $null.
+#
+# The separator is rewritten only where it is a separator. A backslash is an ordinary
+# character in a POSIX file name, and the record spells every path with forward
+# slashes - so rewriting one on POSIX turns a shipped file called "f\g" into a path
+# through a directory called "f", which is a different file that the tree does not have.
+# The reported name then disagrees with the record in both directions at once: the real
+# file reads as unlisted, and the listed one as missing. GetRelativePath already uses the
+# platform separator, so there is nothing to rewrite anywhere but Windows.
 function Get-RelativeFiles([string]$Root) {
     $files = [System.Collections.Generic.List[string]]::new()
+    $rewriteSeparator = [System.IO.Path]::DirectorySeparatorChar -eq '\'
     foreach ($full in [System.IO.Directory]::EnumerateFiles($Root, '*', [System.IO.SearchOption]::AllDirectories)) {
-        $files.Add(([System.IO.Path]::GetRelativePath($Root, $full)).Replace('\', '/'))
+        $rel = [System.IO.Path]::GetRelativePath($Root, $full)
+        if ($rewriteSeparator) { $rel = $rel.Replace('\', '/') }
+        $files.Add($rel)
     }
     return $files.ToArray()
 }
@@ -364,7 +390,7 @@ if (-not $ownership.Checkable) {
 #    that names the packaged location and the operator remedy.
 $present = [System.Collections.Generic.List[string]]::new()
 foreach ($rel in $layout.required_entries) {
-    $full = Join-Path $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $full = Join-TreePath $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
     if (Test-Path -LiteralPath $full) {
         $present.Add([string]$rel)
         continue
@@ -446,7 +472,7 @@ foreach ($rel in $onDisk) {
         Add-Finding "file is present but not listed in $($layout.checksums): $rel; the archive does not account for this file"
         continue
     }
-    $actual = Read-FileSHA256 (Join-Path $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar))
+    $actual = Read-FileSHA256 (Join-TreePath $PackageRoot ($rel -replace '/', [string][System.IO.Path]::DirectorySeparatorChar))
     if ($actual -ne $listed[$rel]) {
         $mismatched++
         Add-Finding "checksum mismatch for ${rel}: recorded $($listed[$rel]), found $actual; reinstall the Cursor plugin package"
@@ -477,7 +503,7 @@ Add-Line "host digest authority: $($layout.manifest) sha256 covers $($layout.out
 $manifestPath = Join-Path $PackageRoot $layout.manifest
 if (Test-Path -LiteralPath $manifestPath) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $outerExe = Join-Path $PackageRoot ($layout.outer_executable -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $outerExe = Join-TreePath $PackageRoot ($layout.outer_executable -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
     $release = Join-Path $RepoRoot 'release.yaml'
 
     $exeRel = [string](Get-JsonField $manifest 'executable')
@@ -659,8 +685,8 @@ if ($shippedTree) {
 }
 
 if ($script:Record) {
-    $privateRuntime = Join-Path $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
-    $launcher = Join-Path $PackageRoot ($layout.launcher -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $privateRuntime = Join-TreePath $PackageRoot ($layout.private_runtime -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $launcher = Join-TreePath $PackageRoot ($layout.launcher -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
 
     # The same applies to the runtime digest: it is recorded from the staged executable,
     # so it is compared against that executable rather than reported as provenance.
@@ -701,11 +727,16 @@ if ($script:Record) {
         # as data and not as something that can be assumed to parse. A runtime that answered
         # with anything but a component list is a finding, not a verifier that stops with a
         # parser error and reports nothing at all.
+        #
+        # "A component list" means what the probe asked for: a JSON object, from a command
+        # that answered successfully. Any other JSON value parses just as cleanly and is just
+        # as useless as a component report, and the other verifier says so too - the rule is
+        # stated once, in the same words, on both sides.
         $components = $null
         if ($versions.ExitCode -eq '0' -and ([string]$versions.Output).Trim()) {
             try { $components = $versions.Output | ConvertFrom-Json } catch { $components = $null }
         }
-        if ($null -ne $components) {
+        if ($components -is [pscustomobject]) {
             $bundled = $components.PSObject.Properties |
                 Where-Object { $_.Name -in @('node', 'icu', 'openssl', 'uv', 'zlib') } |
                 Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }
