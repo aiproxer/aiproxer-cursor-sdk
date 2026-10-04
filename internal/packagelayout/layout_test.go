@@ -25,13 +25,13 @@ func TestArchive_MatchesDesignLayoutBlock(t *testing.T) {
 		exe      string
 	}{
 		{os: "windows", arch: "amd64", exe: ".exe"},
-		{os: "windows", arch: "arm64", exe: ".exe"},
 		{os: "linux", arch: "amd64", exe: ""},
-		{os: "linux", arch: "arm64", exe: ""},
 	} {
 		t.Run(tc.os+"/"+tc.arch, func(t *testing.T) {
 			t.Parallel()
 
+			require.Contains(t, packagelayout.SupportedPlatforms(), tc.os+"/"+tc.arch,
+				"this case asserts the layout of a platform the pipeline has to assemble natively")
 			a, err := packagelayout.ForPlatform(tc.os, tc.arch)
 			require.NoError(t, err)
 			require.Equal(t, tc.exe, a.ExeSuffix())
@@ -308,11 +308,19 @@ func TestArchive_RequiredEntries_AreInstallRootRelativeCleanSlashPaths(t *testin
 // TestForPlatform_RejectsUnvalidatedPlatforms keeps an unvalidated platform out
 // of the packaging contract instead of letting a script invent a cross-compiled
 // archive for it.
+//
+// windows/arm64 and linux/arm64 are in this list on purpose. They were declared
+// before the packaging pipeline could assemble them, which made the template claim
+// support that no native run had ever produced. They are named explicitly so that
+// re-adding an architecture has to be a decision someone removes this line for,
+// rather than a platform that quietly becomes declarable again.
 func TestForPlatform_RejectsUnvalidatedPlatforms(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct{ os, arch, want string }{
 		{os: "darwin", arch: "arm64", want: "darwin/arm64"},
+		{os: "windows", arch: "arm64", want: "windows/arm64"},
+		{os: "linux", arch: "arm64", want: "linux/arm64"},
 		{os: "linux", arch: "386", want: "linux/386"},
 		{os: "windows", arch: "riscv64", want: "windows/riscv64"},
 	} {

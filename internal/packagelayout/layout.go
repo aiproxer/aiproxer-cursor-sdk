@@ -126,11 +126,20 @@ var entryRelPath = PrivatePrefix + bridgeDirName + "/" + BridgeEntrySourceRel()
 // directory itself.
 func BridgeEntrySourceRel() string { return binDirName + "/" + BridgeEntryName }
 
-// supportedPlatforms is the set of platforms the manifest template declares.
-// A platform is only packageable because it is declared here; the packaging
-// scripts additionally refuse to build for anything but the host platform, so a
-// declared platform still needs native validation before its claim is truthful.
-var supportedPlatforms = []string{"windows/amd64", "windows/arm64", "linux/amd64", "linux/arm64"}
+// supportedPlatforms is the set of platforms the packaging pipeline can natively
+// assemble and the manifest template may declare.
+//
+// Those are the same set on purpose. A platform becomes one only by being assembled
+// and run on its own native runner by the `package` lane in
+// .github/workflows/verify.yml: cross-compilation is not native validation, so an
+// architecture with no runner cannot be assembled, cannot be verified, and therefore
+// cannot be claimed. Listing an unassembled platform here would let the renderer
+// resolve an archive layout for it and hand it to a hand-built staged tree, which is
+// exactly how an unvalidated platform gets claimed by accident. Declaring a new
+// platform means adding its native matrix leg and this entry in the same change, and
+// the root test tying this set to the template and to the CI matrix holds the three
+// together.
+var supportedPlatforms = []string{"windows/amd64", "linux/amd64"}
 
 // ExeSuffixFor is the executable suffix of goos.
 func ExeSuffixFor(goos string) string {
@@ -151,14 +160,16 @@ func ForPlatform(goos, goarch string) (Archive, error) {
 	platform := goos + "/" + goarch
 	if !slices.Contains(supportedPlatforms, platform) {
 		return Archive{}, fmt.Errorf(
-			"packagelayout: platform %q is not a declared plugin platform (declared: %s); "+
-				"declare it in the manifest template and validate it natively before packaging",
+			"packagelayout: platform %q is not a natively assembled plugin platform (assembled: %s); "+
+				"assemble it on its own native runner, validate the archive there, and declare it in the "+
+				"manifest template and this contract in the same change",
 			platform, strings.Join(supportedPlatforms, ", "))
 	}
 	return Archive{goos: goos, goarch: goarch}, nil
 }
 
-// SupportedPlatforms lists the declared plugin platforms.
+// SupportedPlatforms lists the plugin platforms the packaging pipeline can natively
+// assemble, and therefore the ones the manifest template may declare.
 func SupportedPlatforms() []string {
 	return slices.Clone(supportedPlatforms)
 }
