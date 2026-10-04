@@ -33,10 +33,22 @@
 # platform and claiming it would be an unvalidated claim, so --platform refuses
 # anything but the host platform.
 #
+# --tested-host is release evidence, not a build input: it names a host binary
+# artifact this archive is certified against, and the renderer refuses to record it
+# unless release.yaml declares host_certification: certified. With no downloadable
+# host release there is nothing to certify against, so no default is invented here
+# and an archive assembled today carries no host artifact digest.
+#
+# The source revision the record carries is resolved from this repository's own version
+# control when git is available, and the renderer cross-checks it against the stamp the
+# Go toolchain puts inside the outer executable. There is no flag for it: the packager
+# resolves it from the tree it builds in, and an archive built outside version control
+# simply records no revision.
+#
 # Usage:
 #   scripts/package-plugin.sh [--repo-root DIR] [--out-dir DIR]
 #                             [--node-dist ZIP|DIR] [--node-runtime EXE]
-#                             [--platform os/arch]
+#                             [--platform os/arch] [--tested-host SHA256]
 set -euo pipefail
 
 # usage prints the leading comment block of this script, so the help text cannot drift
@@ -50,6 +62,8 @@ out_dir=""
 node_dist=""
 node_runtime=""
 platform=""
+tested_hosts=()
+source_args=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -58,6 +72,7 @@ while [ "$#" -gt 0 ]; do
     --node-dist) node_dist="${2:-}"; shift 2 ;;
     --node-runtime) node_runtime="${2:-}"; shift 2 ;;
     --platform) platform="${2:-}"; shift 2 ;;
+    --tested-host) tested_hosts+=("${2:-}"); shift 2 ;;
     -h|--help) usage "$0"; exit 0 ;;
     *) printf 'package-plugin: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -116,6 +131,42 @@ sha256_of() {
 # set; anything richer belongs to the metadata renderer.
 release_scalar() {
   sed -n "s/^$1:[[:space:]]*//p" "$repo_root/release.yaml" | head -n 1
+}
+
+# source_args resolves the source state of the tree this build runs in, for the release
+# record.
+#
+# The Go toolchain stamps the revision into the executable only for a build in a primary
+# version-control checkout, and this project builds in linked work trees, so the stamp is
+# usually absent. Resolving it here is what puts a real revision in the record instead of
+# an absence; the renderer cross-checks it against the stamp whenever there is one, and
+# records the resolved value with the evidence that says where it came from when there is
+# not.
+#
+# The cleanliness is tri-state for the same reason the record's is. `git status` that
+# cannot be read is not a clean tree, so a failing status contributes "unknown" rather
+# than an empty answer, which would read as clean. A checkout with no git at all
+# contributes nothing, and the record then names no revision and no cleanliness rather
+# than a fabricated or a defaulted one.
+resolve_source_args() {
+  source_args=()
+  command -v git >/dev/null 2>&1 || return 0
+  git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local revision status
+  if ! revision="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)"; then
+    return 0
+  fi
+  [ -n "$revision" ] || return 0
+  source_args+=(-source-revision "$revision")
+  if ! status="$(git -C "$repo_root" status --porcelain 2>/dev/null)"; then
+    source_args+=(-source-modified unknown)
+    return 0
+  fi
+  if [ -n "$status" ]; then
+    source_args+=(-source-modified true)
+  else
+    source_args+=(-source-modified false)
+  fi
 }
 
 # layout_report reads one field of the archive layout contract. The contract comes from
@@ -651,9 +702,15 @@ cp -R "$npm_source" "$staging/$private_npm_root"
 #    carrying the Cursor SDK dependency closure, so a packager that staged one fails here
 #    rather than publishing a bundle it must not ship.
 exe_digest="$(sha256_of "$outer_exe")"
+tested_host_args=()
+for digest in ${tested_hosts+"${tested_hosts[@]}"}; do
+  tested_host_args+=(-tested-host "$digest")
+done
+resolve_source_args
 (cd "$repo_root" && GOWORK=off go run ./cmd/lip-cursor-sdk-packaging render \
   -repo "$repo_root" -staging "$staging" -platform "$layout_platform" \
-  -exe-sha256 "$exe_digest" -node-source-kind "$runtime_kind" -node-source "$runtime_label" >/dev/null)
+  -exe-sha256 "$exe_digest" -node-source-kind "$runtime_kind" -node-source "$runtime_label" \
+  ${tested_host_args+"${tested_host_args[@]}"} ${source_args+"${source_args[@]}"} >/dev/null)
 
 write_third_party_notices "$staging/$licenses_dir/THIRD-PARTY-NOTICES.md" \
   "$staging/$bridge_package_lock" "$staging/$bridge_package_json" "$private_runtime_path" \

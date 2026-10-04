@@ -93,16 +93,19 @@ release_scalar() {
   sed -n "s/^$1:[[:space:]]*//p" "$repo_root/release.yaml" | head -n 1
 }
 
-# json_string reads one string field of a JSON object.
+# json_string reads one string field of a JSON object. A field the record does not carry
+# reads as empty: `sed -n ... p` prints the capture only when the pattern matched, so an
+# absent field cannot answer with the whole document. That matters twice over here - a
+# report line would otherwise print the entire record, and a comparison would compare the
+# record against itself.
 json_string() {
-  printf '%s' "$2" | tr -d '\n' | sed "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/"
+  printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p"
 }
 
-# json_digest reads one recorded sha256 field. json_string returns the whole document
-# when the field is absent, so a raw read of a digest nobody recorded would compare the
-# record against itself; anything that is not a digest reads as not recorded, which is
-# what the PowerShell verifier's field lookup decides too. A digest that is not recorded
-# is not cross-checked, and the checksum record still covers the record itself.
+# json_digest reads one recorded sha256 field. Anything that is not a digest - including
+# no field at all - reads as not recorded, which is what the PowerShell verifier's field
+# lookup decides too. A digest that is not recorded is not cross-checked, and the checksum
+# record still covers the record itself.
 json_digest() {
   case "$(json_string "$1" "$2")" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
@@ -111,11 +114,46 @@ json_digest() {
   json_string "$1" "$2"
 }
 
-# json_scalar reads one scalar field, quoted or not. Booleans and numbers are not
-# quoted, and reading them with the string reader would return the whole document.
+# json_scalar reads a scalar field, quoted or not. Booleans and numbers are not quoted,
+# so they need their own reader, and like json_string this one prints only what it
+# matched: an absent field is an absent field.
 json_scalar() {
-  printf '%s' "$2" | tr -d '\n' | sed "s/.*\"$1\": *\([^,}]*\).*/\1/" | tr -d ' "' | tr -d '\r'
+  printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\([^,}]*\).*/\1/p" | tr -d ' "' | tr -d '\r'
 }
+
+# json_list prints one element of a JSON array field per line, unquoted. An absent or
+# empty array prints nothing, so a caller can tell "no element recorded" from "no such
+# field" by whether anything came out. The array's own brackets are removed first, so an
+# element is an element rather than a bracket hanging off the last one.
+#
+# The trailing `|| true` is load bearing: grep reports "nothing selected" as a failure,
+# and this script runs under set -e with pipefail, so an empty array - which is exactly
+# what an uncertified release records for tested_host_artifacts - would otherwise end the
+# run before the report was printed. The callers read the output, not the status.
+json_list() {
+  printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\(\[[^]]*\]\).*/\1/p" | sed 's/^\[//; s/\]$//' |
+    tr ',' '\n' | sed 's/^ *//; s/ *$//; s/^"//; s/"$//; s/\r$//' | grep -v '^$' || true
+}
+
+# add_list_lines reports each element of a JSON array field, prefixed, or one report
+# line when the array holds nothing. It reads the elements through a here-document
+# rather than a pipe so that it appends to this run's report instead of a subshell's.
+add_list_lines() {
+  local field="$1" record="$2" prefix="$3" fallback="$4" element
+  local elements
+  elements="$(json_list "$field" "$record")"
+  if [ -z "$elements" ]; then
+    line "$fallback"
+    return
+  fi
+  while IFS= read -r element; do
+    [ -n "$element" ] || continue
+    line "$prefix$element"
+  done <<EOF
+$elements
+EOF
+}
+
 
 # sha256_of digests one file.
 sha256_of() {
@@ -462,8 +500,72 @@ if [ -n "$record_json" ]; then
   esac
   line "node engine required: $(json_string bridge_node_engine "$record_json")"
   line "private runtime source: $(json_string private_runtime_source "$record_json")"
-  tested_host="$(json_string tested_host_artifact_sha256 "$record_json")"
-  line "tested host artifact sha256: ${tested_host:-(not certified in this archive)}"
+
+  # Source identity, host contract pins, platform evidence, and the certification
+  # posture are printed as the record states them, including when they are absent. An
+  # auditor has to be able to read an archive's evidence off this report instead of
+  # inferring it from a build log, and an absent fact has to read as absent rather than
+  # as a line this script chose not to print.
+  source_revision="$(json_string source_revision "$record_json")"
+  line "source revision: ${source_revision:-not established; this record names no source revision}"
+  line "source stamp evidence: $(json_string source_stamp_evidence "$record_json")"
+  # The recorded cleanliness is tri-state and the three answers stay three answers: a
+  # dirty tree, a clean tree, and a state nothing established. An absent field is the
+  # third one, and reporting it as "no" would turn a missing measurement into a clean
+  # build claim in the one place an operator would read it as one.
+  case "$(json_scalar source_modified "$record_json")" in
+    true) line 'source modified: yes (built from a work tree with uncommitted changes)' ;;
+    false) line 'source modified: no (the build tree had no uncommitted changes)' ;;
+    *) line 'source modified: unknown (not established: no source identity in this record, or the build tree state could not be read)' ;;
+  esac
+  line "host contracts pinned: $(json_string published_root_module "$record_json") $(json_string host_contract_root_version "$record_json"), $(json_string published_acp_module "$record_json") $(json_string host_contract_acp_version "$record_json")"
+  add_list_lines declared_platforms "$record_json" 'declared platform: ' \
+    'declared platforms: none recorded'
+  add_list_lines declared_platforms_not_assembled "$record_json" \
+    'declared platform this archive is not evidence for: ' \
+    'declared platforms this archive is not evidence for: none; this archive is the only declared platform'
+
+  # The certification posture is printed with the reason an uncertified record carries,
+  # and the artifacts a certified one names. An uncertified record with no reason is a
+  # finding rather than a printed blank, and a certified record that names no artifact
+  # is one too: either state with nothing behind it is a claim the record cannot support.
+  certification_state="$(json_string host_certification_state "$record_json")"
+  certification_reason="$(json_string host_certification_reason "$record_json")"
+  case "$certification_state" in
+    certified)
+      line 'host certification: certified against the host artifacts listed below'
+      if [ -z "$(json_list tested_host_artifacts "$record_json")" ]; then
+        finding 'release metadata declares host_certification certified but records no tested_host_artifacts; a certification with no artifact behind it is a claim, not evidence'
+      fi
+      ;;
+    uncertified)
+      line 'host certification: uncertified (no host artifact was certified against)'
+      if [ -z "$certification_reason" ]; then
+        finding 'release metadata declares host_certification uncertified with no host_certification_reason; an uncertified record has to say why'
+      fi
+      ;;
+    '')
+      finding 'release metadata records no host_certification_state; an archive has to declare whether it was certified against a host artifact'
+      ;;
+    *)
+      finding "release metadata declares host certification '$certification_state'; the postures are certified and uncertified"
+      ;;
+  esac
+  if [ -n "$certification_reason" ]; then
+    line "host certification reason: $certification_reason"
+  fi
+  add_list_lines tested_host_artifacts "$record_json" 'tested host artifact sha256: ' \
+    'tested host artifacts: none recorded'
+
+  # What the record says about verification of this package. The packager writes the
+  # record before verification can run, so the recorded state is not-performed and the
+  # runs that have to be performed are named instead. This report is the evidence those
+  # runs produce; a passing run never rewrites the record to claim it passed.
+  verification_performed='no'
+  [ "$(json_scalar package_verification_performed "$record_json")" = 'true' ] && verification_performed='yes'
+  line "package verification recorded in this archive: $(json_string package_verification_state "$record_json") (performed: $verification_performed)"
+  line "package verification shipped-tree run: $(json_string package_verification_shipped_command "$record_json")"
+  line "package verification installed-tree run: $(json_string package_verification_installed_command "$record_json")"
 fi
 
 line "sdk provisioning command: $sdk_provision_command"

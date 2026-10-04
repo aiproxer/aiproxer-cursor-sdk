@@ -148,6 +148,29 @@ function Get-JsonField($Record, [string]$Name) {
     return $property.Value
 }
 
+# Get-RecordList reads one array field of the release record as strings, so a list the
+# packager recorded can be reported one element at a time instead of as raw JSON. An
+# absent or empty array reads as no elements, which is how a caller tells "nothing
+# recorded" from "no such field".
+function Get-RecordList($Record, [string]$Name) {
+    $value = Get-JsonField $Record $Name
+    if (-not $value) { return @() }
+    return @($value | ForEach-Object { [string]$_ })
+}
+
+# Add-RecordList reports each element of a record's array field, prefixed, or one report
+# line when the field holds nothing.
+function Add-RecordList($Record, [string]$Name, [string]$Prefix, [string]$Fallback) {
+    $elements = @(Get-RecordList $Record $Name)
+    if ($elements.Count -eq 0) {
+        Add-Line $Fallback
+        return
+    }
+    foreach ($element in $elements) {
+        Add-Line "$Prefix$element"
+    }
+}
+
 # Get-PackageVersion reads the version one package manifest declares. It reads the file
 # rather than importing the package: the fact is the metadata, and importing the SDK is
 # the thing the provisioning check exists to avoid.
@@ -446,7 +469,79 @@ if ($script:Record) {
     }
     Add-Line "node engine required: $(Get-JsonField $record 'bridge_node_engine')"
     Add-Line "private runtime source: $(Get-JsonField $record 'private_runtime_source')"
-    Add-Line "tested host artifact sha256: $(if (Get-JsonField $record 'tested_host_artifact_sha256') { Get-JsonField $record 'tested_host_artifact_sha256' } else { '(not certified in this archive)' })"
+
+    # Source identity, host contract pins, platform evidence, and the certification
+    # posture are printed as the record states them, including when they are absent. An
+    # auditor has to be able to read an archive's evidence off this report instead of
+    # inferring it from a build log, and an absent fact has to read as absent rather than
+    # as a line this script chose not to print. These are the same statements the shell
+    # verifier prints, in the same wording, so a reader of either report reads the same
+    # verdict.
+    $sourceRevision = [string](Get-JsonField $record 'source_revision')
+    Add-Line "source revision: $(if ($sourceRevision) { $sourceRevision } else { 'not established; this record names no source revision' })"
+    Add-Line "source stamp evidence: $(Get-JsonField $record 'source_stamp_evidence')"
+    # The recorded cleanliness is tri-state and the three answers stay three answers: a
+    # dirty tree, a clean tree, and a state nothing established. An absent field is the
+    # third one, and reporting it as "no" would turn a missing measurement into a clean
+    # build claim in the one place an operator would read it as one.
+    $sourceModifiedProperty = $record.PSObject.Properties['source_modified']
+    if ($sourceModifiedProperty -and $sourceModifiedProperty.Value -eq $true) {
+        Add-Line 'source modified: yes (built from a work tree with uncommitted changes)'
+    } elseif ($sourceModifiedProperty -and $sourceModifiedProperty.Value -eq $false) {
+        Add-Line 'source modified: no (the build tree had no uncommitted changes)'
+    } else {
+        Add-Line 'source modified: unknown (not established: no source identity in this record, or the build tree state could not be read)'
+    }
+    Add-Line "host contracts pinned: $(Get-JsonField $record 'published_root_module') $(Get-JsonField $record 'host_contract_root_version'), $(Get-JsonField $record 'published_acp_module') $(Get-JsonField $record 'host_contract_acp_version')"
+    Add-RecordList $record 'declared_platforms' 'declared platform: ' 'declared platforms: none recorded'
+    Add-RecordList $record 'declared_platforms_not_assembled' 'declared platform this archive is not evidence for: ' 'declared platforms this archive is not evidence for: none; this archive is the only declared platform'
+
+    # The certification posture is printed with the reason an uncertified record carries,
+    # and the artifacts a certified one names. An uncertified record with no reason is a
+    # finding rather than a printed blank, and a certified record that names no artifact
+    # is one too: either state with nothing behind it is a claim the record cannot support.
+    $certification = [string](Get-JsonField $record 'host_certification_state')
+    $certificationReason = [string](Get-JsonField $record 'host_certification_reason')
+    $artifacts = @(Get-RecordList $record 'tested_host_artifacts')
+    switch ($certification) {
+        'certified' {
+            Add-Line 'host certification: certified against the host artifacts listed below'
+            if ($artifacts.Count -eq 0) {
+                Add-Finding 'release metadata declares host_certification certified but records no tested_host_artifacts; a certification with no artifact behind it is a claim, not evidence'
+            }
+        }
+        'uncertified' {
+            Add-Line 'host certification: uncertified (no host artifact was certified against)'
+            if (-not $certificationReason) {
+                Add-Finding 'release metadata declares host_certification uncertified with no host_certification_reason; an uncertified record has to say why'
+            }
+        }
+        '' {
+            Add-Finding 'release metadata records no host_certification_state; an archive has to declare whether it was certified against a host artifact'
+        }
+        default {
+            Add-Finding "release metadata declares host certification '$certification'; the postures are certified and uncertified"
+        }
+    }
+    if ($certificationReason) {
+        Add-Line "host certification reason: $certificationReason"
+    }
+    if ($artifacts.Count -eq 0) {
+        Add-Line 'tested host artifacts: none recorded'
+    } else {
+        foreach ($artifact in $artifacts) {
+            Add-Line "tested host artifact sha256: $artifact"
+        }
+    }
+
+    # What the record says about verification of this package. The packager writes the
+    # record before verification can run, so the recorded state is not-performed and the
+    # runs that have to be performed are named instead. This report is the evidence those
+    # runs produce; a passing run never rewrites the record to claim it passed.
+    $performed = if ([bool](Get-JsonField $record 'package_verification_performed')) { 'yes' } else { 'no' }
+    Add-Line "package verification recorded in this archive: $(Get-JsonField $record 'package_verification_state') (performed: $performed)"
+    Add-Line "package verification shipped-tree run: $(Get-JsonField $record 'package_verification_shipped_command')"
+    Add-Line "package verification installed-tree run: $(Get-JsonField $record 'package_verification_installed_command')"
 }
 
 Add-Line "sdk provisioning command: $($layout.sdk_provision_command)"

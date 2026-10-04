@@ -23,7 +23,7 @@ import (
 // compatibilitySchema versions the plugin release metadata record. It is plugin
 // release metadata, not a host manifest field: the host manifest stays closed and
 // learns nothing about packaging.
-const compatibilitySchema = "golip.cursorsdk.compatibility/v1"
+const compatibilitySchema = "golip.cursorsdk.compatibility/v2"
 
 // packagingVariant names the private-runtime archive shape: the plugin ships its
 // own Node runtime, so no system-wide Node installation is required.
@@ -53,8 +53,41 @@ type releaseMeta struct {
 	Tag                 string `yaml:"tag"`
 	Profiles            []string
 	PublishedRootModule string   `yaml:"published_root_module"`
+	PublishedACPModule  string   `yaml:"published_acp_module"`
 	ReplacePolicy       string   `yaml:"replace_policy"`
 	PrivateCompanions   []string `yaml:"private_companions"`
+	// HostCertification declares whether this release has been certified against a
+	// host binary artifact. It is declared rather than inferred, because an absent
+	// value would read as an unremarked absence of evidence instead of as a decision.
+	HostCertification string `yaml:"host_certification"`
+	// HostCertificationReason is what an uncertified record carries in place of a
+	// host artifact digest. A certified release has none: it has the digests.
+	HostCertificationReason string `yaml:"host_certification_reason"`
+}
+
+// renderInputs are the caller-supplied build inputs of one render. Everything else the
+// record says is derived from the repository and the staged tree.
+type renderInputs struct {
+	// Repo is the plugin repository root holding release.yaml, go.mod, and the
+	// manifest template.
+	Repo string
+	// Staging is the staged plugin install root being described.
+	Staging string
+	// ExeSHA256 is the digest of the staged outer executable.
+	ExeSHA256 string
+	// NodeSourceKind and NodeSource say where the staged private runtime came from.
+	NodeSourceKind string
+	NodeSource     string
+	// SourceRevision and SourceModified are the source state the packager resolved from
+	// the tree it built in. They are a cross-check on, and a fallback for, the stamp
+	// inside the staged executable; see resolveSource.
+	SourceRevision string
+	// SourceModified is the caller's claim about that tree: "true", "false", or
+	// "unknown". Anything else, including an empty value, leaves the recorded
+	// cleanliness unestablished rather than clean.
+	SourceModified string
+	// TestedHosts are the host artifact digests supplied as certification evidence.
+	TestedHosts []string
 }
 
 // compatibility is the flat plugin release metadata written into the archive.
@@ -66,19 +99,43 @@ type compatibility struct {
 	// ReleaseTagDeclared is the tag release.yaml declares for a future publication.
 	// No such tag exists: the field is named for the declaration so that nothing in an
 	// archive can be read as a claim that a release was published.
-	ReleaseTagDeclared      string `json:"release_tag_declared"`
-	Module                  string `json:"module"`
-	PublishedRootModule     string `json:"published_root_module"`
-	Platform                string `json:"platform"`
-	NativePlatformAssembled string `json:"native_platform_assembled"`
-	PackagingVariant        string `json:"packaging_variant"`
-	ExternalNodeRequired    bool   `json:"external_node_required"`
-	ProtocolMajor           uint32 `json:"protocol_major"`
-	ProtocolMinMinor        uint32 `json:"protocol_min_minor"`
-	ProtocolMaxMinor        uint32 `json:"protocol_max_minor"`
-	OuterExecutable         string `json:"outer_executable"`
-	OuterExecutableSHA256   string `json:"outer_executable_sha256"`
-	Manifest                string `json:"manifest"`
+	ReleaseTagDeclared  string `json:"release_tag_declared"`
+	Module              string `json:"module"`
+	PublishedRootModule string `json:"published_root_module"`
+	// PublishedACPModule and the two versions below name the exact published host
+	// contracts this archive was built against. They are read from the plugin's own
+	// module manifest, which is what `go build` resolved, so the record cannot name a
+	// contract version the bytes in the archive were not compiled from.
+	PublishedACPModule      string `json:"published_acp_module"`
+	HostContractRootVersion string `json:"host_contract_root_version"`
+	HostContractACPVersion  string `json:"host_contract_acp_version"`
+	// SourceRevision is the revision the archive's bytes were built from. It comes from
+	// the Go build stamp inside the staged outer executable where the toolchain wrote
+	// one, and from the tree the packager built in where it did not; SourceEvidence says
+	// which of the two it is, and an archive with neither names no revision rather than
+	// papering over the absence with a placeholder.
+	SourceRevision string `json:"source_revision"`
+	// SourceModified is absent from the record when nothing established the state of the
+	// tree the build ran in. That absence is the honest answer: a recorded false would
+	// be a claim that an unestablished build was a clean one, which is the one claim
+	// nobody downstream would think to check.
+	SourceModified *bool  `json:"source_modified,omitempty"`
+	SourceEvidence string `json:"source_stamp_evidence"`
+	Platform       string `json:"platform"`
+	// NativePlatformAssembled is the platform this archive was assembled and can be
+	// verified on; DeclaredPlatforms and DeclaredPlatformsNotAssembled say which
+	// claims the project makes and which of them this single artifact is evidence for.
+	NativePlatformAssembled       string   `json:"native_platform_assembled"`
+	DeclaredPlatforms             []string `json:"declared_platforms"`
+	DeclaredPlatformsNotAssembled []string `json:"declared_platforms_not_assembled"`
+	PackagingVariant              string   `json:"packaging_variant"`
+	ExternalNodeRequired          bool     `json:"external_node_required"`
+	ProtocolMajor                 uint32   `json:"protocol_major"`
+	ProtocolMinMinor              uint32   `json:"protocol_min_minor"`
+	ProtocolMaxMinor              uint32   `json:"protocol_max_minor"`
+	OuterExecutable               string   `json:"outer_executable"`
+	OuterExecutableSHA256         string   `json:"outer_executable_sha256"`
+	Manifest                      string   `json:"manifest"`
 	// ManifestSHA256 ties the record to the exact manifest bytes the archive
 	// carries, so the checksum file and this record describe the same artifact.
 	ManifestSHA256 string `json:"manifest_sha256"`
@@ -104,16 +161,24 @@ type compatibility struct {
 	PrivateRuntimeVersion   string `json:"private_runtime_version"`
 	PrivateRuntimeSource    string `json:"private_runtime_source"`
 	PrivateRuntimeSHA256    string `json:"private_runtime_sha256"`
-	// TestedHostArtifactSHA256 stays empty until a release is certified against a
-	// versioned host artifact. An unverified claim is recorded as absent rather than
-	// invented.
-	TestedHostArtifactSHA256 string `json:"tested_host_artifact_sha256"`
-	// PackageVerification records how the archive was verified. The verification
-	// report itself is produced by scripts/verify-package and attached to release
-	// evidence; the archive only names the check that has to pass.
-	PackageVerification string `json:"package_verification"`
-	LicensingStatus     string `json:"licensing_status"`
-	GeneratedBy         string `json:"generated_by"`
+	// HostCertificationState is the declared host certification posture, and
+	// HostCertificationReason is what an uncertified record carries in its place of
+	// evidence. TestedHostArtifacts holds only host artifact digests a release
+	// operator actually supplied, so an uncertified archive carries none and no
+	// archive can name a host it was never certified against.
+	HostCertificationState  string   `json:"host_certification_state"`
+	HostCertificationReason string   `json:"host_certification_reason"`
+	TestedHostArtifacts     []string `json:"tested_host_artifacts"`
+	// The package verification fields state what has and has not been verified about
+	// this archive. The packager writes them before verification can run, so they
+	// record no outcome and name the runs that have to be performed instead.
+	PackageVerificationState            string `json:"package_verification_state"`
+	PackageVerificationPerformed        bool   `json:"package_verification_performed"`
+	PackageVerificationReason           string `json:"package_verification_reason"`
+	PackageVerificationShippedCommand   string `json:"package_verification_shipped_command"`
+	PackageVerificationInstalledCommand string `json:"package_verification_installed_command"`
+	LicensingStatus                     string `json:"licensing_status"`
+	GeneratedBy                         string `json:"generated_by"`
 }
 
 // runRender writes the host manifest and the compatibility metadata for a staged
@@ -122,7 +187,7 @@ type compatibility struct {
 // and describe a different one.
 func runRender(args []string) error {
 	fs := newFlagSet("render")
-	repo := fs.String("repo", ".", "plugin repository root holding release.yaml and the manifest template")
+	repo := fs.String("repo", ".", "plugin repository root holding release.yaml, go.mod, and the manifest template")
 	staging := fs.String("staging", "", "staged plugin install root to describe")
 	platform := fs.String("platform", "", "os/arch of the staged archive (defaults to the host platform)")
 	exeSHA := fs.String("exe-sha256", "", "sha256 of the outer executable, lowercase hex")
@@ -130,6 +195,16 @@ func runRender(args []string) error {
 	nodeSourceKind := fs.String("node-source-kind", "",
 		"where the private Node runtime came from: "+
 			strings.Join(slices.Sorted(maps.Keys(runtimeSourcePrefixes)), ", "))
+	testedHosts := &digestList{}
+	fs.Var(testedHosts, "tested-host",
+		"sha256 of a host artifact this archive is certified against; repeatable, and only with "+
+			"host_certification: certified in release.yaml")
+	sourceRevision := fs.String("source-revision", "",
+		"version-control revision the build tree was at, for when the toolchain stamped none into the "+
+			"executable; cross-checked against the stamp when there is one")
+	sourceModified := fs.String("source-modified", "",
+		"whether the build tree had uncommitted changes: true, false, or unknown; cross-checked against "+
+			"the stamp when there is one, and left out of the record when unknown")
 	if err := fs.Parse(args); err != nil {
 		return reportError("render", err)
 	}
@@ -141,7 +216,17 @@ func runRender(args []string) error {
 	if err != nil {
 		return reportError("render", err)
 	}
-	return reportError("render", renderStaged(*repo, *staging, *exeSHA, *nodeSourceKind, *nodeSource, archive))
+	inputs := renderInputs{
+		Repo:           *repo,
+		Staging:        *staging,
+		ExeSHA256:      *exeSHA,
+		NodeSourceKind: *nodeSourceKind,
+		NodeSource:     *nodeSource,
+		SourceRevision: *sourceRevision,
+		SourceModified: *sourceModified,
+		TestedHosts:    *testedHosts,
+	}
+	return reportError("render", renderStaged(inputs, archive))
 }
 
 // hostOr returns the requested platform or the host platform when none was given.
@@ -158,22 +243,26 @@ func hostOr(platform string) (goos, goarch string) {
 func hostPlatform() (goos, goarch string) { return runtime.GOOS, runtime.GOARCH }
 
 // renderStaged writes both metadata files into the staged install root.
-func renderStaged(repo, staging, exeSHA, nodeSourceKind, nodeSource string, archive packagelayout.Archive) error {
-	meta, err := loadRelease(filepath.Join(repo, "release.yaml"))
+func renderStaged(in renderInputs, archive packagelayout.Archive) error {
+	meta, err := loadRelease(filepath.Join(in.Repo, "release.yaml"))
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(meta.ManifestTemplate) == "" {
 		return errors.New("release.yaml has no manifest_template")
 	}
-	templatePath := filepath.Join(repo, filepath.FromSlash(meta.ManifestTemplate))
+	templatePath := filepath.Join(in.Repo, filepath.FromSlash(meta.ManifestTemplate))
 	if meta.BuildID == "" {
 		return errors.New("release.yaml has no build_id")
 	}
 	if meta.Version == "" {
 		return errors.New("release.yaml has no version")
 	}
-	digest, err := checkSHA256(exeSHA)
+	digest, err := checkSHA256(in.ExeSHA256)
+	if err != nil {
+		return err
+	}
+	pins, err := hostContractPins(in.Repo, meta)
 	if err != nil {
 		return err
 	}
@@ -182,20 +271,20 @@ func renderStaged(repo, staging, exeSHA, nodeSourceKind, nodeSource string, arch
 	if err != nil {
 		return fmt.Errorf("manifest template %s: %w", templatePath, err)
 	}
-	manifest, err := renderManifest(manifestBody, meta, archive, digest)
+	manifest, declared, err := renderManifest(manifestBody, meta, archive, digest)
 	if err != nil {
 		return fmt.Errorf("manifest template %s: %w", templatePath, err)
 	}
-	comp, err := renderCompatibility(staging, meta, archive, digest, nodeSourceKind, nodeSource, manifest)
+	comp, err := renderCompatibility(in, meta, archive, digest, pins, declared, manifest)
 	if err != nil {
 		return err
 	}
 
-	manifestPath := filepath.Join(staging, filepath.FromSlash(archive.ManifestPath()))
+	manifestPath := filepath.Join(in.Staging, filepath.FromSlash(archive.ManifestPath()))
 	if err := writeJSONFile(manifestPath, manifest); err != nil {
 		return err
 	}
-	return writeJSONFile(filepath.Join(staging, filepath.FromSlash(archive.CompatibilityPath())), comp)
+	return writeJSONFile(filepath.Join(in.Staging, filepath.FromSlash(archive.CompatibilityPath())), comp)
 }
 
 // placeholderPattern finds every template placeholder token.
@@ -230,73 +319,70 @@ func checkPlaceholders(template []byte) error {
 // the placeholders, points at the platform executable, keeps every other identity
 // field from the template, and narrows the platform claim to the platform the
 // archive was assembled on.
-func renderManifest(template []byte, meta releaseMeta, archive packagelayout.Archive, digest string) (map[string]any, error) {
+//
+// It also returns the platform set the template declares, because narrowing the
+// manifest is exactly what removes the record of every other claim the project makes
+// and the release metadata needs that set back.
+func renderManifest(template []byte, meta releaseMeta, archive packagelayout.Archive, digest string) (map[string]any, []string, error) {
 	if err := checkPlaceholders(template); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var manifest map[string]any
 	if err := json.Unmarshal(template, &manifest); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if got, ok := manifest["plugin_id"].(string); !ok || got != meta.PluginID {
-		return nil, fmt.Errorf("plugin_id %q does not match release.yaml plugin_id %q", got, meta.PluginID)
+		return nil, nil, fmt.Errorf("plugin_id %q does not match release.yaml plugin_id %q", got, meta.PluginID)
 	}
 	if got, ok := manifest["version"].(string); !ok || got != meta.Version {
-		return nil, fmt.Errorf("version %q does not match release.yaml version %q", got, meta.Version)
+		return nil, nil, fmt.Errorf("version %q does not match release.yaml version %q", got, meta.Version)
 	}
 
 	manifest["build_id"] = meta.BuildID
 	manifest["sha256"] = digest
 	manifest["executable"] = archive.OuterExecutablePath()
 
-	platforms, err := nativePlatforms(manifest["platforms"], archive)
+	declared, platforms, err := nativePlatforms(manifest["platforms"], archive)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	manifest["platforms"] = platforms
 
 	if err := checkExports(manifest["exports"]); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := checkProtocolRange(manifest); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	body, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if strings.Contains(string(body), "REPLACE_") {
-		return nil, fmt.Errorf("rendered manifest still contains an unresolved placeholder: %s", firstPlaceholder(string(body)))
+		return nil, nil, fmt.Errorf("rendered manifest still contains an unresolved placeholder: %s", firstPlaceholder(string(body)))
 	}
-	return manifest, nil
+	return manifest, declared, nil
 }
 
-// nativePlatforms narrows the declared platform list to the platform the archive
-// was assembled on. A single-platform artifact that still claimed the other
-// declared platforms would either be rejected by the host's strict manifest
-// parser or, worse, advertise support that was never validated.
-func nativePlatforms(raw any, archive packagelayout.Archive) ([]any, error) {
-	list, ok := raw.([]any)
-	if !ok {
-		return nil, errors.New("template has no platforms array")
+// nativePlatforms returns the declared platform set and the single-entry claim of a
+// natively assembled archive.
+//
+// A single-platform artifact that still claimed the other declared platforms would
+// either be rejected by the host's strict manifest parser or, worse, advertise
+// support that was never validated.
+func nativePlatforms(raw any, archive packagelayout.Archive) (declared []string, narrowed []any, err error) {
+	declared, err = declaredPlatforms(raw)
+	if err != nil {
+		return nil, nil, err
 	}
-	declared := false
-	for _, item := range list {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if entry["os"] == archive.OS() && entry["arch"] == archive.Arch() {
-			declared = true
-		}
+	if !slices.Contains(declared, archive.Platform()) {
+		return nil, nil, fmt.Errorf("template does not declare %s; it declares %s",
+			archive.Platform(), strings.Join(declared, ", "))
 	}
-	if !declared {
-		return nil, fmt.Errorf("template does not declare %s", archive.Platform())
-	}
-	return []any{map[string]any{"os": archive.OS(), "arch": archive.Arch()}}, nil
+	return declared, []any{map[string]any{"os": archive.OS(), "arch": archive.Arch()}}, nil
 }
 
 // checkExports keeps the declared trust boundary load-bearing.
@@ -368,16 +454,18 @@ func runtimeSource(kind, label string) (string, error) {
 
 // renderCompatibility derives the release metadata from the staged tree, so the
 // recorded versions and provenance are the ones the archive actually carries.
-func renderCompatibility(staging string, meta releaseMeta, archive packagelayout.Archive, digest, nodeSourceKind, nodeSource string, manifest map[string]any) (*compatibility, error) {
-	outer := filepath.Join(staging, filepath.FromSlash(archive.OuterExecutablePath()))
-	if err := packagelayout.CheckSlot(outer, archive.OuterExecutablePath()); err != nil {
+func renderCompatibility(in renderInputs, meta releaseMeta, archive packagelayout.Archive, digest string,
+	pins hostContractVersions, declared []string, manifest map[string]any) (*compatibility, error) {
+	outerRel := archive.OuterExecutablePath()
+	outer := filepath.Join(in.Staging, filepath.FromSlash(outerRel))
+	if err := packagelayout.CheckSlot(outer, outerRel); err != nil {
 		return nil, prerequisite(err)
 	}
-	priv, err := packagelayout.PrivateFor(filepath.Join(staging, filepath.FromSlash(archive.LauncherPath())), archive.OS())
+	priv, err := packagelayout.PrivateFor(filepath.Join(in.Staging, filepath.FromSlash(archive.LauncherPath())), archive.OS())
 	if err != nil {
 		return nil, err
 	}
-	runtimePath := filepath.Join(staging, filepath.FromSlash(archive.PrivateRuntimePath()))
+	runtimePath := filepath.Join(in.Staging, filepath.FromSlash(archive.PrivateRuntimePath()))
 	if err := packagelayout.CheckSlot(runtimePath, archive.PrivateRuntimePath()); err != nil {
 		return nil, prerequisite(err)
 	}
@@ -390,21 +478,21 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 	if err := packagelayout.CheckSlot(priv.NPMCLI, archive.PrivateRuntimeNPMCLIPath()); err != nil {
 		return nil, prerequisite(err)
 	}
-	if err := checkStagedDir(staging, archive.BridgeDistPath()); err != nil {
+	if err := checkStagedDir(in.Staging, archive.BridgeDistPath()); err != nil {
 		return nil, err
 	}
 	// The bridge manifest and the lockfile that pins the SDK are archive content;
 	// the dependency closure they describe is not.
 	if err := packagelayout.CheckSlot(
-		filepath.Join(staging, filepath.FromSlash(archive.BridgePackageLockPath())),
+		filepath.Join(in.Staging, filepath.FromSlash(archive.BridgePackageLockPath())),
 		archive.BridgePackageLockPath()); err != nil {
 		return nil, prerequisite(err)
 	}
-	if err := rejectProvisionedTree(staging, archive); err != nil {
+	if err := rejectProvisionedTree(in.Staging, archive); err != nil {
 		return nil, err
 	}
 
-	bridge, err := readStagedJSON(filepath.Join(staging, filepath.FromSlash(archive.BridgePackageJSONPath())), archive.BridgePackageJSONPath())
+	bridge, err := readStagedJSON(filepath.Join(in.Staging, filepath.FromSlash(archive.BridgePackageJSONPath())), archive.BridgePackageJSONPath())
 	if err != nil {
 		return nil, prerequisite(err)
 	}
@@ -421,7 +509,17 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 	if err != nil {
 		return nil, err
 	}
-	provenance, err := runtimeSource(nodeSourceKind, nodeSource)
+	provenance, err := runtimeSource(in.NodeSourceKind, in.NodeSource)
+	if err != nil {
+		return nil, err
+	}
+	// The source identity and the host certification posture are resolved before they
+	// are recorded, so a record that cannot state either one is never written.
+	source, err := resolveSource(stagedSource(outer, outerRel), in.SourceRevision, in.SourceModified)
+	if err != nil {
+		return nil, err
+	}
+	certification, err := hostCertification(meta, in.TestedHosts)
 	if err != nil {
 		return nil, err
 	}
@@ -430,38 +528,53 @@ func renderCompatibility(staging string, meta releaseMeta, archive packagelayout
 	if err != nil {
 		return nil, err
 	}
+	verification := packageVerification(archive)
 	return &compatibility{
-		Schema:                       compatibilitySchema,
-		PluginID:                     meta.PluginID,
-		PluginVersion:                meta.Version,
-		BuildID:                      meta.BuildID,
-		ReleaseTagDeclared:           meta.Tag,
-		Module:                       meta.Module,
-		PublishedRootModule:          meta.PublishedRootModule,
-		Platform:                     archive.Platform(),
-		NativePlatformAssembled:      archive.Platform(),
-		PackagingVariant:             packagingVariant,
-		ExternalNodeRequired:         false,
-		ProtocolMajor:                uintField(manifest, "protocol_major"),
-		ProtocolMinMinor:             uintField(manifest, "protocol_min_minor"),
-		ProtocolMaxMinor:             uintField(manifest, "protocol_max_minor"),
-		OuterExecutable:              archive.OuterExecutablePath(),
-		OuterExecutableSHA256:        digest,
-		Manifest:                     archive.ManifestPath(),
-		ManifestSHA256:               manifestSHA,
-		CursorSDKRequiredVersion:     required,
-		CursorSDKBundled:             false,
-		CursorSDKProvisioningCommand: archive.ProvisionCommand(""),
-		CursorSDKRedistribution:      cursorSDKRedistribution,
-		BridgeVersion:                stringField(bridge, "version"),
-		BridgeNodeEngine:             engineConstraint(bridge),
-		PrivateRuntimeVersion:        version,
-		PrivateRuntimeSource:         provenance,
-		PrivateRuntimeSHA256:         runtimeSHA,
-		TestedHostArtifactSHA256:     "",
-		PackageVerification:          "scripts/verify-package",
-		LicensingStatus:              licensingStatus,
-		GeneratedBy:                  "scripts/package-plugin",
+		Schema:                              compatibilitySchema,
+		PluginID:                            meta.PluginID,
+		PluginVersion:                       meta.Version,
+		BuildID:                             meta.BuildID,
+		ReleaseTagDeclared:                  meta.Tag,
+		Module:                              meta.Module,
+		PublishedRootModule:                 meta.PublishedRootModule,
+		PublishedACPModule:                  meta.PublishedACPModule,
+		HostContractRootVersion:             pins.Root,
+		HostContractACPVersion:              pins.ACP,
+		SourceRevision:                      source.Revision,
+		SourceModified:                      source.Modified,
+		SourceEvidence:                      source.Evidence,
+		Platform:                            archive.Platform(),
+		NativePlatformAssembled:             archive.Platform(),
+		DeclaredPlatforms:                   declared,
+		DeclaredPlatformsNotAssembled:       platformsNotAssembled(declared, archive.Platform()),
+		PackagingVariant:                    packagingVariant,
+		ExternalNodeRequired:                false,
+		ProtocolMajor:                       uintField(manifest, "protocol_major"),
+		ProtocolMinMinor:                    uintField(manifest, "protocol_min_minor"),
+		ProtocolMaxMinor:                    uintField(manifest, "protocol_max_minor"),
+		OuterExecutable:                     outerRel,
+		OuterExecutableSHA256:               digest,
+		Manifest:                            archive.ManifestPath(),
+		ManifestSHA256:                      manifestSHA,
+		CursorSDKRequiredVersion:            required,
+		CursorSDKBundled:                    false,
+		CursorSDKProvisioningCommand:        archive.ProvisionCommand(""),
+		CursorSDKRedistribution:             cursorSDKRedistribution,
+		BridgeVersion:                       stringField(bridge, "version"),
+		BridgeNodeEngine:                    engineConstraint(bridge),
+		PrivateRuntimeVersion:               version,
+		PrivateRuntimeSource:                provenance,
+		PrivateRuntimeSHA256:                runtimeSHA,
+		HostCertificationState:              certification.State,
+		HostCertificationReason:             certification.Reason,
+		TestedHostArtifacts:                 certification.TestedArtifacts,
+		PackageVerificationState:            verification.State,
+		PackageVerificationPerformed:        verification.Performed,
+		PackageVerificationReason:           verification.Reason,
+		PackageVerificationShippedCommand:   verification.ShippedCommand,
+		PackageVerificationInstalledCommand: verification.InstalledCommand,
+		LicensingStatus:                     licensingStatus,
+		GeneratedBy:                         "scripts/package-plugin",
 	}, nil
 }
 
@@ -555,12 +668,20 @@ func loadRelease(path string) (releaseMeta, error) {
 // checkSHA256 rejects an implausible executable digest instead of writing a
 // manifest the host would reject at install time.
 func checkSHA256(digest string) (string, error) {
+	return checkDigest(digest, "outer executable")
+}
+
+// checkDigest rejects anything that is not a sha256 digest in lowercase hex, and says
+// what the digest was supposed to be. It is the only thing standing between a
+// caller-supplied evidence value and a release record that claims it.
+func checkDigest(digest, subject string) (string, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(digest))
 	if len(trimmed) != sha256.Size*2 {
-		return "", fmt.Errorf("outer executable sha256 must be %d lowercase hex characters, got %q", sha256.Size*2, digest)
+		return "", fmt.Errorf("%s sha256 must be %d lowercase hex characters, got %q",
+			subject, sha256.Size*2, digest)
 	}
 	if _, err := hex.DecodeString(trimmed); err != nil {
-		return "", fmt.Errorf("outer executable sha256 is not hex: %w", err)
+		return "", fmt.Errorf("%s sha256 is not hex: %w", subject, err)
 	}
 	return trimmed, nil
 }

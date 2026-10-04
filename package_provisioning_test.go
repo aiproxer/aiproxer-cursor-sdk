@@ -25,7 +25,22 @@ type provisioningTreeOptions struct {
 	// tamperShippedFile appends to a shipped file so its digest no longer matches the
 	// record.
 	tamperShippedFile bool
+	// omitCertificationState drops host_certification_state from the recorded release
+	// metadata, which is how a tree that never declared its certification posture looks.
+	// A verifier has to name that absence exactly once, without echoing the record.
+	omitCertificationState bool
+	// sourceState is the recorded source cleanliness: "true", "false", or "" for a record
+	// that states none at all. The last one is the case a report must not read as clean.
+	sourceState string
 }
+
+// The synthetic record's own statements, named so a report assertion can quote the exact
+// line a verifier has to print, and can notice the record being echoed back instead.
+const (
+	fixtureCertificationReason = "no downloadable host binary release exists to certify this tree against"
+	fixtureSourceRevision      = "0123456789abcdef0123456789abcdef01234567"
+	fixtureRedistribution      = "@cursor/sdk is not redistributed by this archive; the operator provisions it themselves"
+)
 
 // TestPackageArchive_VerifierRejectsAShippedArchiveCarryingTheSDK keeps the archive
 // content rule checkable rather than assumed.
@@ -206,6 +221,126 @@ func TestPackageArchive_VerifierRejectsAChecksumRecordOverProvisionedFiles(t *te
 	}
 }
 
+// TestPackageArchive_VerifierReportsTheRecordedReleaseEvidence keeps the verifier's
+// report an account of the release record rather than of the tree it happened to look at.
+//
+// The record is the audit surface: it says whether the release is certified against a host
+// artifact and why not, which platforms the project claims against the ones this archive is
+// evidence for, what has been verified about the package, and what state the source tree was
+// in. A report that only prints some of that leaves the rest to be taken on trust, and the
+// source cleanliness is the field where a missing measurement is most likely to be read as
+// a clean build - so all three states are asserted here, per implementation.
+func TestPackageArchive_VerifierReportsTheRecordedReleaseEvidence(t *testing.T) {
+	t.Parallel()
+
+	archive := packagelayoutArchive(t)
+
+	for _, impl := range verifierImplementations(t) {
+		t.Run(impl, func(t *testing.T) {
+			t.Parallel()
+
+			for _, tc := range []struct {
+				name        string
+				sourceState string
+				wants       string
+			}{
+				{name: "dirty tree", sourceState: "true", wants: "source modified: yes (built from a work tree with uncommitted changes)"},
+				{name: "clean tree", sourceState: "false", wants: "source modified: no (the build tree had no uncommitted changes)"},
+				{
+					name:        "unestablished state",
+					sourceState: "",
+					wants: "source modified: unknown (not established: no source identity in this record, " +
+						"or the build tree state could not be read)",
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+
+					root := provisioningTree(t, archive, provisioningTreeOptions{
+						provisionedVersion: "1.0.23",
+						sourceState:        tc.sourceState,
+					})
+					report, _ := runVerifyScriptImpl(t, impl, root, nil, nil)
+
+					require.Contains(t, report, "host certification: uncertified (no host artifact was certified against)")
+					require.Contains(t, report, "host certification reason: "+fixtureCertificationReason,
+						"an uncertified posture is only auditable with its reason:\n%s", report)
+					require.Contains(t, report, "tested host artifacts: none recorded")
+
+					for _, platform := range packagelayout.SupportedPlatforms() {
+						require.Contains(t, report, "declared platform: "+platform,
+							"the report has to name every platform the project declares:\n%s", report)
+					}
+					for _, platform := range otherPlatforms(archive) {
+						require.Contains(t, report, "declared platform this archive is not evidence for: "+platform,
+							"the report has to separate the claims from this archive's evidence:\n%s", report)
+					}
+					require.Contains(t, report,
+						"package verification recorded in this archive: not-performed (performed: no)",
+						"the record is written before verification runs, and the report has to say so:\n%s", report)
+
+					require.Contains(t, report, "source revision: "+fixtureSourceRevision)
+					require.Contains(t, report, tc.wants,
+						"the three source states are three different answers:\n%s", report)
+
+					// Nothing in the report may read as a verification that did not happen.
+					require.NotContains(t, report, "verify-package: ok",
+						"this synthetic tree has no runtime or launcher, so a clean verdict would be false:\n%s", report)
+					require.NotContains(t, strings.ToLower(report), "verified against")
+				})
+			}
+		})
+	}
+}
+
+// TestPackageArchive_VerifierNamesAMissingCertificationPostureWithoutEchoingTheRecord
+// keeps an absent field an absence.
+//
+// The record is read with a text reader rather than a parser, so a field it does not carry
+// used to answer with the whole document: the report printed the record, and a comparison
+// compared the record with itself. The finding has to name the missing field exactly once
+// and the report must never carry the record's own text, because an operator reading a
+// verdict wants the reason, not the file.
+func TestPackageArchive_VerifierNamesAMissingCertificationPostureWithoutEchoingTheRecord(t *testing.T) {
+	t.Parallel()
+
+	archive := packagelayoutArchive(t)
+	const want = "verify-package: FAIL: release metadata records no host_certification_state; " +
+		"an archive has to declare whether it was certified against a host artifact"
+
+	for _, impl := range verifierImplementations(t) {
+		t.Run(impl, func(t *testing.T) {
+			t.Parallel()
+
+			root := provisioningTree(t, archive, provisioningTreeOptions{
+				provisionedVersion:     "1.0.23",
+				omitCertificationState: true,
+			})
+			report, code := runVerifyScriptImpl(t, impl, root, nil, nil)
+
+			require.NotEqual(t, 0, code,
+				"a record that declares no certification posture passed verification:\n%s", report)
+			require.Contains(t, report, want,
+				"the finding has to name the missing field and what it has to say:\n%s", report)
+
+			postureFindings := 0
+			for _, finding := range verifyFindings(report) {
+				if strings.Contains(finding, "host_certification") {
+					postureFindings++
+				}
+			}
+			require.Equal(t, 1, postureFindings,
+				"the missing posture is one finding, not one per field read:\n%s", report)
+
+			// The record itself must not appear anywhere in the report.
+			require.NotContains(t, report, fixtureRedistribution,
+				"the report echoed the record instead of naming the absent field:\n%s", report)
+			require.NotContains(t, report, "cursor_sdk_redistribution")
+			require.NotContains(t, report, "package_verification_shipped_command")
+		})
+	}
+}
+
 // provisioningTree stages a minimal install tree carrying exactly what the
 // provisioning checks read: the shipped bridge manifest that pins the SDK, the shipped
 // lockfile, the release metadata that records the requirement, the license notices, and
@@ -225,21 +360,7 @@ func provisioningTree(tb testing.TB, archive packagelayout.Archive, opts provisi
 		archive.BridgePackageLockPath(): `{"name":"lip-cursor-sdk-bridge","lockfileVersion":3,` +
 			`"packages":{"":{"dependencies":{"@cursor/sdk":"1.0.23"}}}}`,
 		archive.LicensesDir() + "/THIRD-PARTY-NOTICES.md": "# Third-party notices\n",
-		archive.CompatibilityPath(): strings.Join([]string{
-			"{",
-			`  "schema": "golip.cursorsdk.compatibility/v1",`,
-			`  "platform": "` + runtime.GOOS + "/" + runtime.GOARCH + `",`,
-			`  "packaging_variant": "private-runtime",`,
-			`  "external_node_required": false,`,
-			`  "cursor_sdk_required_version": "1.0.23",`,
-			`  "cursor_sdk_bundled": false,`,
-			`  "cursor_sdk_provisioning_command": "` + strings.ReplaceAll(archive.ProvisionCommand(root), `\`, `\\`) + `",`,
-			`  "cursor_sdk_redistribution": "@cursor/sdk is not redistributed by this archive; ` +
-				`the operator provisions it themselves",`,
-			`  "tested_host_artifact_sha256": ""`,
-			"}",
-			"",
-		}, "\n"),
+		archive.CompatibilityPath():                       provisioningRecord(tb, archive, root, opts),
 	}
 	if opts.provisionedVersion != "" {
 		staged[archive.ProvisionedSDKPackageJSONPath()] = `{"name":"@cursor/sdk","version":"` +
@@ -256,6 +377,55 @@ func provisioningTree(tb testing.TB, archive packagelayout.Archive, opts provisi
 	}
 	writeProvisioningChecksums(tb, root, archive, staged, opts.recordProvisioned)
 	return root
+}
+
+// provisioningRecord renders the synthetic release record the provisioning checks read.
+//
+// It mirrors the shape the renderer writes, including the tri-state source cleanliness and
+// the declared platform set, so a report assertion here is an assertion about the record
+// an operator actually receives rather than about a trimmed copy of it.
+func provisioningRecord(tb testing.TB, archive packagelayout.Archive, root string, opts provisioningTreeOptions) string {
+	tb.Helper()
+
+	declared := packagelayout.SupportedPlatforms()
+	slices.Sort(declared)
+	fields := []string{
+		"{",
+		`  "schema": "golip.cursorsdk.compatibility/v2",`,
+		`  "platform": "` + archive.Platform() + `",`,
+		`  "native_platform_assembled": "` + archive.Platform() + `",`,
+		`  "packaging_variant": "private-runtime",`,
+		`  "external_node_required": false,`,
+		`  "declared_platforms": [` + strings.Join(quoteAll(declared), ", ") + `],`,
+		`  "declared_platforms_not_assembled": [` + strings.Join(quoteAll(otherPlatforms(archive)), ", ") + `],`,
+		`  "cursor_sdk_required_version": "1.0.23",`,
+		`  "cursor_sdk_bundled": false,`,
+		`  "cursor_sdk_provisioning_command": "` + strings.ReplaceAll(archive.ProvisionCommand(root), `\`, `\\`) + `",`,
+		`  "cursor_sdk_redistribution": "` + fixtureRedistribution + `",`,
+		`  "source_revision": "` + fixtureSourceRevision + `",`,
+		`  "source_stamp_evidence": "resolved from the version-control state of the tree this record was written for",`,
+	}
+	if opts.sourceState != "" {
+		fields = append(fields, `  "source_modified": `+opts.sourceState+`,`)
+	}
+	if !opts.omitCertificationState {
+		fields = append(fields,
+			`  "host_certification_state": "uncertified",`,
+			`  "host_certification_reason": "`+fixtureCertificationReason+`",`,
+		)
+	}
+	fields = append(fields,
+		`  "tested_host_artifacts": [],`,
+		`  "package_verification_state": "not-performed",`,
+		`  "package_verification_performed": false,`,
+		`  "package_verification_shipped_command": "scripts/verify-package.sh `+
+			`--package-root <plugin-root> --tree-state shipped",`,
+		`  "package_verification_installed_command": "scripts/verify-package.sh `+
+			`--package-root <plugin-root> --tree-state installed"`,
+		"}",
+		"",
+	)
+	return strings.Join(fields, "\n")
 }
 
 // writeProvisioningChecksums records every staged file, so the "present but not
@@ -290,4 +460,25 @@ func packagelayoutArchive(tb testing.TB) packagelayout.Archive {
 	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
 	require.NoError(tb, err)
 	return archive
+}
+
+// otherPlatforms lists the declared platforms besides this host's, which is what the
+// fixture records as declared-but-not-assembled for a tree staged on this platform.
+func otherPlatforms(archive packagelayout.Archive) []string {
+	var out []string
+	for _, platform := range packagelayout.SupportedPlatforms() {
+		if platform != archive.Platform() {
+			out = append(out, platform)
+		}
+	}
+	return out
+}
+
+// quoteAll renders platform names as JSON string elements.
+func quoteAll(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, `"`+value+`"`)
+	}
+	return out
 }

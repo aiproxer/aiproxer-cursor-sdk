@@ -137,7 +137,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
 		require.NoError(t, err)
 
-		require.Equal(t, "golip.cursorsdk.compatibility/v1", record["schema"])
+		require.Equal(t, "golip.cursorsdk.compatibility/v2", record["schema"])
 		require.Equal(t, runtime.GOOS+"/"+runtime.GOARCH, record["platform"])
 		require.Equal(t, runtime.GOOS+"/"+runtime.GOARCH, record["native_platform_assembled"])
 		require.Equal(t, "private-runtime", record["packaging_variant"])
@@ -160,9 +160,63 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, recordString(record, "cursor_sdk_redistribution"), "not redistributed")
 		require.NotContains(t, recordString(record, "licensing_status"), "confirm redistribution rights")
 
-		// Nothing in this task certified a host artifact, so the record says so
-		// instead of naming a host it never ran against.
-		require.Equal(t, "", record["tested_host_artifact_sha256"])
+		// Nothing in this task certified a host artifact, so the record says so with the
+		// reason rather than naming a host it never ran against, and no digest is invented.
+		require.Equal(t, "uncertified", record["host_certification_state"])
+		require.NotEmpty(t, record["host_certification_reason"])
+		require.Empty(t, record["tested_host_artifacts"])
+		require.NotContains(t, record, "tested_host_artifact_sha256")
+
+		// The record's package verification state is written while the archive is
+		// assembled, so it records no outcome and names the runs that have to happen.
+		// A "passed" or "verified" state here would describe a check nobody ran.
+		require.Equal(t, "not-performed", record["package_verification_state"])
+		require.Equal(t, false, record["package_verification_performed"])
+		require.Contains(t, recordString(record, "package_verification_shipped_command"),
+			"--tree-state shipped")
+		require.Contains(t, recordString(record, "package_verification_installed_command"),
+			"--tree-state installed")
+
+		// The exact published host contracts come from this module's own go.mod, which is
+		// what the outer executable in this tree was built from.
+		require.Equal(t, "github.com/matdev83/go-llm-interactive-proxy", record["published_root_module"])
+		require.NotEmpty(t, record["host_contract_root_version"])
+		require.Equal(t, "github.com/matdev83/go-llm-interactive-proxy/connector-support/acp",
+			record["published_acp_module"])
+		require.Equal(t, record["host_contract_root_version"], record["host_contract_acp_version"],
+			"both host contracts are pinned at the same released version in this repository")
+
+		// The source identity is read out of, or resolved for, the staged executable this
+		// gate just built. A build in a primary checkout carries the toolchain's VCS stamp;
+		// this repository builds in linked work trees, where it carries none and the
+		// packager resolves the revision instead. Either way the record has to name a basis,
+		// and the cleanliness is tri-state: an unestablished state is absent rather than
+		// clean, which is what a local run from a tree whose status could not be read
+		// produces.
+		require.NotEmpty(t, recordString(record, "source_stamp_evidence"))
+		if revision := recordString(record, "source_revision"); revision != "" {
+			require.Regexp(t, `^[0-9a-f]{7,64}$`, revision,
+				"a recorded source revision is a revision, not a placeholder")
+		} else {
+			require.Contains(t, recordString(record, "source_stamp_evidence"), "no Go build VCS stamp",
+				"an unstamped build has to say why it names no revision")
+		}
+		sourceModified, stated := record["source_modified"]
+		if stated {
+			require.Contains(t, []any{true, false}, sourceModified,
+				"a stated source state is either dirty or clean, never anything else")
+		}
+
+		// Platform evidence: the declared set, and the platforms this one archive is not
+		// evidence for.
+		require.Equal(t, sortedPlatforms(packagelayout.SupportedPlatforms()), record["declared_platforms"])
+		var notAssembled []any
+		for _, platform := range record["declared_platforms_not_assembled"].([]any) {
+			require.NotEqual(t, runtime.GOOS+"/"+runtime.GOARCH, platform,
+				"an archive assembled natively here is evidence for its own platform")
+			notAssembled = append(notAssembled, platform)
+		}
+		require.NotEmpty(t, notAssembled)
 
 		// The record may not read as a publication: release.yaml declares the tag a
 		// future release would carry, and there is no such tag.
@@ -1892,6 +1946,18 @@ func shipsLicenseText(tb testing.TB, packageDir string) bool {
 func recordString(record map[string]any, key string) string {
 	value, _ := record[key].(string)
 	return value
+}
+
+// sortedPlatforms is the declared platform set in the order the record writes it, so a
+// gate assertion compares against the contract rather than against its own ordering.
+func sortedPlatforms(platforms []string) []any {
+	sorted := slices.Clone(platforms)
+	slices.Sort(sorted)
+	out := make([]any, 0, len(sorted))
+	for _, platform := range sorted {
+		out = append(out, platform)
+	}
+	return out
 }
 
 // decodeJSONObject reads one staged JSON object.

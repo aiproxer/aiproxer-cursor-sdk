@@ -40,9 +40,15 @@ The plugin-private bridge launcher exists as source in `cmd/lip-cursor-sdk-bridg
 
 Native archive assembly exists as tooling in this repository; see
 [Native archives](#native-archives). **No plugin release has been published and none is published from
-this branch:** there is no tag and no GitHub release, `compatibility.json` in a built archive records no
-tested host artifact, and no redistribution right is claimed for the proprietary Cursor SDK, because the
-archive does not ship it at all - see [Redistribution posture](#redistribution-posture).
+this branch:** there is no tag and no GitHub release, no host binary release exists to certify this plugin
+against - so the release is **uncertified** with respect to the host, and `compatibility.json` in a built
+archive says exactly that, with the reason and no invented host artifact hash - and no redistribution right is
+claimed for the proprietary Cursor SDK, because the archive does not ship it at all - see
+[Redistribution posture](#redistribution-posture) and
+[Host certification](docs/packaging.md#host-certification).
+
+The packaging decision behind the archive shape, including what was measured and what was only reasoned
+about, is in [`docs/packaging.md`](docs/packaging.md).
 
 ## Installing and provisioning (operators)
 
@@ -148,8 +154,25 @@ that split in their report. The host's manifest digest remains the authority for
 nothing here claims the host authenticates companion files. `compatibility.json` records the SDK as
 **required, not bundled**, with the exact provisioning command and an explicit non-redistribution
 statement, and records the digest of the manifest and of the private runtime, which both verifiers compare
-against the staged files rather than printing a provenance claim nothing has ever checked. Both verifiers
-read the layout contract and `release.yaml` from the repository they ship in - the parent of their own
+against the staged files rather than printing a provenance claim nothing has ever checked.
+
+The rest of that record is release evidence, and every value in it is derived from a validated build input
+rather than typed in: the exact published Go-LIP module versions are read from this module's own `go.mod`
+(the manifest `go build` resolved, and a `replace` of either module is a packaging failure); the source
+revision comes from one of two bases, stated in `source_stamp_evidence` for every archive - the Go build
+VCS stamp the toolchain writes inside the outer executable when it builds in a primary version-control
+checkout, or, because this project builds in linked work trees where that stamp is written by nobody, the
+revision `scripts/package-plugin` resolved from the tree it built in. When both exist they are
+cross-checked and a disagreement fails packaging. Whether the build came from a tree with uncommitted
+changes is a separate, third state: a dirty tree and a clean tree each state themselves, and a state
+nothing established is left out of the record entirely and reported as `unknown` rather than recorded as
+clean; the declared platform set comes from the manifest template, alongside the platforms this single
+archive is not evidence for; and the host certification posture is declared in `release.yaml` and
+validated against any digest supplied to `scripts/package-plugin --tested-host <sha256>`.
+`package_verification_state` is `not-performed` in every archive, because the packager writes the record
+before verification can run; the record names the two runs that have to be performed, and their reports are
+the evidence. Nothing in it labels a check as passed that has not run. Both verifiers read the layout
+contract and `release.yaml` from the repository they ship in - the parent of their own
 `scripts/` directory - and there is no option to substitute another one: one report decides what an install
 tree is, so a caller-supplied one would let the caller decide it, which is the same hole as asking the
 working directory with a switch. Verifying a tree that lives outside a checkout is what `--package-root` is
@@ -242,7 +265,8 @@ Verifying the actual content of the tree you provisioned is your responsibility;
 [Provenance and trust](docs/installation.md#provenance-and-trust).
 
 **No plugin release has been published and none may be published from this branch:** there is no tag and no
-GitHub release, and `compatibility.json` in a built archive records no tested host artifact.
+GitHub release, and no host binary release exists to certify the plugin against, so `compatibility.json`
+records the release as uncertified with the reason and no host artifact digest.
 
 ### Verification limitations
 
@@ -479,6 +503,8 @@ blocked rows when no credentials are opted in, and its own output says so.
 
 ## Documentation
 
+- Packaging decision and its evidence, including what was only reasoned about:
+  [`docs/packaging.md`](docs/packaging.md).
 - Operator installation and provisioning: [`docs/installation.md`](docs/installation.md).
 - Host required status checks touching the Cursor lane, and the order in which they have to be retired:
   [`docs/host-required-checks.md`](docs/host-required-checks.md).

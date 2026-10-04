@@ -105,8 +105,9 @@ shipped bridge manifest names. `scripts/verify-package --tree-state shipped` add
 that contains the provisioned tree at all, so the no-redistribution rule is checkable on the bytes an
 operator receives rather than only asserted by the packager.
 
-**No plugin artifact has been released: there is no tag and no GitHub release, and
-`compatibility.json` in a built archive records no tested host artifact.**
+**No plugin artifact has been released: there is no tag and no GitHub release. No Go-LIP host binary release
+exists to certify this plugin against either, so `compatibility.json` records the release as `uncertified`
+with the reason and carries no host artifact digest; none is invented anywhere.**
 
 The private Node runtime is staged from one of three sources, and `compatibility.json` records which one
 in `private_runtime_source`, so an archive never overstates where its runtime came from:
@@ -128,9 +129,21 @@ distribution keeps it, so the provisioning command an operator is documented to 
 entry point rather than to an invented path; a runtime staged with no npm beside it is a packaging
 failure naming `-NodeDist`, because a global package manager is not an acceptable substitute.
 
-`compatibility.json` also records the runtime's version and digest, and `release_tag_declared` records
-the tag `release.yaml` declares for a future publication - a declaration, not a publication: no such tag
-exists and no release has been made. Neither artifact is checked into this repository.
+`compatibility.json` also records the runtime's version and digest, the exact published Go-LIP module versions
+the archive was built against (read from this module's own `go.mod`, the manifest the build resolved), and
+the source identity of the build. The source revision comes from one of two bases, and `source_stamp_evidence`
+states which one every archive carries: the Go build VCS stamp the toolchain writes inside the outer
+executable when the build happens in a primary version-control checkout, or - because this project builds in
+linked work trees, where that stamp is written by nobody - the revision `scripts/package-plugin` resolved from
+the tree it built in. Where both are available they are cross-checked and a disagreement fails packaging.
+Whether the build came from a work tree with uncommitted changes is recorded in its own right, as dirty or
+clean, or as `unknown`: a state nothing established is left out of the record and reported as unknown, because
+recording it as clean would assert something about the artifact that nobody checked. The record also carries
+the declared platform set alongside the platforms that one archive is not evidence for, and the package
+verification state - which is `not-performed` in every archive, because the packager writes the record before
+verification can run. It never records a verification outcome that has not happened. `release_tag_declared`
+records the tag `release.yaml` declares for a future publication - a declaration, not a publication: no such
+tag exists and no release has been made. Neither artifact is checked into this repository.
 
 ## Current commit scope
 
