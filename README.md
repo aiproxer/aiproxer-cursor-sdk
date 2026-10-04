@@ -272,12 +272,23 @@ records the release as uncertified with the reason and no host artifact digest.
 
 Stated rather than left to be discovered:
 
-- **A probe has no timeout.** Both verifiers run the staged private runtime and the launcher by absolute
-  path and wait for them, so a staged executable that never returns hangs the verification instead of
-  failing it. That is not a way past a check: the private runtime is covered by `checksums.sha256` and
-  cross-checked against `private_runtime_sha256` in `compatibility.json`, so a replaced binary is already
-  a finding, and CI bounds the hang with the job timeout. Making a probe time out needs process control
-  with different semantics on each platform, and is not implemented.
+- **Every probe is bounded, and what that bound cannot do is stated rather than implied.** Both
+  verifiers run the staged private runtime and the launcher through
+  `cmd/lip-cursor-sdk-packaging probe`, which gives each one **120 seconds** and then terminates
+  the process tree the executable owns (`kill` on the POSIX process group, `taskkill /T /F` on
+  Windows), waits a further 10 seconds for the tree to be reaped, and reports `exit`, `timed_out`
+  and `deadline` on a stream the probed executable is never given. A staged executable that never
+  answers becomes a finding naming the bound; a staged executable that answers and exits non-zero
+  becomes a finding carrying what it printed. The bound is a constant in that tool rather than an
+  option of either script, because how long a shipped executable is given to answer is part of the
+  verdict. The probes' output travels through a pipe the tool owns rather than through the tool's
+  own stdout, so a descendant that outlives the executable cannot keep the verifier's reader
+  waiting. **A descendant that has left that tree is outside what either platform's policy can
+  reach** — a POSIX session leader is signalled by no group signal, and on Windows everything the
+  probed command started is inside taskkill's ancestry walk — so in that case the verifier reports
+  that the output was abandoned rather than claiming the leftover was cleaned up. It also does not
+  signal a command that already exited on its own: that process has been reaped, so its process id
+  is no longer a handle on it.
 - **Path comparison does not normalize Unicode.** `Test-SamePath`/`same_path` fold case on a
   case-insensitive filesystem and drop the Windows extended-length prefix, but they compare the rest
   byte for byte. Two spellings of one path that differ only in Unicode normalization therefore read as

@@ -44,6 +44,14 @@
 # PATH: the private-runtime variant ships its own runtime, and a verification that
 # needed a global Node would prove the opposite of what it claims.
 #
+# Every one of those executions is bounded. The staged runtime and the staged launcher are
+# executables this project ships but cannot vouch for at verification time, so one that never
+# answers has to end the run with a finding naming it rather than leave the gate reporting
+# nothing at all. The bound lives in cmd/lip-cursor-sdk-packaging, not here: how long a shipped
+# executable is given to answer is part of the verdict, and an input to the verdict is not an
+# input to a script. Giving up on the launcher takes the runtime it owns with it, so a bounded
+# wait never trades a hang for a leak.
+#
 # The checksums cover the shipped plugin-private files, but nothing here claims the
 # host authenticates them: the host's manifest digest stays the authority for the outer
 # executable only.
@@ -155,37 +163,134 @@ EOF
 }
 
 
+# sha256_digest_of reads the digest out of one answer of the digest tool.
+#
+# It is not the first space-delimited field. A name holding a backslash or a newline makes the
+# tool escape the name and prefix the whole line with a backslash, so a field split returns a
+# digest with a stray leading character, and a name with a newline in it returns two lines of
+# answer. The digest is the first 64 characters after that optional prefix, which is the one
+# thing a sha256 answer always starts with.
+sha256_digest_of() {
+  local line
+  line="$(printf '%s\n' "$1" | head -n 1)"
+  printf '%s' "${line#\\}" | cut -c1-64
+}
+
 # sha256_of digests one file.
+#
+# This is the fallback for a digest tool that cannot hand back many names in one pass. It
+# costs one process per file, so it is only reached where the batched path below is not
+# available; where it is, a real archive is digested by a bounded number of processes
+# instead of one per shipped file.
 sha256_of() {
+  local answer
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
-    return
+    answer="$(sha256sum "$1")"
+  elif command -v shasum >/dev/null 2>&1; then
+    answer="$(shasum -a 256 "$1")"
+  else
+    printf 'verify-package: no sha256sum or shasum on this machine\n' >&2
+    exit 1
   fi
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | cut -d' ' -f1
-    return
-  fi
-  printf 'verify-package: no sha256sum or shasum on this machine\n' >&2
-  exit 1
+  sha256_digest_of "$answer"
 }
 
-# probe runs one packaged executable by absolute path and prints its output.
-probe() {
-  "$@" 2>&1 || true
+# sha256_batches_available reports whether the digest tool can digest many files in one
+# invocation and hand every name back byte for byte.
+#
+# It is decided by round-tripping one file whose name touches every part of that question at
+# once: a space, a backslash, a wildcard and a newline. The expectation is built from the name
+# and from the digest this script reads on its own, so a batched form that escapes names,
+# prefixes a line, or reorders the fields fails here instead of quietly digesting one file and
+# reporting another's answer - which is what would happen on a shipped file whose name needs
+# escaping. xargs is part of the same question because it is what splits the names into command
+# lines that fit, and a record that is not NUL terminated fails the read below, so the NUL
+# output form is part of it too. A digest tool that cannot do this keeps the per-file fallback
+# above, which is what leaves the shasum path working.
+sha256_batches_available() {
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  command -v xargs >/dev/null 2>&1 || return 1
+  local probe answer expected record
+  probe="$tool_dir/$(printf 'round trip \\*\nname')" || return 1
+  : >"$probe" 2>/dev/null || return 1
+  answer="$(sha256sum -- "$probe" 2>/dev/null)" || return 1
+  expected="$(sha256_digest_of "$answer") *$probe"
+  printf '%s\0' "$probe" | xargs -0 sha256sum -b -z >"$tool_dir/round-trip" 2>/dev/null || return 1
+  IFS= read -r -d '' record <"$tool_dir/round-trip" || return 1
+  [ "$record" = "$expected" ]
 }
 
-# probe_runs reports whether one packaged executable started and succeeded. A probe
-# that cannot run is a finding, never a skip: a runtime that was staged but does not
+# probe_output, probe_exit, probe_timed_out, and probe_deadline are what the last probe
+# reported. The status fields keep the tool's own vocabulary - a number and true or false -
+# because both verifiers read the same line and a shell answer to it would be one more
+# translation to keep in step.
+#
+# They are variables rather than output because the answer and the answer's status have to
+# be read together: a probe run inside a command substitution would report its status into a
+# subshell this script cannot read back.
+probe_output=""
+probe_exit=0
+probe_timed_out='false'
+probe_drained='true'
+probe_deadline=''
+
+# probe runs one packaged executable by absolute path under a bound the packaging tool owns,
+# and leaves its answer and its status in the variables above. The first argument names what
+# was probed, and is used only if the executable left its output open.
+#
+# The bound is not an option of this script. How long a staged executable is given to answer
+# is part of the verdict, and an input to the verdict is not an input to a script, so the
+# tool holds the bound and reports the one it applied for a finding to quote.
+#
+# A probe that cannot run is a finding, never a skip: a runtime that was staged but does not
 # answer for its own version is not a working private runtime.
-probe_runs() {
-  "$@" >/dev/null 2>&1
+probe() {
+  local subject="$1" status rest
+  shift
+  probe_exit=0
+  probe_timed_out='false'
+  probe_drained='true'
+  probe_deadline=''
+  probe_output="$("$packaging_tool" probe "$@" 2>"$tool_dir/probe-status")" || true
+  status="$(cat "$tool_dir/probe-status")"
+  # The status line is fixed key=value tokens, so the fields are read off it rather than
+  # pattern-matched: "probe: exit=<n> timed_out=<bool> drained=<bool> deadline=<duration>".
+  rest="${status#*: }"
+  probe_exit="${rest%% *}"
+  probe_exit="${probe_exit#exit=}"
+  rest="${rest#* }"
+  probe_timed_out="${rest%% *}"
+  probe_timed_out="${probe_timed_out#timed_out=}"
+  rest="${rest#* }"
+  probe_drained="${rest%% *}"
+  probe_drained="${probe_drained#drained=}"
+  probe_deadline="${rest#* }"
+  probe_deadline="${probe_deadline#deadline=}"
+  # An executable that settled but left its output open left a process behind holding the
+  # stream this run was reading. Terminating the tree is what released it where the tree could
+  # be reached; a descendant that left the tree cannot be reached from here at all, so what
+  # happened is reported rather than described as a cleanup.
+  if [ "$probe_drained" != true ]; then
+    finding "$subject left its output open when the probe gave up on it after $probe_deadline (probe cleanup incomplete); a descendant that leaves the staged executable's process tree cannot be terminated here, so its remaining output was abandoned"
+  fi
 }
 
 host_os="$(GOWORK=off go env GOOS)"
 host_arch="$(GOWORK=off go env GOARCH)"
 host_platform="$host_os/$host_arch"
 
-layout_json="$(cd "$repo_root" && GOWORK=off go run ./cmd/lip-cursor-sdk-packaging layout -platform "$host_platform")"
+# The packaging tool answers the layout report and owns every probe bound, so it is built
+# once here and used directly. `go run` would compile it again for each question, and a
+# probe this script drove itself would be a probe whose bound the script could also choose.
+tool_dir="$(mktemp -d)"
+trap 'rm -rf -- "$tool_dir"' EXIT
+packaging_tool="$tool_dir/lip-cursor-sdk-packaging"
+if [ "$host_os" = windows ]; then
+  packaging_tool="$packaging_tool.exe"
+fi
+(cd "$repo_root" && GOWORK=off go build -o "$packaging_tool" ./cmd/lip-cursor-sdk-packaging)
+
+layout_json="$("$packaging_tool" layout -platform "$host_platform")"
 layout_report() {
   printf '%s' "$layout_json" | tr -d '\n' | sed "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/"
 }
@@ -302,6 +407,13 @@ done < <(layout_entries required_entries)
 #    prefix is the whole of that scope, and it comes from the layout contract.
 checksums_path="$package_root/$checksums_name"
 checksum_order=()
+# recorded_digest indexes the checksum record by exact path, and digest_of indexes what the
+# tree actually has. Both lookups are one read each, so a real archive costs one pass over
+# the record and one pass over the tree rather than a scan per file - and because both are
+# keyed by the exact path, a path that merely looks like another one is no longer a false
+# duplicate.
+declare -A recorded_digest
+declare -A digest_of
 mismatched=0
 provisioned_count=0
 if [ ! -f "$checksums_path" ]; then
@@ -316,9 +428,9 @@ else
       *) finding "malformed checksum line: $entry"; continue ;;
     esac
     [ "${#digest}" -eq 64 ] || { finding "malformed checksum digest for $rel"; continue; }
-    case " ${checksum_order[*]} " in
-      *" $rel "*) finding "duplicate checksum line for $rel"; continue ;;
-    esac
+    if [ -n "${recorded_digest["$rel"]+recorded}" ]; then
+      finding "duplicate checksum line for $rel"; continue
+    fi
     # A record line for a provisioned file would claim the plugin authenticated the
     # operator's own npm resolution, which is the one claim the record scope does not
     # make.
@@ -327,9 +439,57 @@ else
         finding "checksum record lists the operator-provisioned $rel: $checksums_name covers shipped files only; the plugin authenticates what it ships, the operator authenticates what they provisioned"
         ;;
     esac
-    checksum_order+=("$rel|$digest")
+    recorded_digest["$rel"]="$digest"
+    checksum_order+=("$rel")
   done <"$checksums_path"
 fi
+
+# digest_recorded_files digests every recorded file this tree actually has and leaves each
+# digest in digest_of under its exact install-root-relative path.
+#
+# "Recorded and present" is exactly the set the per-file loop used to read one process at a
+# time, so keeping it exact is what keeps the verdicts identical; the difference is only how
+# many processes read them. xargs splits the work when the names would not fit one command
+# line, so the count is bounded by the command line rather than by the number of files an
+# archive happens to carry. A file the digest tool cannot read produces no record at all,
+# which resolves to the empty digest the mismatch finding already reported for it.
+digest_recorded_files() {
+  local rel absolute record name digest
+  local -a batch=()
+  digest_of=()
+  for rel in "${checksum_order[@]:-}"; do
+    [ -n "$rel" ] || continue
+    case "$rel" in
+      "$provisioned_prefix"*|"$checksums_name") continue ;;
+    esac
+    [ -f "$package_root/$rel" ] || continue
+    batch+=("$package_root/$rel")
+  done
+  [ "${#batch[@]}" -gt 0 ] || return 0
+
+  if sha256_batches_available; then
+    printf '%s\0' "${batch[@]}" | xargs -0 sha256sum -b -z >"$tool_dir/digests" || true
+    while IFS= read -r -d '' record; do
+      # Binary mode separates the digest from the name with a space and a literal star, so
+      # the name is what follows the first separator. It is taken off in two steps because
+      # a name may itself hold spaces and a wildcard, and only the first separator is the
+      # tool's.
+      digest="${record%% *}"
+      name="${record#* }"
+      name="${name#\*}"
+      case "$name" in
+        "$package_root"/*) digest_of["${name#"$package_root"/}"]="$digest" ;;
+      esac
+    done <"$tool_dir/digests"
+    return 0
+  fi
+
+  for absolute in "${batch[@]}"; do
+    digest_of["${absolute#"$package_root"/}"]="$(sha256_of "$absolute")"
+  done
+}
+
+digest_recorded_files
 
 while IFS= read -r -d '' rel; do
   [ "$rel" = "$checksums_name" ] && continue
@@ -345,15 +505,12 @@ while IFS= read -r -d '' rel; do
       continue
       ;;
   esac
-  recorded=""
-  for entry in "${checksum_order[@]:-}"; do
-    if [ "${entry%%|*}" = "$rel" ]; then recorded="${entry#*|}"; break; fi
-  done
+  recorded="${recorded_digest["$rel"]-}"
   if [ -z "$recorded" ]; then
     finding "file is present but not listed in $checksums_name: $rel; the archive does not account for this file"
     continue
   fi
-  actual="$(sha256_of "$package_root/$rel")"
+  actual="${digest_of["$rel"]-}"
   if [ "$actual" != "$recorded" ]; then
     mismatched=$((mismatched + 1))
     finding "checksum mismatch for $rel: recorded $recorded, found $actual; reinstall the Cursor plugin package"
@@ -362,7 +519,7 @@ done < <(cd "$package_root" && find . -type f -print0 | sed -z 's|^\./||' | LC_A
 
 for entry in "${checksum_order[@]:-}"; do
   [ -n "$entry" ] || continue
-  rel="${entry%%|*}"
+  rel="$entry"
   case "$rel" in
     "$provisioned_prefix"*) continue ;;
   esac
@@ -374,7 +531,7 @@ done
 listed_count="${#checksum_order[@]}"
 private_count=0
 for entry in "${checksum_order[@]:-}"; do
-  case "${entry%%|*}" in "$private_prefix"*) private_count=$((private_count + 1)) ;; esac
+  case "$entry" in "$private_prefix"*) private_count=$((private_count + 1)) ;; esac
 done
 files_present="$(find "$package_root" -type f | wc -l | tr -d ' ')"
 shipped_count=$((files_present - provisioned_count))
@@ -602,18 +759,32 @@ if [ -n "$record_json" ]; then
   fi
 
   if [ -f "$private_runtime_path" ] && [ -f "$launcher_path" ]; then
-    self_path="$(probe "$private_runtime_path" -p 'process.execPath')"
+    probe 'the staged private runtime' "$private_runtime_path" -p 'process.execPath'
+    self_path="$probe_output"
     resolved='no'
     if same_path "$self_path" "$private_runtime_path"; then resolved='yes'; fi
     line "private runtime: $private_runtime_path"
     line "private runtime resolves to itself: $resolved"
-    [ "$resolved" = 'yes' ] ||
+    if [ "$probe_timed_out" = true ]; then
+      # A runtime that never answers has not resolved to itself; saying so would report
+      # the symptom, while the bound it broke is what an operator has to act on.
+      finding "the staged private runtime did not answer its own path within $probe_deadline (probe timed out); a runtime that never answers is not a working private runtime"
+    elif [ "$resolved" != yes ]; then
       finding "the staged private runtime resolved to '$self_path' instead of $private_runtime_path"
-    if ! probe_runs "$private_runtime_path" --version; then
-      finding "the staged private runtime did not run: $(probe "$private_runtime_path" --version)"
     fi
-    line "private runtime version: $(probe "$private_runtime_path" --version) (recorded $(json_string private_runtime_version "$record_json"))"
-    components="$(probe "$private_runtime_path" -p 'JSON.stringify(process.versions)')"
+    probe 'the staged private runtime' "$private_runtime_path" --version
+    version_output="$probe_output"
+    if [ "$probe_timed_out" = true ]; then
+      finding "the staged private runtime did not answer --version within $probe_deadline (probe timed out); a runtime that never answers is not a working private runtime"
+    elif [ "$probe_exit" != 0 ]; then
+      finding "the staged private runtime did not run: $version_output"
+    fi
+    line "private runtime version: $version_output (recorded $(json_string private_runtime_version "$record_json"))"
+    probe 'the staged private runtime' "$private_runtime_path" -p 'JSON.stringify(process.versions)'
+    components="$probe_output"
+    if [ "$probe_timed_out" = true ]; then
+      finding "the staged private runtime did not report its bundled components within $probe_deadline (probe timed out)"
+    fi
     summary=""
     for name in node icu openssl uv zlib; do
       value="$(printf '%s' "$components" | sed "s/.*\"$name\": *\"\([^\"]*\)\".*/\1/")"
@@ -628,9 +799,13 @@ if [ -n "$record_json" ]; then
     if [ "$tree_state" = shipped ]; then
       line "bridge doctor: not run; a shipped archive cannot serve a request until the operator provisions $bridge_modules"
     else
-      doctor="$(probe "$launcher_path" doctor)"
-      printf '%s' "$doctor" | grep -q 'doctor: ok' ||
+      probe 'the private bridge launcher' "$launcher_path" doctor
+      doctor="$probe_output"
+      if [ "$probe_timed_out" = true ]; then
+        finding "the private bridge launcher did not pass doctor through the private runtime within $probe_deadline (probe timed out); a launcher that never answers has no runtime behind it"
+      elif ! printf '%s' "$doctor" | grep -q 'doctor: ok'; then
         finding "the private bridge launcher did not pass doctor through the private runtime: $doctor"
+      fi
       line "bridge doctor (launcher -> private runtime -> bridge entry): $doctor"
     fi
   else
@@ -650,7 +825,8 @@ fi
 line '--- files ---'
 for entry in "${checksum_order[@]:-}"; do
   [ -n "$entry" ] || continue
-  line "${entry#*|}$checksum_separator${entry%%|*}"
+  rel="$entry"
+  line "${recorded_digest["$rel"]}$checksum_separator$rel"
 done
 line '--- end of files ---'
 
