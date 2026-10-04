@@ -7,7 +7,7 @@
  *
  * hard_bridge_restart / canonical_rebootstrap are unavailable in this Node CLI
  * (no processLifecycle hooks) → overall status blocked, ok=false.
- * Fake platform lifecycle is proven by `make test-cursor-sdk-platform` only.
+ * Fake platform lifecycle is proven by `scripts/test-cursor-sdk-platform` only.
  * Default npm test does not run this against the network.
  */
 import { mkdtemp, rm } from "node:fs/promises";

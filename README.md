@@ -517,6 +517,8 @@ blocked rows when no credentials are opted in, and its own output says so.
 - Packaging decision and its evidence, including what was only reasoned about:
   [`docs/packaging.md`](docs/packaging.md).
 - Operator installation and provisioning: [`docs/installation.md`](docs/installation.md).
+- Which requirement each certified test and CI lane covers, and what is deliberately
+  not claimed: [`docs/certification.md`](docs/certification.md).
 - Host required status checks touching the Cursor lane, and the order in which they have to be retired:
   [`docs/host-required-checks.md`](docs/host-required-checks.md).
 - Plugin authoring and the executable backend-plugin ABI: Go-LIP

@@ -53,6 +53,86 @@ jobs:
       - name: Test
         run: go test ./...
 
+  go-windows:
+    name: "go (native windows: full suite + fake-bridge lifecycle)"
+    # The `package` matrix already assembles and audits an archive on Windows, but it
+    # never runs the whole suite: a process-tree bug, a path assumption, or a race
+    # outside packaging had no Windows lane to fail in. This lane is that evidence,
+    # on the platform the manifest declares and the packager assembles.
+    #
+    # It is deliberately not a production-support statement about macOS's counterpart
+    # either: see go-macos-dev for what that platform is and is not allowed to claim.
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      # Same standalone-module contract as the default lane: the published host
+      # contracts have to resolve on their own on every platform, not only on Linux.
+      GOWORK: "off"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify module checksums
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      # The complete suite, not a package subset: the point of this lane is that a
+      # Windows-only failure anywhere in the module has somewhere to fail.
+      - name: Full Go suite
+        run: go test ./...
+
+      # The lifecycle evidence only a real subprocess tree gives: start, stream,
+      # cancel, crash, restart, rebootstrap, and shutdown against the deterministic
+      # fake bridge. No Node and no Cursor account are involved, so this is the part
+      # of the macOS-shaped question Windows can answer honestly today.
+      - name: Fake-bridge platform smoke
+        run: go test -count=1 -timeout 20m -run '^TestPlatformSmoke_' ./internal/product
+
+  go-macos-dev:
+    name: "go (macos development evidence: fake-bridge lifecycle, no darwin claim)"
+    # Development certification only. The fake bridge and the lifecycle suite run on
+    # macOS here, which is real evidence about the connector's process supervision,
+    # session pool, and run stream on that kernel.
+    #
+    # It is not, and must not become, a production Darwin claim. There is no assembled
+    # macOS archive, no macOS entry in the `package` matrix, and no darwin entry in the
+    # manifest template or in internal/packagelayout. Until a macOS artifact is
+    # assembled and audited natively, the platform is unsupported, and
+    # TestCertificationEvidence_MacOSLaneIsDevelopmentEvidenceOnly fails if this lane
+    # starts publishing one.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Fake-bridge platform smoke
+        run: go test -count=1 -timeout 15m -run '^TestPlatformSmoke_' ./internal/product
+
   go-race:
     name: go -race (launcher and bridge lifecycle)
     runs-on: ubuntu-latest

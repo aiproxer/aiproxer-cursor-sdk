@@ -45,7 +45,7 @@ func TestLiveOptInReady_ReadyWhenFlagAndKey(t *testing.T) {
 
 func TestLiveOptIn_DefaultSuiteSkipsWhenNotOptedIn(t *testing.T) {
 	if ready, _ := LiveOptInReady(os.Getenv); ready {
-		t.Skip("CURSOR_SDK_LIVE=1 + CURSOR_API_KEY set; live suites are make test-cursor-sdk-live / test-cursor-sdk-live-bridge")
+		t.Skip("CURSOR_SDK_LIVE=1 + CURSOR_API_KEY set; live suites are scripts/test-cursor-sdk-live and scripts/test-cursor-sdk-live-bridge")
 	}
 	ready, reason := LiveOptInReady(os.Getenv)
 	require.False(t, ready)

@@ -1,8 +1,8 @@
 # lip-cursor-sdk-bridge
 
-Plugin-owned Node companion for the Go-LIP `cursorsdk` backend.
+Plugin-owned Node companion for this repository's `cursorsdk` backend plugin.
 
-Operator documentation: Go-LIP [`docs/cursor-sdk-backend.md`](https://github.com/matdev83/go-llm-interactive-proxy/blob/main/docs/cursor-sdk-backend.md).
+Operator documentation: [`docs/installation.md`](../docs/installation.md) in this repository.
 
 ## Pins
 
@@ -27,8 +27,10 @@ scripts/test-cursor-sdk-live-bridge.sh   # opt-in Go→Node lifecycle (-tags=cur
 pwsh -NoProfile -File scripts/test-cursor-sdk-live-bridge.ps1   # Windows equivalent
 ```
 
-The platform, live SDK scenario, and ACP-versus-SDK comparison smoke tooling still runs from the Go-LIP
-host repository; it moves here with the rest of the test ownership during the cutover.
+The platform, live SDK scenario, and ACP-versus-SDK comparison smoke tooling lives here
+too, under `scripts/test-cursor-sdk-*`. This repository owns its verification and
+needs no sibling checkout; retiring the original host-side tooling is a later cutover task. The Go
+side of the certification is recorded in [`docs/certification.md`](../docs/certification.md).
 
 ## Commands
 
