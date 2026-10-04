@@ -18,6 +18,16 @@ import (
 
 const bridgeImplVersion = "go-cursorsdk/0.1.0"
 
+// bridgeObservationGrace bounds how long the connector waits for a lifecycle
+// fact that is already true when the wait starts: the stderr reader finishing
+// after the child closed its end of the pipe, and the process owner stamping the
+// exit that closed it. It is a fraction of the reap budget it sits inside, but it
+// is deliberately not below every deadline in this file - minCancelTimeout is half
+// of it - so a call that lost a frame write stops waiting when its own context is
+// done, and the process owner, which has no caller context, spends only this on
+// the generation it owns.
+const bridgeObservationGrace = 250 * time.Millisecond
+
 type BridgeInfo struct {
 	SchemaVersion    int
 	ImplVersion      string
@@ -85,8 +95,10 @@ type bridgeProcess struct {
 	pending     map[string]*pendingCall
 	runs        map[string]*runSub
 	stderrBuf   []byte
+	stderrDone  chan struct{}
 	waitDone    chan struct{}
 	waitErr     error
+	exitFault   *BridgeFault
 	startFlight *startFlight
 	writeMu     sync.Mutex
 	closed      atomic.Bool
@@ -233,16 +245,19 @@ func (b *bridgeProcess) startAndHandshake(ctx context.Context) (BridgeInfo, erro
 	b.proc = proc
 	b.identity = b.inspector.capture(proc, argv[0])
 	b.waitDone = make(chan struct{})
+	b.stderrDone = make(chan struct{})
 	b.waitErr = nil
+	b.exitFault = nil
 	b.stderrBuf = nil
 	b.state = bridgeIdle
 	identity := b.identity
 	done := b.waitDone
+	stderrDone := b.stderrDone
 	b.mu.Unlock()
 
 	go b.readStdout(proc, gen)
-	go b.readStderr(proc, gen)
-	go b.waitProc(proc, gen, done)
+	go b.readStderr(proc, gen, stderrDone)
+	go b.waitProc(proc, gen, done, stderrDone)
 
 	frame, err := b.callOnProc(ctx, proc, gen, protocol.MethodInitialize, mustJSON(protocol.InitializeParams{
 		ImplVersion: bridgeImplVersion,
@@ -362,7 +377,16 @@ func (b *bridgeProcess) callOnProc(ctx context.Context, proc Process, gen int64,
 	ch := make(chan callResult, 1)
 	b.mu.Lock()
 	if b.gen != gen || b.proc != proc || b.state == bridgeClosed || b.state == bridgeFailed {
+		// The bridge can die before the handshake reaches it, so a generation that
+		// already has its owner's exit fault reports that fault rather than a
+		// generation fence the caller cannot act on. The fault never crosses a
+		// generation boundary: a call that lost its generation gets nothing from
+		// the one that replaced it.
+		terminal := b.terminalFaultLocked(gen)
 		b.mu.Unlock()
+		if terminal != nil {
+			return nil, terminal
+		}
 		return nil, errors.New("cursorsdk: bridge generation invalid")
 	}
 	if b.state == bridgeClosing && method != protocol.MethodBridgeShutdown {
@@ -380,10 +404,7 @@ func (b *bridgeProcess) callOnProc(ctx context.Context, proc Process, gen int64,
 		Params:        params,
 	}
 	if err := b.writeFrame(proc, gen, frame); err != nil {
-		b.mu.Lock()
-		delete(b.pending, id)
-		b.mu.Unlock()
-		return nil, err
+		return nil, b.writeFailureResult(ctx, id, ch, err)
 	}
 
 	select {
@@ -408,6 +429,52 @@ func (b *bridgeProcess) writeFrame(proc Process, gen int64, frame *protocol.Fram
 	stdin := proc.Stdin()
 	b.mu.Unlock()
 	return protocol.WriteFrame(stdin, frame)
+}
+
+// writeFailureResult decides what a frame write that never reached the bridge
+// reports. A write fails like that only because the bridge is already gone - its
+// stdin pipe reports a broken pipe, or the owner has already retired the
+// generation - and that pipe error names neither the exit status nor the
+// diagnostic the bridge wrote on its way out. The process owner owns that
+// terminal fault, so this call stays registered and takes the owner's decision
+// when there is one; a bridge that is still alive keeps the write error, because
+// reporting it as an exit would name a lifecycle event that never happened.
+//
+// The caller's context ends the wait with the caller's own answer, the same one a
+// frame that was written and never answered gets: the observation is bounded by
+// bridgeObservationGrace for a caller with no deadline of its own, never past one.
+func (b *bridgeProcess) writeFailureResult(ctx context.Context, id string, ch chan callResult, writeErr error) error {
+	timer := time.NewTimer(bridgeObservationGrace)
+	defer timer.Stop()
+	var terminal error
+	select {
+	case res := <-ch:
+		// Only the owner's terminal error replaces the write error. A frame that
+		// arrived despite the failed write is not a reason to report success.
+		terminal = res.err
+	case <-ctx.Done():
+		terminal = ctx.Err()
+	case <-timer.C:
+	}
+	b.mu.Lock()
+	delete(b.pending, id)
+	b.mu.Unlock()
+	if terminal != nil {
+		return terminal
+	}
+	return writeErr
+}
+
+// terminalFaultLocked returns the exit fault the process owner already stamped
+// for gen, or nil when there is none to report. Only the owner writes it, so
+// every caller of a dead generation reports the same fault instead of one derived
+// from when it happened to look, and a generation the owner failed without a
+// process exit - a rejected handshake, for one - has no fault here at all.
+func (b *bridgeProcess) terminalFaultLocked(gen int64) error {
+	if b.gen != gen || b.exitFault == nil {
+		return nil
+	}
+	return b.exitFault
 }
 
 func (b *bridgeProcess) SubscribeRun(runID string) (<-chan *protocol.Frame, func(), func() error) {
@@ -706,7 +773,10 @@ func (b *bridgeProcess) routeFrame(gen int64, f *protocol.Frame) {
 	}
 }
 
-func (b *bridgeProcess) readStderr(proc Process, gen int64) {
+func (b *bridgeProcess) readStderr(proc Process, gen int64, done chan struct{}) {
+	if done != nil {
+		defer close(done)
+	}
 	buf := make([]byte, 4096)
 	for {
 		n, err := proc.Stderr().Read(buf)
@@ -726,8 +796,24 @@ func (b *bridgeProcess) readStderr(proc Process, gen int64) {
 	}
 }
 
-func (b *bridgeProcess) waitProc(proc Process, gen int64, done chan struct{}) {
+// waitProc is the single owner of the process handle of the generation it was
+// installed for: it is the only caller of Wait on that handle, it stamps that
+// generation's terminal fault exactly once, and it closes done last, so every
+// waiter on that generation observes a settled fault. A process no generation
+// owns is not waited for here - the path that created it waits and reaps it.
+//
+// The retained stderr is drained before that fault is stamped, and it is drained
+// before the child is waited on because exec.Cmd.Wait closes the parent's pipe
+// read ends. A bridge that fails a startup precondition - a missing operator
+// prerequisite, for one - writes its whole diagnostic and exits inside the
+// handshake, and that diagnostic is the only actionable text the failure has, so
+// stamping the fault without joining the reader reports a bare exit status and
+// drops the remedy. The join is bounded: a descendant that outlives the child and
+// keeps the pipe open must not hold the reap.
+func (b *bridgeProcess) waitProc(proc Process, gen int64, done, stderrDone chan struct{}) {
+	b.awaitStderrDrain(stderrDone)
 	err := proc.Wait()
+	b.awaitStderrDrain(stderrDone)
 	b.mu.Lock()
 	diag := ""
 	if b.gen == gen {
@@ -741,6 +827,7 @@ func (b *bridgeProcess) waitProc(proc Process, gen int64, done chan struct{}) {
 	notify := false
 	if b.gen == gen {
 		b.waitErr = err
+		b.exitFault = exitFault
 		if b.proc == proc {
 			b.proc = nil
 		}
@@ -763,6 +850,21 @@ func (b *bridgeProcess) waitProc(proc Process, gen int64, done chan struct{}) {
 		default:
 			close(done)
 		}
+	}
+}
+
+// awaitStderrDrain waits for the stderr reader to stop appending, bounded. EOF
+// is the reader's proof that the child wrote everything it had, so a drain that
+// completes before the fault is stamped keeps that diagnostic whole.
+func (b *bridgeProcess) awaitStderrDrain(stderrDone chan struct{}) {
+	if stderrDone == nil {
+		return
+	}
+	timer := time.NewTimer(bridgeObservationGrace)
+	defer timer.Stop()
+	select {
+	case <-stderrDone:
+	case <-timer.C:
 	}
 }
 
