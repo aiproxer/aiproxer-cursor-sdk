@@ -234,6 +234,36 @@ func TestProvisionCommand_IsTheOneOperatorCommand(t *testing.T) {
 	}
 }
 
+// TestProvisionInvocation_IsThePlatformIndependentHalfOfTheCommand pins the half of the
+// provisioning command that survives diagnostic redaction.
+//
+// A run-time diagnostic carries the command, but the directory in front of it is not
+// reliable evidence: the POSIX sanitiser replaces an absolute path with a placeholder and
+// the Windows one does not. What is printed verbatim on both is the npm invocation, so that
+// is what a caller can assert against - and it has to stay exactly the tail of
+// ProvisionCommand, or the two would drift apart and a diagnostic would stop matching the
+// command the operator was told to run.
+func TestProvisionInvocation_IsThePlatformIndependentHalfOfTheCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, goos := range []string{"linux", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+
+			a, err := packagelayout.ForPlatform(goos, "amd64")
+			require.NoError(t, err)
+
+			invocation := a.ProvisionInvocation()
+			require.True(t, strings.HasSuffix(a.ProvisionCommand(""), " && "+invocation),
+				"the invocation has to be exactly what ProvisionCommand runs after changing directory")
+			require.True(t, strings.HasSuffix(a.ProvisionCommand("/opt/lip/plugins/cursorsdk"), " && "+invocation),
+				"resolving an install root must not change the invocation")
+			require.NotContains(t, invocation, " /",
+				"the invocation must stay relative, so a diagnostic sanitiser cannot redact the part that matters")
+		})
+	}
+}
+
 // TestArchive_ExposesThePathsAPackagerMustStage pins the layout rows a packaging
 // script cannot restate. The scripts have to copy the bridge entry out of the source
 // tree, stage the lockfile that pins the SDK, and stage the private runtime's own

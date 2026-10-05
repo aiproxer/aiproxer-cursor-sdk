@@ -350,6 +350,14 @@ explicitly when running from a source checkout, for example
 `bridge_executable: lip-cursor-sdk-bridge` resolved through `PATH` after building the bridge in
 `bridge-node/`.
 
+**Measured against a real host: set it explicitly on Windows.** Go-LIP v0.1.0 verifies the
+outer executable's digest and then launches a private staged copy of it, so on
+windows/amd64 the default resolution above finds no `private/` tree beside the running
+executable. The failure is explicit and names this field as the remedy. The default was
+measured working on linux/amd64; the per-platform values are in
+[`docs/installation.md`](docs/installation.md#running-under-a-go-lip-host), and the
+measurement is in [`docs/certification.md`](docs/certification.md).
+
 ## Private bridge launcher
 
 `cmd/lip-cursor-sdk-bridge/` builds the plugin-private launcher executable that the packaged
