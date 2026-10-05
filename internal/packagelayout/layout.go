@@ -335,6 +335,21 @@ func (a Archive) ProvisionCommand(installRoot string) string {
 	return "cd " + dir + " && " + runtime + " " + npmCLI + " " + provisionArgs
 }
 
+// ProvisionInvocation is the npm invocation ProvisionCommand runs, without the directory
+// it changes into.
+//
+// A diagnostic carries this verbatim, while the directory in front of it is platform-
+// redacted: the POSIX sanitiser replaces an absolute path with a placeholder and the Windows
+// one does not. Splitting the command here is what lets a caller assert that the npm part
+// is the platform's real one on either platform, rather than asserting a prefix that only
+// one of them prints.
+func (a Archive) ProvisionInvocation() string {
+	fromBridgeDir := "../" + runtimeDirName + "/"
+	runtime := fromBridgeDir + PrivateRuntimeName + a.ExeSuffix()
+	npmCLI := fromBridgeDir + a.PrivateRuntimeNPMRel() + "/" + npmBinDirName + "/" + npmCLIName
+	return runtime + " " + npmCLI + " " + provisionArgs
+}
+
 // PrivateRuntimePath is the private Node runtime executable.
 func (a Archive) PrivateRuntimePath() string {
 	return a.PrivateRuntimeDirPath() + "/" + PrivateRuntimeName + a.ExeSuffix()

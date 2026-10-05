@@ -105,6 +105,102 @@ evidence, not a production claim.
 5. Provision the SDK (next section). The plugin is inert until you do: a configured
    instance fails with the provisioning command rather than serving anything.
 
+## Running under a Go-LIP host
+
+Install the plugin directory as a discovery path in the host configuration. Each
+`paths` entry is one **install directory** — the one that contains
+`plugin.backendplugin.json` — not a parent directory holding several of them:
+
+```yaml
+plugins:
+  backend_discovery:
+    enabled: true
+    paths:
+      - /opt/go-lip/plugins/cursorsdk      # the directory holding plugin.backendplugin.json
+    strict: true
+    development_mode: false
+```
+
+Then point the host at it:
+
+```sh
+lipstd --config ./config/config.yaml check-config
+lipstd --config ./config/config.yaml inspect      # the plugin is reported as `discovered`
+lipstd --config ./config/config.yaml doctor --instance <your-instance-id>
+```
+
+An installed plugin is reported without being started, so `inspect` is the command that
+answers "is my plugin trusted and recognised". Nothing starts until you configure and enable
+an instance.
+
+### Set `bridge_executable` explicitly on Windows
+
+**Measured against Go-LIP v0.1.0: the packaged default works on `linux/amd64` and does not
+work on `windows/amd64`. Set the field explicitly on Windows; it is optional on Linux.**
+
+| Platform | Packaged default | Do you need `bridge_executable`? |
+| --- | --- | --- |
+| `linux/amd64` | measured working | no |
+| `windows/amd64` | measured **not** working | **yes** |
+
+On Windows the host verifies the outer executable's digest, copies it into a private
+digest-addressed staging directory, and launches those staged bytes. The connector then
+looks for its companion at `../private/bridge/lip-cursor-sdk-bridge[.exe]` relative to the
+*running* executable, which is now the staging copy — and there is no `private/` tree beside
+it. The failure is explicit and names this very setting:
+
+```text
+cursorsdk: private bridge launcher "...\private\bridge\lip-cursor-sdk-bridge.exe" not found
+(expected ../private/bridge/lip-cursor-sdk-bridge.exe next to the installed plugin
+executable; reinstall the Cursor plugin package or set bridge_executable to a direct bridge
+binary)
+```
+
+On Linux the host binds the verified executable by descriptor and execs it, so the running
+executable is the one in your install root and the default resolves on its own.
+
+Set the field either way if you prefer not to depend on that difference — it costs nothing
+and it is the same field on both platforms:
+
+```yaml
+- kind: cursorsdk
+  id: cursor-sdk
+  enabled: true
+  config:
+    bridge_executable: "C:/go-lip/plugins/cursorsdk/private/bridge/lip-cursor-sdk-bridge.exe"  # windows/amd64
+    # bridge_executable: "/opt/go-lip/plugins/cursorsdk/private/bridge/lip-cursor-sdk-bridge"  # linux/amd64
+```
+
+| Platform | `bridge_executable` |
+| --- | --- |
+| `windows/amd64` | `<plugin-root>/private/bridge/lip-cursor-sdk-bridge.exe` |
+| `linux/amd64` | `<plugin-root>/private/bridge/lip-cursor-sdk-bridge` |
+
+An absolute path is the right spelling: the plugin resolves a `PATH` name too, but a path
+avoids depending on the host's environment. The launcher is a direct executable, not a shell
+or npm wrapper, so it passes the connector's own validation unchanged — the same field, and
+the same rules, that a source checkout uses.
+
+This was exercised end to end against the released host on both platforms: the packaged
+launcher started the packaged private Node runtime, that runtime loaded the
+operator-provisioned `@cursor/sdk 1.0.23`, and the plugin's own diagnostics proved each step.
+The measurement, and how it was made, is in
+[`docs/certification.md`](certification.md#requirement-3123333445-61--real-host-install-trust-and-optional-activation).
+
+### Access mode
+
+This plugin declares `access_scope: local_only` and `execution_class: agent_runtime`, and
+its kind is not in the host's multi-user approval registry. Under
+`access.mode: multi_user` it is therefore denied at composition, before it starts:
+
+```text
+bootstrap failed: runtimebundle: local-only backend is not allowed when access.mode is
+multi_user (instance "<id>" factory "cursorsdk")
+```
+
+That is the correct and intended behaviour for a local-only agent runtime. Single-user
+loopback deployments are unaffected.
+
 ## Provisioning the Cursor SDK
 
 Provisioning resolves `@cursor/sdk` at the pinned version from the shipped lockfile,
