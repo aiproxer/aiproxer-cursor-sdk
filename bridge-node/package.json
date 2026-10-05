@@ -26,11 +26,11 @@
     "live-scenarios": "tsx src/liveScenarios.ts"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.23"
+    "@cursor/sdk": "1.0.35"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
-    "tsx": "^4.20.3",
+    "tsx": "^4.23.15",
     "typescript": "^5.8.3"
   },
   "overrides": {
