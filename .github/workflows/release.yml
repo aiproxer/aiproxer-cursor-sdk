@@ -492,9 +492,88 @@ jobs:
           $env:LIP_HOST_CERT_PLUGIN_ROOT = $env:INSTALL_ROOT
           $env:LIP_HOST_CERT_PLUGIN_ARCHIVE = $env:PLUGIN_ARCHIVE
           $env:LIP_HOST_CERT_PLUGIN_ARCHIVE_SHA256 = $env:PLUGIN_ARCHIVE_SHA256
-          go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 |
-            Tee-Object -FilePath "host-cert-$env:RELEASE_SLUG.txt"
-          if ($LASTEXITCODE -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM" }
+          if ($env:RELEASE_PLATFORM -eq 'windows/amd64') {
+            # Windows runners are admin with UAC disabled; the released host
+            # refuses an administrative request plane (token.IsMember). Run the
+            # gate under a LUA restricted token so Go children inherit it. Same
+            # pattern as host tools/taskrunner (CreateRestrictedToken LUA_TOKEN),
+            # embedded here because the tagged checkout carries no new files.
+            # No host change or weakened check; 60m/90m budgets and the
+            # bridge_executable contract are unchanged.
+            $launcherLines = @(
+              'using System;',
+              'using System.Runtime.InteropServices;',
+              'using System.Security.Principal;',
+              'public static class RestrictedHostCertLauncher {',
+              '  const uint TOKEN_DUPLICATE = 0x0002;',
+              '  const uint TOKEN_ASSIGN_PRIMARY = 0x0001;',
+              '  const uint TOKEN_QUERY = 0x0008;',
+              '  const uint TOKEN_ADJUST_DEFAULT = 0x0080;',
+              '  const uint LUA_TOKEN = 0x4;',
+              '  const uint INFINITE = 0xFFFFFFFF;',
+              '  const uint WAIT_OBJECT_0 = 0;',
+              '  const int STARTF_USESTDHANDLES = 0x100;',
+              '  [StructLayout(LayoutKind.Sequential)]',
+              '  struct STARTUPINFO { public int cb; public string lpReserved; public string lpDesktop; public string lpTitle; public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError; }',
+              '  [StructLayout(LayoutKind.Sequential)]',
+              '  struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }',
+              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr h, uint acc, out IntPtr tok);',
+              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr h, uint flags, uint nDisable, IntPtr dDisable, uint nDelete, IntPtr dDelete, uint nPriv, IntPtr dPriv, out IntPtr newTok);',
+              '  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUser(IntPtr token, string app, string cmd, IntPtr secAttr, IntPtr thrAttr, bool inherit, uint flags, IntPtr env, string curDir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);',
+              '  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();',
+              '  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);',
+              '  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);',
+              '  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);',
+              '  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int n);',
+              '  public static int Launch(string commandLine, string curDir) {',
+              '    var curPr = new WindowsPrincipal(WindowsIdentity.GetCurrent());',
+              '    Console.WriteLine("current-IsInRole-Admin=" + curPr.IsInRole(WindowsBuiltInRole.Administrator));',
+              '    IntPtr cur2; if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE|TOKEN_ASSIGN_PRIMARY|TOKEN_QUERY|TOKEN_ADJUST_DEFAULT, out cur2)) throw new Exception("open process token " + Marshal.GetLastWin32Error());',
+              '    IntPtr restricted = IntPtr.Zero;',
+              '    try {',
+              '      if (!CreateRestrictedToken(cur2, LUA_TOKEN, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted)) throw new Exception("create restricted token " + Marshal.GetLastWin32Error());',
+              '      using (var ri = new WindowsIdentity(restricted)) {',
+              '        bool isAdmin = new WindowsPrincipal(ri).IsInRole(WindowsBuiltInRole.Administrator);',
+              '        Console.WriteLine("restricted-IsInRole-Admin=" + isAdmin);',
+              '        if (isAdmin) throw new Exception("restricted token is still an administrative member; refusing to run the gate");',
+              '      }',
+              '      var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES;',
+              '      si.hStdInput = GetStdHandle(-10); si.hStdOutput = GetStdHandle(-11); si.hStdError = GetStdHandle(-12);',
+              '      PROCESS_INFORMATION pi;',
+              '      if (!CreateProcessAsUser(restricted, null, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, curDir, ref si, out pi)) throw new Exception("create process as user " + Marshal.GetLastWin32Error());',
+              '      try {',
+              '        uint w = WaitForSingleObject(pi.hProcess, INFINITE);',
+              '        if (w != WAIT_OBJECT_0) throw new Exception("wait for gate " + w);',
+              '        uint code; if (!GetExitCodeProcess(pi.hProcess, out code)) throw new Exception("gate exit code " + Marshal.GetLastWin32Error());',
+              '        Console.WriteLine("gate-exit=" + code);',
+              '        return (int)code;',
+              '      } finally { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }',
+              '    } finally { if (restricted != IntPtr.Zero) CloseHandle(restricted); CloseHandle(cur2); }',
+              '  }',
+              '}'
+            )
+            Add-Type -TypeDefinition ($launcherLines -join "`n") -Language CSharp
+            # Probe the actual launcher before the 60m gate: the child must print
+            # restricted:false, the marker, and host --help, then exit 3. Remote
+            # logs carry parent admin plus restricted:false for inspection.
+            $env:RESTRICTED_PROBE_MARKER = 'restricted-probe-ok'
+            $probeInner = '$isAdmin = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); Write-Output (''restricted:'' + $isAdmin.ToString().ToLower()); Write-Output $env:RESTRICTED_PROBE_MARKER; & ($env:HOST_BINARY_PATH) --help | Select-Object -First 5; exit 3'
+            $probeCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + $probeInner + '"'
+            $probeExit = [RestrictedHostCertLauncher]::Launch($probeCmd, (Get-Location).Path)
+            if ($probeExit -ne 3) { throw "restricted child probe failed on $env:RELEASE_PLATFORM (exit $probeExit)" }
+            # Full gate under the same token: env/handles inherited, wait/reap
+            # with exact exit, all handles closed. No extra job object; the
+            # runner contains the step and the host owns its tree.
+            $inner = 'go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 | Tee-Object -FilePath (''host-cert-'' + $env:RELEASE_SLUG + ''.txt''); exit $LASTEXITCODE'
+            $cmdLine = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
+            Write-Host "launching host-cert gate under restricted token"
+            $restrictedExit = [RestrictedHostCertLauncher]::Launch($cmdLine, (Get-Location).Path)
+            if ($restrictedExit -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM (restricted exit $restrictedExit)" }
+          } else {
+            go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 |
+              Tee-Object -FilePath "host-cert-$env:RELEASE_SLUG.txt"
+            if ($LASTEXITCODE -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM" }
+          }
 
       - name: Collect what this leg publishes
         run: |
