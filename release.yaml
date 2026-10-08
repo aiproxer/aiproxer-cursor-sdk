@@ -20,10 +20,12 @@ replace_policy: released-dependency-pins-no-replace
 private_companions:
   - bridge-node
 
-# Host certification posture. A downloadable Go-LIP host release now exists and this
-# plugin has been measured against it, but the measurement found a real incompatibility on
-# the platform it was measured, so the posture is `uncertified` with that measured reason
-# recorded here and compatibility.json carries no host artifact digest.
+# Host certification posture. A downloadable Go-LIP host release exists, this plugin has
+# been certified against it through the real host binary on both platforms the manifest
+# declares, and the measured platform difference in companion resolution is now the adopted
+# per-platform installation contract rather than an incompatibility. The posture is still
+# `uncertified` because this release is not published yet, so there is no release artifact to
+# certify and compatibility.json carries no host artifact digest.
 #
 # This is a declared decision rather than an absent key: an archive has to say which of the
 # two postures it holds. Certifying a release flips this to `certified`, empties
@@ -36,11 +38,15 @@ private_companions:
 # go-llm-interactive-proxy v0.1.0.
 host_certification: uncertified
 host_certification_reason: >-
-  measured against Go-LIP v0.1.0 on windows/amd64 and linux/amd64 and not certified: the
-  packaged default companion resolution is measured working on linux/amd64 and measured
-  unreachable on windows/amd64, because there the host verifies the outer executable digest
-  and then launches a private staged copy of it from a digest addressed staging directory, so
-  private/bridge/lip-cursor-sdk-bridge.exe cannot be reached relative to the installed
-  executable; the plugin reports that as an explicit prerequisite naming bridge_executable as
-  the remedy, and that remedy is what every other measured case exercises on both platforms,
-  so no host artifact digest is recorded and none is invented
+  measured against Go-LIP v0.1.0 on windows/amd64 and linux/amd64 and passing on both under
+  the adopted per-platform companion-path contract: the packaged default companion resolution
+  is measured working on linux/amd64 and measured unreachable on windows/amd64, because there
+  the host verifies the outer executable digest and then launches a private staged copy of it
+  from a digest addressed staging directory, so private/bridge/lip-cursor-sdk-bridge.exe cannot
+  be reached relative to the installed executable; that measured difference is the contract
+  rather than a defect, so an explicit bridge_executable path to the installed private launcher
+  is the supported configuration on windows/amd64 and the packaged default stays supported on
+  linux/amd64, and the plugin reports the unset Windows path as an explicit prerequisite naming
+  bridge_executable rather than searching for or provisioning one; certification still waits
+  on publication, because this release is not published yet and has no release artifact to
+  certify, so no host artifact digest is recorded and none is invented

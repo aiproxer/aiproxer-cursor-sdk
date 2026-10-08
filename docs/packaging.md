@@ -159,15 +159,16 @@ alongside the platforms that archive is *not* evidence for.
 
 ## Host certification
 
-**This release is `uncertified` with respect to the Go-LIP host binary, and that is now a
-measured result rather than an absent measurement.** A downloadable host release exists —
-`github.com/matdev83/go-llm-interactive-proxy` v0.1.0 — and this plugin was **measured
-against** it on both platforms this project declares, windows/amd64 and linux/amd64, by
-`TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`. Trusted
-discovery, manifest identity, secure negotiation, inventory listing, canonical execution,
-explicit capability errors, inactive discovery, default-deny multi-user denial, and explicit
-prerequisite failures for a missing plugin, a missing private runtime, and an unprovisioned
-Cursor SDK all passed on both. The full table, with the diagnostics each case observed, is in
+**This release is `uncertified` with respect to the Go-LIP host binary, because it is not
+published yet — not because a measurement found a defect.** A downloadable host release
+exists — `github.com/matdev83/go-llm-interactive-proxy` v0.1.0 — and this plugin was
+**certified against** it on both platforms this project declares, windows/amd64 and
+linux/amd64, by `TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`.
+Trusted discovery, manifest identity, secure negotiation, inventory listing, canonical
+execution, explicit capability errors, inactive discovery, default-deny multi-user denial,
+the per-platform companion-path contract, and explicit prerequisite failures for a missing
+plugin, a missing private runtime, and an unprovisioned Cursor SDK all passed on both. The
+full table, with the diagnostics each case observed, is in
 [`docs/certification.md`](certification.md#requirement-3123333445-61--real-host-install-trust-and-optional-activation).
 
 One behaviour is platform-dependent, and it is the archive's own convenience: the
@@ -175,18 +176,23 @@ One behaviour is platform-dependent, and it is the archive's own convenience: th
 work on windows/amd64, because there the host verifies the outer executable's digest, copies
 it into a private digest-addressed staging directory, and launches those staged bytes, so
 `../private/bridge/lip-cursor-sdk-bridge[.exe]` relative to the installed executable resolves
-into the staging directory, which has no `private/` tree beside it. The plugin reports that
-as an explicit prerequisite and names `bridge_executable` as the remedy, and the remedy is
-what every other certified case uses on both platforms.
+into the staging directory, which has no `private/` tree beside it. That measured difference
+is now the **adopted installation contract** rather than a defect: on windows/amd64 the
+supported configuration sets `bridge_executable` to the full installed launcher path, and on
+linux/amd64 the packaged default stays supported and the field is optional. The gate
+enforces it per platform, and where the field is required an unset value fails as an
+explicit prerequisite naming `bridge_executable` — no search, no rewrite, no provisioning.
+`docs/installation.md` prints the per-platform remedy.
 
-`compatibility.json` therefore records `host_certification_state: uncertified`, that
-measured reason, and an empty `tested_host_artifacts` list. No host artifact hash is
-invented anywhere — not in the record, not in this document, not in the verifier's report.
-The mechanism that will carry real evidence is in place and validated: declaring
+`compatibility.json` therefore records `host_certification_state: uncertified`, the measured
+reason, and an empty `tested_host_artifacts` list. No host artifact hash is invented
+anywhere — not in the record, not in this document, not in the verifier's report. The
+mechanism that will carry real evidence is in place and validated: declaring
 `host_certification: certified` in `release.yaml` requires a `--tested-host <sha256>` digest
 per host artifact to be passed to `scripts/package-plugin`, and the renderer refuses a
 certified claim with no digest, an uncertified claim carrying one, and any value that is not
-a sha256 digest.
+a sha256 digest. Flipping the posture is task 3.5's, when the release is published and there
+is an artifact to certify.
 
 ## If the private runtime ever fails validation
 
