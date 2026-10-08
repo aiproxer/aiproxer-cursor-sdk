@@ -160,22 +160,47 @@ type hostCertCompanionContract struct {
 	packagedDefaultSupported bool
 }
 
-// hostCertCompanionContracts is the per-platform contract the gate enforces.
+// hostCertCompanionContracts is the per-platform contract the gate enforces, read from the
+// release metadata this repository publishes rather than from a table held here.
 //
 // Measured against Go-LIP v0.1.0, the host binds the verified install-root executable by
 // descriptor and execs it on linux/amd64, so `os.Executable()` inside the plugin is the
-// installed path and the packaged default resolves with no operator action. On
-// windows/amd64 the host verifies the outer executable's digest, copies it into a
-// digest-addressed staging directory, and launches those staged bytes, so a default
-// resolved relative to the running executable lands in staging with no `private/` tree
-// beside it. The contract records that measured difference as the supported installation
-// procedure per platform, and it is keyed by the same platform strings the manifest
-// declares, so a platform without a written contract cannot be certified at all.
-func hostCertCompanionContracts() map[string]hostCertCompanionContract {
-	return map[string]hostCertCompanionContract{
-		"windows/amd64": {explicitCompanion: hostCertExplicitRequired, packagedDefaultSupported: false},
-		"linux/amd64":   {explicitCompanion: hostCertExplicitOptional, packagedDefaultSupported: true},
+// installed path and the packaged default resolves with no operator action. On windows/amd64
+// the host verifies the outer executable's digest, copies it into a digest-addressed staging
+// directory, and launches those staged bytes, so a default resolved relative to the running
+// executable lands in staging with no `private/` tree beside it.
+//
+// The measurement is the gate's; the contract that follows from it is a decision, and a
+// decision recorded once. It used to be a map in this file as well, which meant the record
+// inside every archive and the table enforcing it could disagree with nothing failing. Both
+// now read `release.yaml`, which the renderer validates per platform, so adopting a different
+// contract for a platform is one edit in one reviewed place.
+func hostCertCompanionContracts(tb testing.TB) map[string]hostCertCompanionContract {
+	tb.Helper()
+
+	contracts := map[string]hostCertCompanionContract{}
+	for _, artifact := range readCertifiedReleaseMetadata(tb).Artifacts {
+		contract, err := packagelayout.ParseCompanionContract(
+			packagelayout.CompanionContract(artifact.CompanionContract))
+		require.NoError(tb, err,
+			"release.yaml declares companion_contract %q for %s; the gate can only enforce a contract from the "+
+				"declared vocabulary", artifact.CompanionContract, artifact.Platform)
+		contracts[artifact.Platform] = hostCertCompanionContract{
+			explicitCompanion:        explicitCompanionOf(contract),
+			packagedDefaultSupported: contract.PackagedDefaultSupported(),
+		}
 	}
+	require.NotEmpty(tb, contracts,
+		"release.yaml declares no certified host artifacts, so there is no installation contract to enforce")
+	return contracts
+}
+
+// explicitCompanionOf maps a declared contract onto the gate's two answers.
+func explicitCompanionOf(contract packagelayout.CompanionContract) hostCertExplicitCompanion {
+	if contract.BridgeExecutableRequired() {
+		return hostCertExplicitRequired
+	}
+	return hostCertExplicitOptional
 }
 
 // hostCertCurrentContract is the contract this host's platform has to satisfy.
@@ -186,7 +211,7 @@ func hostCertCompanionContracts() map[string]hostCertCompanionContract {
 func hostCertCurrentContract(tb testing.TB) hostCertCompanionContract {
 	tb.Helper()
 
-	contract, ok := hostCertCompanionContracts()[hostCertPlatformLabel()]
+	contract, ok := hostCertCompanionContracts(tb)[hostCertPlatformLabel()]
 	require.True(tb, ok,
 		"%s is not a platform the companion-path contract covers; the gate cannot certify a platform "+
 			"whose supported configuration nobody wrote down", hostCertPlatformLabel())

@@ -32,6 +32,9 @@ type provisioningTreeOptions struct {
 	// sourceState is the recorded source cleanliness: "true", "false", or "" for a record
 	// that states none at all. The last one is the case a report must not read as clean.
 	sourceState string
+	// certified records the host certification as certified, with one platform entry per
+	// declared platform, which is what a published archive carries.
+	certified bool
 }
 
 // The synthetic record's own statements, named so a report assertion can quote the exact
@@ -40,7 +43,41 @@ const (
 	fixtureCertificationReason = "no downloadable host binary release exists to certify this tree against"
 	fixtureSourceRevision      = "0123456789abcdef0123456789abcdef01234567"
 	fixtureRedistribution      = "@cursor/sdk is not redistributed by this archive; the operator provisions it themselves"
+	fixtureHostProject         = "github.com/matdev83/go-llm-interactive-proxy"
+	fixtureHostVersion         = "v0.1.0"
+	fixtureHostChecksums       = "checksums.txt"
 )
+
+// fixtureCertifiedPlatform is one platform's certified host artifact in the synthetic
+// record, spelled the way the renderer spells it so a report assertion is about the record an
+// operator receives.
+type fixtureCertifiedPlatform struct {
+	platform string
+	asset    string
+	binary   string
+	digest   string
+	contract packagelayout.CompanionContract
+	launcher string
+}
+
+// fixtureCertifiedPlatforms is the certified evidence the synthetic record carries: one
+// platform per declared platform, with the companion contracts this project adopted. The
+// digests are synthetic and clearly so; what is under test is that both verifiers report
+// each platform's own evidence rather than collapsing the list into one answer.
+func fixtureCertifiedPlatforms() []fixtureCertifiedPlatform {
+	return []fixtureCertifiedPlatform{
+		{
+			platform: "linux/amd64", asset: "host_0.1.0_linux_amd64.tar.gz", binary: "lipstd",
+			digest: strings.Repeat("ce", 32), contract: packagelayout.CompanionPackagedDefault,
+			launcher: "private/bridge/lip-cursor-sdk-bridge",
+		},
+		{
+			platform: "windows/amd64", asset: "host_0.1.0_windows_amd64.zip", binary: "lipstd.exe",
+			digest: strings.Repeat("6a", 32), contract: packagelayout.CompanionExplicitBridgeExecutable,
+			launcher: "private/bridge/lip-cursor-sdk-bridge.exe",
+		},
+	}
+}
 
 // TestPackageArchive_VerifierRejectsAShippedArchiveCarryingTheSDK keeps the archive
 // content rule checkable rather than assumed.
@@ -341,6 +378,68 @@ func TestPackageArchive_VerifierNamesAMissingCertificationPostureWithoutEchoingT
 	}
 }
 
+// TestPackageArchive_VerifierReportsTheCertifiedEvidencePerPlatform keeps the certified
+// record per platform in the report an operator reads.
+//
+// A flat list of two digests cannot be checked against anything: nothing says which digest
+// belongs to which platform, and nothing says what a supported configuration on that platform
+// looks like. So each platform's own evidence - the host release, the asset, the binary, the
+// measured digest, and the companion contract with the packaged launcher path it points at -
+// has to be reported for that platform.
+//
+// The array-of-objects reader is the part most likely to be quietly wrong: split on the wrong
+// separator and the whole array reads as one entry whose field lookups answer with the last
+// element's values, which reports a confident, wrong platform instead of failing. This runs
+// against both verifier implementations on every platform, so that failure has somewhere to
+// happen before a release does.
+func TestPackageArchive_VerifierReportsTheCertifiedEvidencePerPlatform(t *testing.T) {
+	t.Parallel()
+
+	archive := packagelayoutArchive(t)
+
+	for _, impl := range verifierImplementations(t) {
+		t.Run(impl, func(t *testing.T) {
+			t.Parallel()
+
+			root := provisioningTree(t, archive, provisioningTreeOptions{
+				provisionedVersion: "1.0.23",
+				sourceState:        "false",
+				certified:          true,
+			})
+			report, _ := runVerifyScriptImpl(t, impl, root, nil, nil)
+
+			require.Contains(t, report,
+				"host certification: certified against the host artifacts listed below",
+				"a certified record has to say so rather than reporting the uncertified line:\n%s", report)
+
+			for _, platform := range fixtureCertifiedPlatforms() {
+				require.Contains(t, report, "certified platform "+platform.platform+": host "+fixtureHostProject+
+					" "+fixtureHostVersion+" asset "+platform.asset+" binary "+platform.binary+
+					" sha256 "+platform.digest,
+					"the report has to name %s's own host artifact and digest:\n%s", platform.platform, report)
+				require.Contains(t, report, "certified platform "+platform.platform+" companion contract: "+
+					string(platform.contract)+" (bridge_executable="+platform.launcher+")",
+					"the report has to state %s's companion contract and the packaged path it points at:\n%s",
+					platform.platform, report)
+				require.Contains(t, report, "tested host artifact sha256: "+platform.digest,
+					"every certified digest has to appear in the flat list too:\n%s", report)
+			}
+
+			// One entry per platform, not one merged entry: a reader that cannot tell the
+			// two platforms apart is the exact failure this record exists to prevent. Each
+			// platform is reported twice - the artifact and the contract - and the count
+			// below is what a merged read would break.
+			for _, platform := range fixtureCertifiedPlatforms() {
+				require.Equal(t, 1,
+					strings.Count(report, "certified platform "+platform.platform+" companion contract:"),
+					"%s has to be reported exactly once, from its own entry:\n%s", platform.platform, report)
+				require.Equal(t, 1, strings.Count(report, "certified platform "+platform.platform+": host "),
+					"%s has to be reported exactly once as a host artifact:\n%s", platform.platform, report)
+			}
+		})
+	}
+}
+
 // provisioningTree stages a minimal install tree carrying exactly what the
 // provisioning checks read: the shipped bridge manifest that pins the SDK, the shipped
 // lockfile, the release metadata that records the requirement, the license notices, and
@@ -409,13 +508,44 @@ func provisioningRecord(tb testing.TB, archive packagelayout.Archive, root strin
 		fields = append(fields, `  "source_modified": `+opts.sourceState+`,`)
 	}
 	if !opts.omitCertificationState {
+		if opts.certified {
+			fields = append(fields, `  "host_certification_state": "certified",`)
+		} else {
+			fields = append(fields,
+				`  "host_certification_state": "uncertified",`,
+				`  "host_certification_reason": "`+fixtureCertificationReason+`",`,
+			)
+		}
+	}
+	digests := "[]"
+	if opts.certified {
+		platforms := fixtureCertifiedPlatforms()
+		entries := make([]string, 0, len(platforms))
+		recorded := make([]string, 0, len(platforms))
+		for _, platform := range platforms {
+			entries = append(entries, "    {"+
+				`"platform": "`+platform.platform+`", `+
+				`"host_project": "`+fixtureHostProject+`", `+
+				`"host_version": "`+fixtureHostVersion+`", `+
+				`"host_release_asset": "`+platform.asset+`", `+
+				`"host_checksums_asset": "`+fixtureHostChecksums+`", `+
+				`"host_binary": "`+platform.binary+`", `+
+				`"host_artifact_sha256": "`+platform.digest+`", `+
+				`"companion_contract": "`+string(platform.contract)+`", `+
+				`"bridge_executable_rel": "`+platform.launcher+`"`+
+				"  }")
+			recorded = append(recorded, `"`+platform.digest+`"`)
+		}
+		slices.Sort(recorded)
 		fields = append(fields,
-			`  "host_certification_state": "uncertified",`,
-			`  "host_certification_reason": "`+fixtureCertificationReason+`",`,
+			`  "host_certification_platforms": [`,
+			strings.Join(entries, ",\n"),
+			"  ],",
 		)
+		digests = "[" + strings.Join(recorded, ", ") + "]"
 	}
 	fields = append(fields,
-		`  "tested_host_artifacts": [],`,
+		`  "tested_host_artifacts": `+digests+`,`,
 		`  "package_verification_state": "not-performed",`,
 		`  "package_verification_performed": false,`,
 		`  "package_verification_shipped_command": "scripts/verify-package.sh `+

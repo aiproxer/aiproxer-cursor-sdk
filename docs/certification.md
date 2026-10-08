@@ -43,8 +43,8 @@ platforms this project declares, by
 
 | Platform | Host binary digest | Plugin archive | Result |
 | --- | --- | --- | --- |
-| `windows/amd64` | `6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4` | assembled natively, Windows, `cursorsdk-0.1.0-windows-amd64.zip` (`3cf1e8bf02389dd21dec87a0c3d48411912f9f1479db140723f8e7b321775fff`) | 13/13 pass, packaged default **unreachable by contract** |
-| `linux/amd64` | `ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c` | assembled natively, linux/amd64, official Node 22.22.3 distribution, `cursorsdk-0.1.0-linux-amd64.tar.gz` (`fbd02587128d270253ae9de5ebbd63179b879b437056639e89c9369cb75b81e9`) | 13/13 pass, packaged default **reachable and supported** |
+| `windows/amd64` | `6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4` | assembled natively, Windows, `cursorsdk-0.1.0-windows-amd64.zip` (`3cf1e8bf02389dd21dec87a0c3d48411912f9f1479db140723f8e7b321775fff`) | 15/15 pass, packaged default **unreachable by contract** |
+| `linux/amd64` | `ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c` | assembled natively, linux/amd64, official Node 22.22.3 distribution, `cursorsdk-0.1.0-linux-amd64.tar.gz` (`fbd02587128d270253ae9de5ebbd63179b879b437056639e89c9369cb75b81e9`) | 15/15 pass, packaged default **reachable and supported** |
 
 Both install trees were provisioned by an operator step with the shipped runtime's own
 bundled npm and resolved the operator-provided **`@cursor/sdk 1.0.23`** with the pinned
@@ -54,32 +54,76 @@ node=22.22.3`. The linux archive was assembled with `scripts/package-plugin.sh -
 `node_source_kind: official-distribution` rather than a PATH fallback; the windows archive
 was assembled with `scripts/package-plugin.ps1 -NodeDist node-v22.22.3-win-x64.zip`.
 
-### What these two archives are, and what they are not
+**What "15/15" counts.** The gate runs **15 cases per platform**: 13 top-level cases, one of
+which — `the_supported_companion_path_contract_holds_on_this_platform` — runs the two
+platform-contract arms as subtests, giving 14 leaf assertions over 15 `=== RUN` lines in the
+gate's log. An earlier revision of this record said "13/13", which counted only the top-level
+cases and so dropped precisely the two arms that carry the per-platform companion evidence.
+The number here is the log's, and this paragraph exists so it cannot be re-derived wrongly
+again.
+
+### What those two archives were, and what replaced them
 
 Both were assembled natively on their own platform, in a work tree that carried the
 uncommitted changes this record is written with, and neither is a publication artifact:
 
-- **windows/amd64** — `compatibility.json` records `source_revision:
+- **windows/amd64** — `compatibility.json` recorded `source_revision:
   2915fee5a89fe7da10ad6cac8f4e9c045bf69acd` together with `source_modified: true`. The
-  revision is named; the tree behind it was not clean. Of the modified files, only
-  `release.yaml` ships (the two test files and the documents are not staged into an archive),
-  so the shipped `host_certification_reason` is this record's reason, not the committed one.
-- **linux/amd64** — `compatibility.json` records **no** `source_revision` at all, with its
-  stated reason that the staged `bin/lip-backend-cursorsdk` carries no Go VCS stamp because the
-  build ran in a linked work tree. That is weaker than the windows record, not equivalent to
-  it: the linux measurement is not bound to any revision a reader can name.
+  revision was named; the tree behind it was not clean.
+- **linux/amd64** — `compatibility.json` recorded **no** `source_revision` at all, because
+  the packager could not resolve one in that build: the tree was reached through a linked
+  work tree whose version-control metadata the build host could not read, so no revision was
+  established and none was invented.
 
-So this run certifies the plugin **as it stands at that base revision with these edits**, on
-both platforms, and nothing more. Publication needs clean, revision-bound natively assembled
-artifacts — assembled from a committed, clean tree so each `compatibility.json` names a
-revision with nothing modified — and the certification run repeated against those. That is
-task 3.5's work, together with the `certified` posture and the per-host `--tested-host`
-digests; none of it is claimed here, and no revision or digest is invented to fill the gap.
+So that run certified the plugin **as it stood at that base revision with those edits**, on
+both platforms, and nothing more. A published archive has to be better than that, and the
+requirement was not left to a convention:
 
-The gate is **opt-in** and never runs on a push, because it needs a host binary this
-repository neither builds nor ships. A green default run is therefore not host
-certification, and the suite that keeps the prose honest says so mechanically (see
-[Requirement 6.2](#requirement-62--the-certification-itself)).
+- `release.yaml` declares the certification as `certified` together with the per-platform
+  host artifacts it was measured against, and the renderer copies that into every archive
+  and refuses a certified posture with a missing, malformed, duplicated, or
+  undeclared-platform entry.
+- **Publication itself is a build.** `.github/workflows/release.yml` assembles each archive
+  on its own native runner from a clean primary checkout of the tag, so the Go toolchain
+  stamps the revision into the executable and the record names it with `source_modified:
+  false`. A leg whose record names another revision, or an unestablished or dirty state,
+  fails the run rather than producing an artifact.
+- **The gate is re-run against the artifact being published**, not only against a
+  development build: each matrix leg passes the archive and its recorded digest to the same
+  `LIP_HOST_CERT_GATE=1 go test -run TestHostReleaseCertification` run described below, and
+  publication waits for every leg.
+
+That is why the digests above are not quoted from the archives this record measured: the
+digests below are the ones this release is certified against, and each published archive
+records them against its own platform.
+
+### Certified host artifacts
+
+`release.yaml` names, per declared platform, the host project and release, the asset that
+release published, the checksum file it published digests in, the binary inside the asset,
+and the sha256 that binary was measured at:
+
+| Platform | Host | Asset | Host binary | Companion contract |
+| --- | --- | --- | --- | --- |
+| `windows/amd64` | `matdev83/go-llm-interactive-proxy` `v0.1.0` | `go-llm-interactive-proxy_0.1.0_windows_amd64.zip` | `lipstd.exe`, `6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4` | `explicit-bridge_executable-required` |
+| `linux/amd64` | `matdev83/go-llm-interactive-proxy` `v0.1.0` | `go-llm-interactive-proxy_0.1.0_linux_amd64.tar.gz` | `lipstd`, `ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c` | `packaged-default-supported` |
+
+Those digests are the **host binary** digests, not the host archive digests: the gate
+extracts each platform's own host binary from that platform's host archive and re-checks it
+against the digest before and after every certified run. The release workflow does the same
+two checks before it uses one — the archive against the `checksums.txt` the host published
+beside it, and the extracted binary against the digest recorded here — so a re-uploaded host
+asset or a different build of the same host release fails instead of certifying.
+
+`compatibility.json` records the same evidence per platform in `host_certification_platforms`,
+next to the flat `tested_host_artifacts` list, plus the packaged `bridge_executable_rel` path
+each platform's contract points at. Both verifiers print all of it.
+
+The gate is **opt-in** and never runs on a push to this repository, because it needs a host
+binary this repository neither builds nor ships. It runs in the release workflow, on the
+platform whose archive it is about to publish. A green default `go test ./...` run is
+therefore not host certification, and the suite that keeps the prose honest says so
+mechanically (see [Requirement 6.2](#requirement-62--the-certification-itself)).
 
 ```text
 LIP_HOST_CERT_GATE=1
@@ -215,12 +259,95 @@ Three things follow from that measurement, and all three are now decided:
   `TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract` keeps the
   gate's contract table covering exactly the platforms the manifest declares.
 
-**The posture is still not flipped.** `release.yaml` declares
-`host_certification: uncertified`, and `compatibility.json` carries no host artifact digest.
-That is now because **this release is not published yet** and there is no release artifact to
-certify — not because of a host defect. Flipping the posture and passing
-`--tested-host <sha256>` per host artifact is task 3.5's, and neither a digest nor a
-certification is invented here.
+**The posture is `certified`, and it is enforced rather than asserted.**
+`release.yaml` declares `host_certification: certified` with one `certified_host_artifacts`
+entry per declared platform, and each entry names the host release, the asset, the checksum
+file, the binary, the measured digest, and that platform's companion contract. The renderer
+validates all of it — a certified posture with a missing entry, a malformed digest, a
+duplicate platform, an artifact for an undeclared platform, or a contract outside the
+declared vocabulary fails the render rather than shipping a record — and copies it into
+`compatibility.json`. `--tested-host` on `scripts/package-plugin` remains available as an
+assertion a packaging run makes about what it measured, and is checked against the
+declaration rather than recorded in place of it, so no run can certify against a host this
+repository does not record. The gate itself reads its contract from the same place, so the
+contract that is documented, the contract that ships, and the contract that is enforced
+cannot become three contracts.
+
+### The release process, and how to reproduce a publication
+
+Every published archive comes from [`.github/workflows/release.yml`](.github/workflows/release.yml),
+and the tag is `cursorsdk-v<version>` — `cursorsdk-v0.1.0` for this release.
+
+```text
+# 1. the maintainer tags the reviewed commit and pushes the tag; the workflow never creates or moves one
+git tag cursorsdk-v0.1.0 <reviewed-commit> && git push origin cursorsdk-v0.1.0
+
+# 2. guard: resolve the tag to its commit, check THAT commit out, and only then read the declaration
+#    out of it; then require the tag to be the one release.yaml declares, its commit to be on
+#    origin/main, its posture certified with one certified platform per declared platform, and no
+#    release to exist for the tag yet
+
+# 3. package matrix, one leg per declared platform, on that platform's own runner:
+#      a. checkout of the tagged commit with full history, so the toolchain stamps the revision
+#      b. download this platform's certified host artifact; check the archive against the host's
+#         published checksums.txt, then the extracted binary against the recorded digest
+#      c. download the pinned Node distribution and check it against nodejs.org's SHASUMS256.txt
+#      d. scripts/package-plugin --out-dir dist --node-dist <the checked distribution>
+#      e. assert the record names the tagged commit, source_modified false, the Go build VCS stamp
+#         as the source basis, host_certification_state certified, and this platform's digest,
+#         companion contract, and bridge_executable path
+#      f. scripts/verify-package --tree-state shipped on the STAGED tree
+#         (fails if the archive as assembled carries the Cursor SDK; that tree is left untouched)
+#      g. unpack the finished archive into a fresh directory and audit THAT as shipped, then
+#         provision the SDK with the command the unpacked archive itself records, then verify the
+#         installed tree
+#      h. LIP_HOST_CERT_GATE=1 go test -run TestHostReleaseCertification .   against that unpacked
+#         tree and that archive's recorded digest
+
+# 4. publish, gated on every leg: re-check each archive against the digest its own leg recorded,
+#    write and self-check checksums.txt, attest build provenance, and `gh release create --verify-tag`
+```
+
+Publication waits for the gates, not for a person: nothing in the workflow stops for an
+approval, and the publish job's permissions (`contents: write`, plus the identity token and
+`attestations` the provenance attestation needs) are its only privilege. What a run publishes
+is whatever every gate above accepted.
+
+Steps 2 through 3 can also be rehearsed on demand: `workflow_dispatch` takes `tag`, the release
+tag to build, which has to be the tag the tagged revision declares, and `publish`, which
+defaults to off. A run with `publish` off stops after step 3 with every gate already reported,
+which is how this process is exercised — and evidenced — without cutting a release.
+
+The two properties that are easy to get wrong are handled structurally rather than by
+convention. A **published tag is immutable**: the guard refuses to run when a release already
+exists for the tag, publication uses `--verify-tag` and never creates a tag, and assets are
+uploaded once. A **published archive is revision-bound and clean, and is certified as the bytes
+it is**: the leg refuses to publish a record that names another revision, an unestablished
+source state, or a dirty tree, so the Linux leg's earlier unresolvable revision cannot recur —
+it builds in a primary checkout with its version-control metadata present rather than through a
+linked work tree — and the certification, the provisioning, and the audits all run on the
+archive *unpacked from the file that is about to be published*, not on the packager's staging
+directory. The staged tree is audited separately and left untouched, so the no-SDK claim is
+about the archive as assembled while every other claim is about the archive as delivered.
+
+### Rolling back a plugin update
+
+`cursorsdk-v0.1.0` is this plugin's **first** published release, so at the time it is
+published there is no earlier plugin artifact to roll back to, and no document here can name
+one. That is stated rather than papered over: the rollback artifact for this project starts
+at v0.1.0, and the *next* release is what gives a later operator something to return to.
+
+Until then, the only genuine prior artifact an operator can return to is the integration that
+ships inside the Go-LIP host itself — host `v0.1.0`, with the Cursor connector built in — which
+is a host-side decision and needs no plugin rollback at all. The migration and rollback
+rehearsal, including which host configuration continues to work and what an upgrade changes
+about executable paths, is the cutover's own task and is not claimed here.
+
+Whatever artifact a later operator does roll back to, the procedure is fixed and does not
+include an implicit SDK downgrade: install the earlier archive's shipped files, then run that
+archive's own `cursor_sdk_provisioning_command`, which is what decides the SDK version the
+tree ends up with. `docs/installation.md` says so under
+[Updating and rolling back](installation.md#updating-and-rolling-back).
 
 ## Requirement 4.1 — provider and stream semantics survive extraction
 
@@ -494,37 +621,41 @@ the third row from becoming a declaration by accident.
   those reports `BLOCKED` and exits successfully when it is not opted in, so a blocked run
   can never be mistaken for a green one. They spend real Cursor quota against a real
   credential and are run deliberately, never on a push.
-- **This plugin is not certified against a host yet, and the remaining reason is
-  publication rather than a host defect.** A downloadable host release exists and the plugin
-  was certified against it on both platforms this project declares:
-  `github.com/matdev83/go-llm-interactive-proxy` v0.1.0 on windows/amd64 and
-  linux/amd64. Everything in
-  [the section above](#requirement-3123333445-61--real-host-install-trust-and-optional-activation)
-  passed on both, including the per-platform companion-path contract, whose measured
-  difference is now the adopted installation contract rather than a finding.
-  `release.yaml` therefore still declares `host_certification: uncertified`, because this
-  release is not published and has no release artifact to certify, `compatibility.json`
-  carries no host artifact digest, and no digest is invented anywhere. Flipping the posture
-  with a measured digest is task 3.5's.
+- **A certification is a statement about specific host artifacts, not a certification about
+  every host.** `release.yaml` declares exactly which host release and which digest per
+  platform this release was measured against — `matdev83/go-llm-interactive-proxy` `v0.1.0`,
+  whose `lipstd` / `lipstd.exe` digests are in the
+  [table above](#certified-host-artifacts) — and the release workflow re-checks both before
+  it certifies. A later host release is not certified by this record, and nothing here claims
+  it is; certifying one is a new measurement against new digests.
+- **The certified record is per platform, and the two platforms differ.** `windows/amd64`
+  requires `bridge_executable` and `linux/amd64` does not, because the host binds the
+  verified executable differently on each. A reader who takes the contract as one general
+  rule is misreading it; `compatibility.json` carries it per platform for exactly that
+  reason.
+- **The certification gate is not part of default verification on a push.** It needs a host
+  binary this repository does not build, so it runs only when a run supplies a binary and its
+  expected digest — here, inside the release workflow. A green `go test ./...` is not host
+  certification.
+- **The two development-time archives this record originally measured were not publication
+  artifacts**, one naming a dirty tree and one naming no revision at all. The published
+  archives are rebuilt by the release workflow under the conditions above; the numbers here
+  describe the measurement, not the shipped bytes.
 - **No Linux host evidence is missing, and none is claimed beyond what was run.** The
   linux/amd64 run used the published linux `lipstd` from the same release and a
-  natively assembled linux archive. It covered the same thirteen cases. It did **not** run
+  natively assembled linux archive. It covered the same fifteen cases. It did **not** run
   with `-race`, and it ran as an unprivileged user because the released host refuses to
-  compose its request plane as an administrative user on Linux.
+  compose its request plane as an administrative user on Linux. The release workflow asserts
+  the unprivileged precondition before the gate rather than discovering it as a host failure.
 - **The real-host runs are not live provider runs.** No Cursor credential is used and no
   provider quota is spent. The deterministic bridge stands in for the Cursor SDK, and the
   cases that exercise the real shipped runtime end in an explicit prerequisite failure or
   at Cursor's own credential rejection. Live provider behaviour remains the opt-in
   `CURSOR_SDK_LIVE=1` lanes described above.
-- **The real-host gate is not part of default verification.** It needs a host binary this
-  repository does not build, so it runs only when an operator opts in with a binary and its
-  expected digest. A green `go test ./...` is not host certification.
-- **No plugin artifact has been released.** There is no tag and no GitHub release.
-- **Per release verification status is a future step.** Every archive records
-  `package_verification_state: not-performed`, because the packager writes the record
-  before verification can run. Verification is performed afterwards by
-  `scripts/verify-package`, and it is run per release rather than continuously; no
-  standing claim in this repository says an archive was verified.
+- **This record is not a release record.** It says how a release is produced and what it was
+  measured against. Which assets exist on a tag, their digests, and their provenance
+  attestation are the release's own contents — `checksums.txt`, each archive's
+  `compatibility.json`, and the attestation attached by the release workflow.
 - **The macOS lane is not macOS support.** It is development evidence about process
   supervision on that kernel, and it does not appear in any place a platform is
   published.

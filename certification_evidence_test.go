@@ -102,13 +102,12 @@ func TestCertificationEvidence_DocumentNamesEveryCertifiedRequirementAndItsProof
 	}
 
 	// The absences are the claims most worth writing down, because each is the kind of
-	// thing a reader would otherwise assume.
+	// thing a reader would otherwise assume. Each phrase here is one the record has to state
+	// in that sense and nothing else in the document could satisfy by accident.
 	for _, nonClaim := range []string{
 		"never",
 		"credential",
 		"host artifact",
-		"per release",
-		"not certified",
 		"darwin",
 	} {
 		assert.Contains(t, lowered, nonClaim,

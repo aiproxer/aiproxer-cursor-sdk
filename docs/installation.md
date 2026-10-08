@@ -138,13 +138,14 @@ an instance.
 **Measured against Go-LIP v0.1.0 and adopted as this plugin's installation contract: the
 packaged default works on `linux/amd64` and does not work on `windows/amd64`. Set the field
 explicitly on Windows; it is optional on Linux.** The real-host certification gate enforces
-both halves of that per platform, so the configurations in the table below are the ones
-measured end to end.
+both halves of that per platform, and the same per-platform contract is what every archive
+records in `compatibility.json` under `host_certification_platforms`, so the table below is
+also what the release you installed declares for itself.
 
-| Platform | Packaged default | Do you need `bridge_executable`? |
-| --- | --- | --- |
-| `linux/amd64` | measured working | no |
-| `windows/amd64` | measured **not** working | **yes** |
+| Platform | Packaged default | Do you need `bridge_executable`? | Recorded contract |
+| --- | --- | --- | --- |
+| `linux/amd64` | measured working | no | `packaged-default-supported` |
+| `windows/amd64` | measured **not** working | **yes** | `explicit-bridge_executable-required` |
 
 On Windows the host verifies the outer executable's digest, copies it into a private
 digest-addressed staging directory, and launches those staged bytes. The connector then
@@ -346,6 +347,31 @@ To roll back, install a previously released archive and re-run the provisioning 
 against it. No SDK downgrade happens implicitly: the lockfile in that archive is what
 decides the version you end up with, and verification tells you which one you have.
 
+**Which artifact to roll back to.** `cursorsdk-v0.1.0` is this plugin's first release, so
+when you install it there is no earlier plugin archive to return to, and this guide does not
+name one: it would be naming an artifact that does not exist. From the next release onward,
+the rollback target is the previous `cursorsdk-v*` tag, and the procedure is the same for
+every one of them:
+
+1. Install the earlier archive's shipped files over the plugin directory, or unpack it into a
+   second plugin directory and point the host's `backend_discovery.paths` at that one. Both
+   directories keep their own `private/bridge/node_modules/`, so an upgrade and a rollback
+   can sit side by side.
+2. Restore the configuration that release expects — in particular `bridge_executable` on
+   `windows/amd64`, per the contract above, which is unchanged across these releases but is
+   recorded per artifact rather than assumed.
+3. Run **that archive's** `cursor_sdk_provisioning_command` (its own `compatibility.json`
+   carries it) so the provisioned tree matches the lockfile you just installed. Do not skip
+   this and assume the tree is still right: the SDK version in the tree is decided by that
+   archive's lockfile, and nothing downgrades it for you.
+4. Run `scripts/verify-package --package-root <plugin-root>` and read
+   `cursor_sdk_required_version` against the version it reports as provisioned.
+
+If you are moving off the plugin entirely and back to the integration built into the Go-LIP
+host, that is a host-side change rather than a plugin rollback: install the host release that
+carries the in-tree Cursor connector and remove the plugin from `backend_discovery.paths`.
+Nothing in the plugin performs that for you, and nothing in it fails if you do.
+
 ## Provenance and trust
 
 - **The plugin authenticates what it ships.** `checksums.sha256` covers every shipped
@@ -369,10 +395,13 @@ decides the version you end up with, and verification tells you which one you ha
   `private_runtime_source` says whether the shipped runtime came from an official Node
   distribution, a supplied executable, or the build machine's `PATH`, and an archive
   staged from `PATH` says so in its own notices.
-- **The host release is not certified yet, and the reason is publication.** The plugin was
-  certified against the downloadable Go-LIP `v0.1.0` release binary on both platforms this
-  project declares; `compatibility.json` still records
-  `host_certification_state: uncertified` because this plugin release is not published and
-  has no release artifact to certify, so it records no host artifact digest and invents
-  none. `docs/certification.md` names exactly which host digest was measured and on which
-  platform - see [`docs/packaging.md`](packaging.md#host-certification).
+- **The host this release was certified against is named, per platform.**
+  `compatibility.json` records `host_certification_state: certified` and, in
+  `host_certification_platforms`, the Go-LIP host release, the asset of it, the host binary,
+  and the sha256 that binary was measured at for your platform. The release workflow
+  re-checks both the host asset and the extracted binary against those digests before it
+  certifies, so the record names the host your archive was measured against rather than
+  "some host". A host release other than the recorded one is **not** certified by this
+  archive: the digests are there to be checked, and both verifiers print them.
+  `docs/certification.md` has the measurement and the release commands - see
+  [`docs/packaging.md`](packaging.md#host-certification).

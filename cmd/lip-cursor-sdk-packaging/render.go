@@ -63,6 +63,31 @@ type releaseMeta struct {
 	// HostCertificationReason is what an uncertified record carries in place of a
 	// host artifact digest. A certified release has none: it has the digests.
 	HostCertificationReason string `yaml:"host_certification_reason"`
+	// CertifiedHostArtifacts are the host artifacts a certified release was measured
+	// against, one per declared platform. They are read from here rather than from a
+	// caller so that the evidence an archive carries is the evidence this repository
+	// records, and a packaging run can only assert what was measured rather than
+	// substitute a digest of its own.
+	CertifiedHostArtifacts []certifiedHostArtifact `yaml:"certified_host_artifacts"`
+}
+
+// certifiedHostArtifact is one declared platform's certified host artifact.
+//
+// The whole record is per platform rather than a flat list of digests because the
+// measurement was: the gate downloaded each platform's own host archive, extracted its
+// own host binary from it, and checked that binary against the digest recorded here. Two
+// digests with no statement of which belongs to which platform cannot be checked against
+// anything, and the companion contract below is the per-platform installation procedure
+// that measurement produced.
+type certifiedHostArtifact struct {
+	Platform           string                          `yaml:"platform"`
+	HostProject        string                          `yaml:"host_project"`
+	HostVersion        string                          `yaml:"host_version"`
+	HostReleaseAsset   string                          `yaml:"host_release_asset"`
+	HostChecksumsAsset string                          `yaml:"host_checksums_asset"`
+	HostBinary         string                          `yaml:"host_binary"`
+	HostArtifactSHA256 string                          `yaml:"host_artifact_sha256"`
+	CompanionContract  packagelayout.CompanionContract `yaml:"companion_contract"`
 }
 
 // renderInputs are the caller-supplied build inputs of one render. Everything else the
@@ -169,6 +194,12 @@ type compatibility struct {
 	HostCertificationState  string   `json:"host_certification_state"`
 	HostCertificationReason string   `json:"host_certification_reason"`
 	TestedHostArtifacts     []string `json:"tested_host_artifacts"`
+	// HostCertificationPlatforms is the certified evidence with the platform it belongs
+	// to: which host release, which artifact of it, which binary, at which measured
+	// digest, and which companion spelling is the supported configuration there. It is
+	// what makes the flat digest list above auditable, and it is what tells an operator on
+	// one of the two platforms whether they have to configure anything.
+	HostCertificationPlatforms []hostCertificationPlatform `json:"host_certification_platforms"`
 	// The package verification fields state what has and has not been verified about
 	// this archive. The packager writes them before verification can run, so they
 	// record no outcome and name the runs that have to be performed instead.
@@ -519,7 +550,7 @@ func renderCompatibility(in renderInputs, meta releaseMeta, archive packagelayou
 	if err != nil {
 		return nil, err
 	}
-	certification, err := hostCertification(meta, in.TestedHosts)
+	certification, err := hostCertification(meta, in.TestedHosts, declared)
 	if err != nil {
 		return nil, err
 	}
@@ -568,6 +599,7 @@ func renderCompatibility(in renderInputs, meta releaseMeta, archive packagelayou
 		HostCertificationState:              certification.State,
 		HostCertificationReason:             certification.Reason,
 		TestedHostArtifacts:                 certification.TestedArtifacts,
+		HostCertificationPlatforms:          certification.Platforms,
 		PackageVerificationState:            verification.State,
 		PackageVerificationPerformed:        verification.Performed,
 		PackageVerificationReason:           verification.Reason,

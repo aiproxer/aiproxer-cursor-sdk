@@ -102,12 +102,37 @@ release_scalar() {
 }
 
 # json_string reads one string field of a JSON object. A field the record does not carry
-# reads as empty: `sed -n ... p` prints the capture only when the pattern matched, so an
-# absent field cannot answer with the whole document. That matters twice over here - a
-# report line would otherwise print the entire record, and a comparison would compare the
-# record against itself.
+# reads as empty, so an absent field cannot answer with the whole document. That matters
+# twice over here - a report line would otherwise print the entire record, and a comparison
+# would compare the record against itself.
+#
+# It reads the FIRST occurrence of the field name and nothing else, and both halves of that
+# are load bearing:
+#
+#   - First, because a record is one line and sed's leftmost-longest match starts as late as
+#     the pattern allows, so the `.*` this used to carry in front of the name selected the
+#     LAST occurrence. The certified record carries a `platform` in every
+#     `host_certification_platforms` entry, so that read returned the last entry's platform
+#     rather than the archive's own: a linux tree was reported as claiming windows/amd64 and
+#     refused as un-native, while the PowerShell verifier - which looks the property up by
+#     name - read the same field correctly. A field name occurs once at the top level of a
+#     record, so the first occurrence is the record's field and the last is a different field
+#     that happens to share its name.
+#   - Only, because `sed s///p` prints the whole line with the substitution applied. Dropping
+#     the greedy prefix to fix the first half therefore printed the whole document prefix
+#     instead of the value, which is the failure this reader exists to prevent.
+#
+# awk can do both at once: index finds the first occurrence, and the value is cut out of the
+# rest of the line rather than substituted into it.
 json_string() {
-  printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p"
+  printf '%s' "$2" | tr -d '\n' | awk -v key="\"$1\":" '
+    { i = index($0, key)
+      if (i == 0) exit
+      v = substr($0, i + length(key))
+      sub(/^[ \t]*"/, "", v)
+      sub(/".*$/, "", v)
+      print v
+      exit }'
 }
 
 # json_digest reads one recorded sha256 field. Anything that is not a digest - including
@@ -125,6 +150,11 @@ json_digest() {
 # json_scalar reads a scalar field, quoted or not. Booleans and numbers are not quoted,
 # so they need their own reader, and like json_string this one prints only what it
 # matched: an absent field is an absent field.
+#
+# The array readers below keep their sed form, and that is safe for exactly one reason worth
+# stating: every field they read is a single-occurrence array field, so there is no second
+# occurrence for a greedy prefix to prefer. A reader for a name that recurs - as `platform`
+# does in a certified record - has to be json_string's awk form.
 json_scalar() {
   printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\([^,}]*\).*/\1/p" | tr -d ' "' | tr -d '\r'
 }
@@ -141,6 +171,18 @@ json_scalar() {
 json_list() {
   printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\(\[[^]]*\]\).*/\1/p" | sed 's/^\[//; s/\]$//' |
     tr ',' '\n' | sed 's/^ *//; s/ *$//; s/^"//; s/"$//; s/\r$//' | grep -v '^$' || true
+}
+
+# json_objects prints one object of a JSON array-of-objects field per line, as the compact
+# text json_string can read. The array's brackets go first, and the objects are split on the
+# brace pair between them rather than on commas, because the fields inside an object are
+# separated by commas too. The whitespace between them is part of the separator: the record
+# is indented, so a split on `},{` alone would return the whole array as one object and each
+# field lookup would then answer with the last element's value. Its key is single-occurrence,
+# so the greedy prefix is safe here for json_scalar's reason.
+json_objects() {
+  printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\(\[[^]]*\]\).*/\1/p" |
+    sed 's/^\[//; s/\]$//; s/},[[:space:]]*{/}\n{/g' || true
 }
 
 # add_list_lines reports each element of a JSON array field, prefixed, or one report
@@ -725,6 +767,27 @@ if [ -n "$record_json" ]; then
   fi
   add_list_lines tested_host_artifacts "$record_json" 'tested host artifact sha256: ' \
     'tested host artifacts: none recorded'
+
+  # The per-platform record is what makes the flat digest list above auditable, so it is
+  # reported as well: which host release and asset each platform was measured against, at
+  # which digest, and which companion spelling that platform supports. A certified record
+  # with no platform behind it is the same bare claim the digest check above rejects, so it
+  # is a finding here too rather than a silently empty line.
+  certified_platforms="$(json_objects host_certification_platforms "$record_json")"
+  if [ -z "$certified_platforms" ]; then
+    if [ "$certification_state" = certified ]; then
+      finding 'release metadata declares host_certification certified but records no host_certification_platforms; without the platform each digest belongs to, the digests cannot be checked against anything'
+    fi
+    line 'certified platforms: none recorded'
+  else
+    while IFS= read -r platform_entry; do
+      [ -n "$platform_entry" ] || continue
+      line "certified platform $(json_string platform "$platform_entry"): host $(json_string host_project "$platform_entry") $(json_string host_version "$platform_entry") asset $(json_string host_release_asset "$platform_entry") binary $(json_string host_binary "$platform_entry") sha256 $(json_string host_artifact_sha256 "$platform_entry")"
+      line "certified platform $(json_string platform "$platform_entry") companion contract: $(json_string companion_contract "$platform_entry") (bridge_executable=$(json_string bridge_executable_rel "$platform_entry"))"
+    done <<EOF
+$certified_platforms
+EOF
+  fi
 
   # What the record says about verification of this package. The packager writes the
   # record before verification can run, so the recorded state is not-performed and the

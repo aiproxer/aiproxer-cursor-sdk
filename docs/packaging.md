@@ -13,6 +13,7 @@ reasoned about, and never confuse the two.
 - [Why not a Single Executable Application](#why-not-a-single-executable-application)
 - [Platform evidence](#platform-evidence)
 - [Host certification](#host-certification)
+- [Release process](#release-process)
 - [If the private runtime ever fails validation](#if-the-private-runtime-ever-fails-validation)
 
 ## Decision
@@ -159,17 +160,24 @@ alongside the platforms that archive is *not* evidence for.
 
 ## Host certification
 
-**This release is `uncertified` with respect to the Go-LIP host binary, because it is not
-published yet — not because a measurement found a defect.** A downloadable host release
-exists — `github.com/matdev83/go-llm-interactive-proxy` v0.1.0 — and this plugin was
-**certified against** it on both platforms this project declares, windows/amd64 and
-linux/amd64, by `TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`.
+**This release is `certified` with respect to the Go-LIP host binary.** A downloadable host
+release exists — `matdev83/go-llm-interactive-proxy` `v0.1.0` — and this plugin was certified
+against it on both platforms this project declares, `windows/amd64` and `linux/amd64`, by
+`TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`, 15/15 cases on each.
 Trusted discovery, manifest identity, secure negotiation, inventory listing, canonical
-execution, explicit capability errors, inactive discovery, default-deny multi-user denial,
-the per-platform companion-path contract, and explicit prerequisite failures for a missing
-plugin, a missing private runtime, and an unprovisioned Cursor SDK all passed on both. The
-full table, with the diagnostics each case observed, is in
+execution, explicit capability errors, inactive discovery, default-deny multi-user denial, the
+per-platform companion-path contract, and explicit prerequisite failures for a missing plugin,
+a missing private runtime, and an unprovisioned Cursor SDK all passed on both. The full table,
+with the diagnostics each case observed, is in
 [`docs/certification.md`](certification.md#requirement-3123333445-61--real-host-install-trust-and-optional-activation).
+
+The certified artifacts are recorded per platform, because the measurement was per platform:
+each leg downloaded its own host archive from that release and measured the binary inside it.
+
+| Platform | Host artifact | Host binary digest | Companion contract |
+| --- | --- | --- | --- |
+| `windows/amd64` | `go-llm-interactive-proxy_0.1.0_windows_amd64.zip` | `6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4` | `explicit-bridge_executable-required` |
+| `linux/amd64` | `go-llm-interactive-proxy_0.1.0_linux_amd64.tar.gz` | `ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c` | `packaged-default-supported` |
 
 One behaviour is platform-dependent, and it is the archive's own convenience: the
 **packaged-default** companion resolution. Measured, it works on linux/amd64 and does not
@@ -177,22 +185,64 @@ work on windows/amd64, because there the host verifies the outer executable's di
 it into a private digest-addressed staging directory, and launches those staged bytes, so
 `../private/bridge/lip-cursor-sdk-bridge[.exe]` relative to the installed executable resolves
 into the staging directory, which has no `private/` tree beside it. That measured difference
-is now the **adopted installation contract** rather than a defect: on windows/amd64 the
+is the **adopted installation contract** rather than a defect: on windows/amd64 the
 supported configuration sets `bridge_executable` to the full installed launcher path, and on
 linux/amd64 the packaged default stays supported and the field is optional. The gate
 enforces it per platform, and where the field is required an unset value fails as an
 explicit prerequisite naming `bridge_executable` — no search, no rewrite, no provisioning.
 `docs/installation.md` prints the per-platform remedy.
 
-`compatibility.json` therefore records `host_certification_state: uncertified`, the measured
-reason, and an empty `tested_host_artifacts` list. No host artifact hash is invented
-anywhere — not in the record, not in this document, not in the verifier's report. The
-mechanism that will carry real evidence is in place and validated: declaring
-`host_certification: certified` in `release.yaml` requires a `--tested-host <sha256>` digest
-per host artifact to be passed to `scripts/package-plugin`, and the renderer refuses a
-certified claim with no digest, an uncertified claim carrying one, and any value that is not
-a sha256 digest. Flipping the posture is task 3.5's, when the release is published and there
-is an artifact to certify.
+`compatibility.json` records that evidence per platform in `host_certification_platforms`,
+next to `host_certification_state: certified` and the flat `tested_host_artifacts` list, and
+both verifiers print all of it. The evidence is read from `release.yaml`'s
+`certified_host_artifacts` rather than typed into a packaging command, and the renderer
+refuses a certified posture with a missing, malformed, duplicated, or undeclared-platform
+entry. `--tested-host` on `scripts/package-plugin` remains an assertion a run makes about
+what it measured, checked against that declaration rather than recorded in place of it, so no
+run can certify against a host this repository does not record. No host artifact hash is
+invented anywhere — not in the record, not in this document, not in a verifier's report.
+
+## Release process
+
+This release is **prepared for tag `cursorsdk-v0.1.0` and is not yet published.** The process
+that will publish it is [`.github/workflows/release.yml`](.github/workflows/release.yml), which is
+the only path from a commit to a published archive; nothing here is a claim that a run has
+happened. The tag exists as a declaration in `release.yaml`, and until that workflow completes
+on it there is no tag, no release, and no downloadable artifact — what exists today is the
+metadata, the packagers, the verifiers, and the recorded certification. Every sentence below
+describes what the process *will* require of an archive, not what a released artifact has
+already been shown to be.
+
+Each leg of that workflow's matrix will assemble one platform's archive **natively**, from a
+clean primary checkout of the tagged commit, and will refuse to continue unless all of this
+holds for that archive:
+
+- `source_revision` is the commit the tag points at, `source_modified` is `false`, and the Go
+  build VCS stamp is the stated basis — so a published archive is revision-bound and its build
+  tree was clean, rather than saying "unknown", naming a revision the packager resolved, or
+  naming a revision the packager could not establish at all;
+- `scripts/verify-package --tree-state shipped` passes on the **staged** tree, which is the run
+  that fails when the archive as assembled carries the Cursor SDK or its closure;
+- the finished archive **unpacks into a fresh directory**, and that unpacked tree is audited as
+  shipped, provisioned with the command the archive itself records, and verified installed — so
+  the tree the archive actually delivers is the one that was checked, and the staged tree is
+  left untouched for the no-SDK claim;
+- `LIP_HOST_CERT_GATE=1 go test -run TestHostReleaseCertification` passes **against that
+  unpacked tree and that archive's recorded digest** on that platform, so the gate is evidence
+  about the published bytes rather than about a development build or about a staging directory.
+
+Publication will then wait for every leg, re-check each archive against the digest its own leg
+recorded, publish `checksums.txt`, attest build provenance for each asset, and create the
+release with `gh release create --verify-tag`. It will wait for those gates and for nothing
+else: no step of the process stops for an approval, and the publish job's only privilege is the
+permission it needs to write the release and the identity it needs to attest it. The tag will
+be the maintainer's: the guard checks the tagged commit out before it reads the declaration out
+of it, and refuses to run when a release already exists for the tag, so a published tag is
+immutable and its assets are never replaced. The same workflow can be run by hand with
+`publish` unset, which rehearses every gate and stops before publication.
+
+`docs/certification.md` records the measured evidence, the release commands, and what the gate's
+case count covers, in full.
 
 ## If the private runtime ever fails validation
 
