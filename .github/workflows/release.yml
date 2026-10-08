@@ -303,6 +303,13 @@ jobs:
           }
           $binary = Join-Path $scratch $env:HOST_BINARY
           if (-not (Test-Path -LiteralPath $binary)) { throw "the host asset carries no $($env:HOST_BINARY)" }
+          # The certification gate hands this path to os/exec and runs the host with its
+          # working directory set to a temporary directory, and os/exec resolves a relative
+          # Path against that directory - so a repo-relative path here is looked up inside a
+          # temporary tree that has no such file, and every host launch fails at fork/exec
+          # while the digest re-check, which reads relative to this step's own directory,
+          # still passes. Export the physical path so both agree.
+          $binary = (Resolve-Path -LiteralPath $binary).ProviderPath
           # The recorded digest is the certification's evidence, so it is checked against the
           # bytes rather than trusted: a host release that was rebuilt and re-tagged would
           # otherwise certify this release against a binary nobody measured.
