@@ -257,10 +257,17 @@ jobs:
           $release = go run ./cmd/lip-cursor-sdk-packaging release | ConvertFrom-Json
           $entry = @($release.platforms) | Where-Object { $_.platform -eq $env:RELEASE_PLATFORM }
           if (-not $entry) { throw "the release declares no certified host artifact for $env:RELEASE_PLATFORM" }
+          # Every exported name is HOST_<FIELD>, with the redundant leading HOST_ of the host_*
+          # field names folded away, because every later step reads these back as $env:HOST_*.
+          # Naming them by uppercasing the field name alone exported COMPANION_CONTRACT and
+          # BRIDGE_EXECUTABLE_REL for the two fields that carry no host_ prefix, while the gate
+          # read HOST_COMPANION_CONTRACT and HOST_BRIDGE_EXECUTABLE_REL - so those two arrived
+          # empty and the leg refused its own archive on both platforms.
           foreach ($name in @('host_release_url', 'host_checksums_url', 'host_release_asset', 'host_checksums_asset',
               'host_binary', 'host_artifact_sha256', 'companion_contract', 'bridge_executable_rel')) {
             if (-not $entry.$name) { throw "the declared host artifact for $env:RELEASE_PLATFORM has no $name" }
-            "$($name.ToUpper())=$($entry.$name)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            $variable = 'HOST_' + ($name.ToUpper() -replace '^HOST_', '')
+            "$variable=$($entry.$name)" | Out-File -FilePath $env:GITHUB_ENV -Append
           }
           "declared: tag $($release.tag), plugin $($release.plugin_version), host certification $($release.host_certification)"
 
