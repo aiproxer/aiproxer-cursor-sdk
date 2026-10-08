@@ -496,10 +496,11 @@ jobs:
             # Windows runners are admin with UAC disabled; the released host
             # refuses an administrative request plane (token.IsMember). Run the
             # gate under a LUA restricted token so Go children inherit it. Same
-            # pattern as host tools/taskrunner (CreateRestrictedToken LUA_TOKEN),
-            # embedded here because the tagged checkout carries no new files.
-            # No host change or weakened check; 60m/90m budgets and the
-            # bridge_executable contract are unchanged.
+            # pattern as host tools/taskrunner (CreateRestrictedToken LUA_TOKEN
+            # plus TokenDefaultDacl user+RC+SY), embedded here because the tagged
+            # checkout carries no new files. Diagnostics print parent user and
+            # file SDDLs; no filesystem grants. No host change or weakened
+            # check; 60m/90m budgets and the bridge_executable contract stay.
             $launcherLines = @(
               'using System;',
               'using System.Runtime.InteropServices;',
@@ -525,13 +526,36 @@ jobs:
               '  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);',
               '  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);',
               '  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int n);',
+              '  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string sddl, uint revision, out IntPtr sd, out uint sdSize);',
+              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool daclPresent, out IntPtr dacl, out bool daclDefaulted);',
+              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint len);',
+              '  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr LocalFree(IntPtr mem);',
+              '  const int TOKEN_DEFAULT_DACL_CLASS = 6;',
+              '  const uint SDDL_REVISION_1 = 1;',
+              '  static IntPtr SetRestrictedDefaultDacl(IntPtr restricted) {',
+              '    string userSddl = WindowsIdentity.GetCurrent().User.ToString();',
+              '    Console.WriteLine("parent-User=" + userSddl);',
+              '    string sddl = "D:(A;;GA;;;" + userSddl + ")(A;;GA;;;RC)(A;;GA;;;SY)";',
+              '    IntPtr sd = IntPtr.Zero; uint sdLen = 0;',
+              '    if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, SDDL_REVISION_1, out sd, out sdLen) || sd == IntPtr.Zero) throw new Exception("convert default dacl sddl " + Marshal.GetLastWin32Error());',
+              '    bool present; IntPtr dacl; bool defaulted;',
+              '    if (!GetSecurityDescriptorDacl(sd, out present, out dacl, out defaulted) || !present || dacl == IntPtr.Zero) { LocalFree(sd); throw new Exception("extract default dacl"); }',
+              '    IntPtr info = Marshal.AllocHGlobal(IntPtr.Size);',
+              '    try {',
+              '      Marshal.WriteIntPtr(info, dacl);',
+              '      if (!SetTokenInformation(restricted, TOKEN_DEFAULT_DACL_CLASS, info, (uint)IntPtr.Size)) { LocalFree(sd); throw new Exception("set token default dacl " + Marshal.GetLastWin32Error()); }',
+              '    } finally { Marshal.FreeHGlobal(info); }',
+              '    return sd;',
+              '  }',
               '  public static int Launch(string commandLine, string curDir) {',
               '    var curPr = new WindowsPrincipal(WindowsIdentity.GetCurrent());',
               '    Console.WriteLine("current-IsInRole-Admin=" + curPr.IsInRole(WindowsBuiltInRole.Administrator));',
               '    IntPtr cur2; if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE|TOKEN_ASSIGN_PRIMARY|TOKEN_QUERY|TOKEN_ADJUST_DEFAULT, out cur2)) throw new Exception("open process token " + Marshal.GetLastWin32Error());',
               '    IntPtr restricted = IntPtr.Zero;',
+              '    IntPtr tokenDaclSource = IntPtr.Zero;',
               '    try {',
               '      if (!CreateRestrictedToken(cur2, LUA_TOKEN, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted)) throw new Exception("create restricted token " + Marshal.GetLastWin32Error());',
+              '      tokenDaclSource = SetRestrictedDefaultDacl(restricted);',
               '      using (var ri = new WindowsIdentity(restricted)) {',
               '        bool isAdmin = new WindowsPrincipal(ri).IsInRole(WindowsBuiltInRole.Administrator);',
               '        Console.WriteLine("restricted-IsInRole-Admin=" + isAdmin);',
@@ -548,24 +572,32 @@ jobs:
               '        Console.WriteLine("gate-exit=" + code);',
               '        return (int)code;',
               '      } finally { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }',
-              '    } finally { if (restricted != IntPtr.Zero) CloseHandle(restricted); CloseHandle(cur2); }',
+              '    } finally { if (tokenDaclSource != IntPtr.Zero) LocalFree(tokenDaclSource); if (restricted != IntPtr.Zero) CloseHandle(restricted); CloseHandle(cur2); }',
               '  }',
               '}'
             )
             Add-Type -TypeDefinition ($launcherLines -join "`n") -Language CSharp
+            Write-Host ('parent-User=' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+            Write-Host ('host-SDDL=' + (Get-Acl -LiteralPath $env:HOST_BINARY_PATH).Sddl)
+            Write-Host ('go-SDDL=' + (Get-Acl -LiteralPath ((Get-Command go).Source)).Sddl)
+            Write-Host ('repo-SDDL=' + (Get-Acl -LiteralPath (Get-Location).Path).Sddl)
             # Probe the actual launcher before the 60m gate: the child must print
             # restricted:false, the marker, and host --help, then exit 3. Remote
             # logs carry parent admin plus restricted:false for inspection.
+            # Encoded to avoid nested -Command quoting; fail-closed on admin or
+            # a nonzero host help.
             $env:RESTRICTED_PROBE_MARKER = 'restricted-probe-ok'
-            $probeInner = '$isAdmin = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); Write-Output (''restricted:'' + $isAdmin.ToString().ToLower()); Write-Output $env:RESTRICTED_PROBE_MARKER; & ($env:HOST_BINARY_PATH) --help | Select-Object -First 5; exit 3'
-            $probeCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + $probeInner + '"'
+            $probeScript = '$ErrorActionPreference = ''Stop''; $isAdmin = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); Write-Output (''restricted:'' + $isAdmin.ToString().ToLower()); if ($isAdmin) { exit 11 }; Write-Output $env:RESTRICTED_PROBE_MARKER; try { & ($env:HOST_BINARY_PATH) --help } catch { Write-Output (''host-start-error:'' + $_.FullyQualifiedErrorId); exit 14 }; if ($LASTEXITCODE -ne 0) { exit 12 }; exit 3'
+            $probeB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+            $probeCmd = 'pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $probeB64
             $probeExit = [RestrictedHostCertLauncher]::Launch($probeCmd, (Get-Location).Path)
             if ($probeExit -ne 3) { throw "restricted child probe failed on $env:RELEASE_PLATFORM (exit $probeExit)" }
             # Full gate under the same token: env/handles inherited, wait/reap
             # with exact exit, all handles closed. No extra job object; the
             # runner contains the step and the host owns its tree.
-            $inner = 'go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 | Tee-Object -FilePath (''host-cert-'' + $env:RELEASE_SLUG + ''.txt''); exit $LASTEXITCODE'
-            $cmdLine = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
+            $gateScript = '$ErrorActionPreference = ''Stop''; try { go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 | Tee-Object -FilePath (''host-cert-'' + $env:RELEASE_SLUG + ''.txt'') } catch { Write-Output (''gate-start-error:'' + $_.FullyQualifiedErrorId); exit 14 }; $code = $LASTEXITCODE; if (-not (Test-Path -LiteralPath (''host-cert-'' + $env:RELEASE_SLUG + ''.txt''))) { exit 13 }; exit $code'
+            $gateB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($gateScript))
+            $cmdLine = 'pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $gateB64
             Write-Host "launching host-cert gate under restricted token"
             $restrictedExit = [RestrictedHostCertLauncher]::Launch($cmdLine, (Get-Location).Path)
             if ($restrictedExit -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM (restricted exit $restrictedExit)" }
