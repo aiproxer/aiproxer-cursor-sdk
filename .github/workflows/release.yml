@@ -208,6 +208,13 @@ jobs:
       RELEASE_COMMIT: ${{ needs.guard.outputs.commit }}
       RELEASE_PLATFORM: ${{ matrix.platform }}
       RELEASE_SLUG: ${{ matrix.slug }}
+      # Scratch lives under `.tmp/`, which this repository already ignores, and that is a
+      # correctness requirement rather than tidiness: the Go toolchain decides `vcs.modified`
+      # from `git status --porcelain`, so an untracked, non-ignored directory in the work
+      # tree makes the stamped build record `source_modified: true` and this leg's own gate
+      # then refuses the archive. Measured on this repository's platform: an ignored file
+      # leaves the stamp `false`, an untracked non-ignored one flips it to `true`.
+      SCRATCH: .tmp/release
     steps:
       - name: Check out the tagged revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -260,16 +267,17 @@ jobs:
       - name: Download the recorded host artifact and check it against the host's own digests
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path 'host' | Out-Null
-          $asset = Join-Path 'host' $env:HOST_RELEASE_ASSET
+          $scratch = Join-Path $env:SCRATCH 'host'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $asset = Join-Path $scratch $env:HOST_RELEASE_ASSET
           Invoke-WebRequest -Uri $env:HOST_RELEASE_URL -OutFile $asset
-          Invoke-WebRequest -Uri $env:HOST_CHECKSUMS_URL -OutFile (Join-Path 'host' $env:HOST_CHECKSUMS_ASSET)
+          Invoke-WebRequest -Uri $env:HOST_CHECKSUMS_URL -OutFile (Join-Path $scratch $env:HOST_CHECKSUMS_ASSET)
           # Two checks, in this order. The host's published checksum file says these are the
           # bytes it released; the digest this repository recorded says which of them the
           # certification ran against. Either one alone would accept a re-uploaded asset, or
           # the wrong build of the right release.
           $downloaded = (Get-FileHash -Algorithm SHA256 -Path $asset).Hash.ToLower()
-          $published = @(Select-String -Path (Join-Path 'host' $env:HOST_CHECKSUMS_ASSET) `
+          $published = @(Select-String -Path (Join-Path $scratch $env:HOST_CHECKSUMS_ASSET) `
               -Pattern ('^([0-9a-f]{64})\s+' + [regex]::Escape($env:HOST_RELEASE_ASSET) + '\s*$'))
           if ($published.Count -ne 1) { throw "$($env:HOST_CHECKSUMS_ASSET) does not list $($env:HOST_RELEASE_ASSET) exactly once" }
           $released = $published[0].Matches[0].Groups[1].Value
@@ -281,12 +289,12 @@ jobs:
           # platform. Neither is asked to read a format it does not read, which is the whole
           # reason the branch exists rather than one call for both.
           if ($env:HOST_RELEASE_ASSET.EndsWith('.zip')) {
-            Expand-Archive -LiteralPath $asset -DestinationPath 'host' -Force
+            Expand-Archive -LiteralPath $asset -DestinationPath $scratch -Force
           } else {
-            tar -xzf $asset -C host
+            tar -xzf $asset -C $scratch
             if ($LASTEXITCODE -ne 0) { throw "tar could not unpack $($env:HOST_RELEASE_ASSET)" }
           }
-          $binary = Join-Path 'host' $env:HOST_BINARY
+          $binary = Join-Path $scratch $env:HOST_BINARY
           if (-not (Test-Path -LiteralPath $binary)) { throw "the host asset carries no $($env:HOST_BINARY)" }
           # The recorded digest is the certification's evidence, so it is checked against the
           # bytes rather than trusted: a host release that was rebuilt and re-tagged would
@@ -305,8 +313,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = $env:NODE_DIST_NAME -replace '^node-v([0-9.]+)-.*$', '$1'
           $sums = (Invoke-WebRequest -Uri "https://nodejs.org/dist/v$version/SHASUMS256.txt").Content
-          New-Item -ItemType Directory -Force -Path 'node-dist' | Out-Null
-          $file = Join-Path 'node-dist' $env:NODE_DIST_NAME
+          $scratch = Join-Path $env:SCRATCH 'node-dist'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $file = Join-Path $scratch $env:NODE_DIST_NAME
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v$version/$($env:NODE_DIST_NAME)" -OutFile $file
           # The archive ships this runtime, so the bytes have to be the ones nodejs.org
           # published: a distribution re-uploaded under the same name would otherwise ship
@@ -386,15 +395,16 @@ jobs:
           # The staging directory is deliberately left behind untouched, and its shipped audit
           # runs on it: what must carry no Cursor SDK is the archive as assembled, before
           # anything in this job provisioned a tree anywhere.
-          Remove-Item -Recurse -Force 'unpacked' -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path 'unpacked' | Out-Null
+          $scratch = Join-Path $env:SCRATCH 'unpacked'
+          Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
           if ($env:PLUGIN_ARCHIVE.EndsWith('.zip')) {
-            Expand-Archive -LiteralPath $env:PLUGIN_ARCHIVE -DestinationPath 'unpacked' -Force
+            Expand-Archive -LiteralPath $env:PLUGIN_ARCHIVE -DestinationPath $scratch -Force
           } else {
-            tar -xzf $env:PLUGIN_ARCHIVE -C unpacked
+            tar -xzf $env:PLUGIN_ARCHIVE -C $scratch
             if ($LASTEXITCODE -ne 0) { throw "tar could not unpack $($env:PLUGIN_ARCHIVE)" }
           }
-          $tree = @(Get-ChildItem 'unpacked' -Directory)
+          $tree = @(Get-ChildItem $scratch -Directory)
           if ($tree.Count -ne 1) { throw "the archive unpacks to $($tree.Count) directories; it has to be exactly one install directory" }
           if (-not (Test-Path -LiteralPath (Join-Path $tree[0].FullName 'plugin.backendplugin.json'))) {
             throw "the unpacked archive has no plugin.backendplugin.json at the top of its one directory"
@@ -475,20 +485,21 @@ jobs:
       - name: Collect what this leg publishes
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path 'publish' | Out-Null
-          Copy-Item $env:PLUGIN_ARCHIVE publish/
-          Copy-Item "$($env:PLUGIN_ARCHIVE).sha256" publish/
-          Copy-Item "verify-shipped-$env:RELEASE_SLUG.txt" publish/
-          Copy-Item "verify-unpacked-$env:RELEASE_SLUG.txt" publish/
-          Copy-Item "verify-installed-$env:RELEASE_SLUG.txt" publish/
-          Copy-Item "host-cert-$env:RELEASE_SLUG.txt" publish/
-          Get-ChildItem publish | Select-Object Name, Length
+          $scratch = Join-Path $env:SCRATCH 'publish'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          Copy-Item $env:PLUGIN_ARCHIVE $scratch
+          Copy-Item "$($env:PLUGIN_ARCHIVE).sha256" $scratch
+          Copy-Item "verify-shipped-$env:RELEASE_SLUG.txt" $scratch
+          Copy-Item "verify-unpacked-$env:RELEASE_SLUG.txt" $scratch
+          Copy-Item "verify-installed-$env:RELEASE_SLUG.txt" $scratch
+          Copy-Item "host-cert-$env:RELEASE_SLUG.txt" $scratch
+          Get-ChildItem $scratch | Select-Object Name, Length
 
       - name: Upload the assembled archive and its evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cursorsdk-${{ needs.guard.outputs.tag }}-${{ matrix.slug }}
-          path: publish/
+          path: .tmp/release/publish
           if-no-files-found: error
           retention-days: 30
 
@@ -506,6 +517,12 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    defaults:
+      run:
+        # This job runs on ubuntu, whose default shell is bash, and every step in it is
+        # PowerShell. Without this, `Get-ChildItem`, `Set-Content` and the rest are
+        # command-not-found under bash and the job cannot succeed at all.
+        shell: pwsh
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ needs.guard.outputs.tag }}
