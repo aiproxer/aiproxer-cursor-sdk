@@ -135,8 +135,11 @@ an instance.
 
 ### Set `bridge_executable` explicitly on Windows
 
-**Measured against Go-LIP v0.1.0: the packaged default works on `linux/amd64` and does not
-work on `windows/amd64`. Set the field explicitly on Windows; it is optional on Linux.**
+**Measured against Go-LIP v0.1.0 and adopted as this plugin's installation contract: the
+packaged default works on `linux/amd64` and does not work on `windows/amd64`. Set the field
+explicitly on Windows; it is optional on Linux.** The real-host certification gate enforces
+both halves of that per platform, so the configurations in the table below are the ones
+measured end to end.
 
 | Platform | Packaged default | Do you need `bridge_executable`? |
 | --- | --- | --- |
@@ -366,9 +369,10 @@ decides the version you end up with, and verification tells you which one you ha
   `private_runtime_source` says whether the shipped runtime came from an official Node
   distribution, a supplied executable, or the build machine's `PATH`, and an archive
   staged from `PATH` says so in its own notices.
-- **The host is not certified.** `compatibility.json` records
-  `host_certification_state: uncertified` with the reason, and no host artifact digest:
-  no downloadable Go-LIP host binary release exists to certify this plugin against, so
-  none is invented. Nothing in this guide should be read as a statement about which host
-  version the plugin was validated on - see
-  [`docs/packaging.md`](packaging.md#host-certification).
+- **The host release is not certified yet, and the reason is publication.** The plugin was
+  certified against the downloadable Go-LIP `v0.1.0` release binary on both platforms this
+  project declares; `compatibility.json` still records
+  `host_certification_state: uncertified` because this plugin release is not published and
+  has no release artifact to certify, so it records no host artifact digest and invents
+  none. `docs/certification.md` names exactly which host digest was measured and on which
+  platform - see [`docs/packaging.md`](packaging.md#host-certification).

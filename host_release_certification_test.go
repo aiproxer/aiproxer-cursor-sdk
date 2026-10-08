@@ -35,10 +35,20 @@ import (
 // It exists because the boundary between "the plugin satisfies the contract" and "the
 // plugin satisfies the contract *through a host*" is where a real host can disagree with
 // this repository's assumptions, and nothing shorter than running the real host finds
-// that out. That is not hypothetical: this gate is what established that the released
-// host does not hand a discovered plugin its install tree on Windows, which is why
-// release.yaml is still `uncertified` and why the packaged-default companion claim is not
-// published. See docs/certification.md.
+// that out. That is not hypothetical: this gate is what established that the released host
+// does not hand a discovered plugin its install tree on Windows, and that measurement is
+// what the companion-path contract below is built on. See docs/certification.md.
+//
+// The gate enforces that contract rather than re-measuring it. The measurement said the
+// packaged default resolves where the host execs the installed executable and cannot
+// resolve where the host launches a staging copy of it, and the maintainer adopted that as
+// the supported installation contract per platform. So on each platform the gate knows
+// before it starts which companion spelling a supported configuration uses, runs every
+// enabled case with that spelling, and then decides the unset path against the contract:
+// on linux/amd64 an operator who configures nothing must still reach the Cursor SDK, and
+// on windows/amd64 an unset path must fail as an explicit prerequisite naming
+// `bridge_executable`. Either answer alone used to be accepted, which meant a gate run
+// could not tell a healthy platform from an unhealthy one.
 //
 // Three properties make the evidence trustworthy rather than anecdotal:
 //
@@ -49,10 +59,11 @@ import (
 //     `checksums.sha256` before anything starts and again at the end.
 //   - Nothing here consumes provider quota or reads a real credential. The deterministic
 //     fake bridge stands in for the Cursor SDK only; the host, the outer plugin
-//     executable, the secure channel, the canonical stream, and - in the two cases that
-//     need them - the shipped private runtime and its operator-provisioned SDK are all
-//     real. The cases that address the private runtime end in an explicit prerequisite
-//     failure, never in provider work.
+//     executable, the secure channel, the canonical stream, and - in the cases that need
+//     them - the shipped private runtime and its operator-provisioned SDK are all real.
+//     Where the real runtime runs, the credential is a fixed non-secret string, so those
+//     cases end at Cursor's own credential check or in an explicit prerequisite failure,
+//     never in provider work.
 //
 // The gate is opt-in and off by default: it needs a host binary this repository neither
 // builds nor ships.
@@ -113,15 +124,81 @@ const (
 	// hostCertCompanionUnreachable is the connector's own wording for a packaged companion
 	// it could not resolve relative to the running executable.
 	hostCertCompanionUnreachable = "not found"
+	// hostCertCompanionLauncher is the resource the connector names in that diagnostic, so
+	// the check can key on the connector's own subject rather than on a phrase any part of
+	// a host log could carry for an unrelated reason.
+	hostCertCompanionLauncher = "private bridge launcher"
 	// hostCertModelsListReached is proof the bridge answered at all.
 	hostCertModelsListReached = "models/list"
 )
 
+// hostCertExplicitCompanion says whether a platform's supported configuration has to name
+// the packaged private launcher in `bridge_executable`.
+type hostCertExplicitCompanion string
+
+const (
+	// hostCertExplicitRequired marks a platform where the supported spelling is the full
+	// installed launcher path and leaving the field unset is not a supported configuration.
+	hostCertExplicitRequired hostCertExplicitCompanion = "required"
+	// hostCertExplicitOptional marks a platform where the field may be set but an operator
+	// who configures nothing still reaches the packaged companion.
+	hostCertExplicitOptional hostCertExplicitCompanion = "optional"
+)
+
+// hostCertCompanionContract is one declared platform's supported companion-path contract,
+// as adopted in requirements 3.5 and the design's Standalone connector.
+//
+// It is an installation contract, not plugin behaviour: the connector keeps one resolution
+// rule on both platforms and does not branch on the operating system, so this table exists
+// only in the certification gate, where it decides which configuration a certified run has
+// to exercise and what the unset path has to do.
+type hostCertCompanionContract struct {
+	// explicitCompanion says whether a supported configuration names the packaged launcher.
+	explicitCompanion hostCertExplicitCompanion
+	// packagedDefaultSupported says whether an operator who configures nothing still
+	// reaches the packaged companion.
+	packagedDefaultSupported bool
+}
+
+// hostCertCompanionContracts is the per-platform contract the gate enforces.
+//
+// Measured against Go-LIP v0.1.0, the host binds the verified install-root executable by
+// descriptor and execs it on linux/amd64, so `os.Executable()` inside the plugin is the
+// installed path and the packaged default resolves with no operator action. On
+// windows/amd64 the host verifies the outer executable's digest, copies it into a
+// digest-addressed staging directory, and launches those staged bytes, so a default
+// resolved relative to the running executable lands in staging with no `private/` tree
+// beside it. The contract records that measured difference as the supported installation
+// procedure per platform, and it is keyed by the same platform strings the manifest
+// declares, so a platform without a written contract cannot be certified at all.
+func hostCertCompanionContracts() map[string]hostCertCompanionContract {
+	return map[string]hostCertCompanionContract{
+		"windows/amd64": {explicitCompanion: hostCertExplicitRequired, packagedDefaultSupported: false},
+		"linux/amd64":   {explicitCompanion: hostCertExplicitOptional, packagedDefaultSupported: true},
+	}
+}
+
+// hostCertCurrentContract is the contract this host's platform has to satisfy.
+//
+// It fails rather than defaults when the platform is not declared, because a run on an
+// undeclared platform has no supported installation contract to certify and defaulting
+// would quietly certify whatever the measurement happened to find.
+func hostCertCurrentContract(tb testing.TB) hostCertCompanionContract {
+	tb.Helper()
+
+	contract, ok := hostCertCompanionContracts()[hostCertPlatformLabel()]
+	require.True(tb, ok,
+		"%s is not a platform the companion-path contract covers; the gate cannot certify a platform "+
+			"whose supported configuration nobody wrote down", hostCertPlatformLabel())
+	return contract
+}
+
 // TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation is the task 4.2
 // gate: trusted discovery, manifest identity, secure negotiation, inventory listing,
 // canonical execution, explicit capability errors, inactive discovery, default-deny
-// multi-user behaviour, and explicit prerequisite failures for a missing plugin or a
-// missing runtime - all against a versioned host binary that is never recompiled.
+// multi-user behaviour, the adopted per-platform companion-path contract, and explicit
+// prerequisite failures for a missing plugin, a missing runtime, or a missing SDK - all
+// against a versioned host binary that is never recompiled.
 func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-host certification drives a released host binary")
@@ -235,7 +312,8 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 	})
 
 	t.Run("secure_negotiation_activates_the_configured_instance", func(t *testing.T) {
-		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, hostCertBackend(t, true, ""))
+		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser,
+			hostCertBackend(t, true, env.supportedCompanionPath(t, env.tree)))
 
 		// Configuring the instance has to move the discovered row to an activated one, or
 		// "trusted discovery" and "optional activation" would be one claim rather than two.
@@ -262,7 +340,8 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 	})
 
 	t.Run("inventory_lists_the_configured_plugin_instance", func(t *testing.T) {
-		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, hostCertBackend(t, true, ""))
+		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser,
+			hostCertBackend(t, true, env.supportedCompanionPath(t, env.tree)))
 
 		var snapshot struct {
 			Backends []struct {
@@ -353,7 +432,8 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 	})
 
 	t.Run("multi_user_access_denies_the_local_only_agent_runtime", func(t *testing.T) {
-		host := newHostCertRun(t, env, env.pluginRoot, hostCertMultiUser, hostCertBackend(t, true, ""))
+		host := newHostCertRun(t, env, env.pluginRoot, hostCertMultiUser,
+			hostCertBackend(t, true, env.supportedCompanionPath(t, env.tree)))
 		_, _, err := host.run(t, "serve")
 		require.Error(t, err,
 			"a local_only agent runtime must not compose in multi_user mode; acceptance here is the whole failure this proves")
@@ -369,7 +449,8 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 
 		// Default-deny is absence of approval rather than a plugin-side switch, so the
 		// same host and the same artifact still compose in single-user mode.
-		single := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, hostCertBackend(t, true, ""))
+		single := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser,
+			hostCertBackend(t, true, env.supportedCompanionPath(t, env.tree)))
 		_, _, err = single.run(t, "check-config")
 		assert.NoError(t, err,
 			"the instance has to compose in single-user mode, or the denial above proves nothing about multi_user")
@@ -449,50 +530,120 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 			"a prerequisite failure must not carry the configured credential")
 	})
 
-	t.Run("the_packaged_default_bridge_resolution_is_what_the_operator_gets", func(t *testing.T) {
-		// The archive's headline convenience is that an operator who configures nothing
-		// gets the packaged private companion, resolved relative to the installed outer
-		// executable. This case runs exactly that configuration - no bridge_executable at
-		// all - and decides, from the host's own log, whether the chain actually ran.
+	t.Run("the_supported_companion_path_contract_holds_on_this_platform", func(t *testing.T) {
+		// The archive offers two ways to name the private companion: the packaged default
+		// resolved relative to the installed outer executable, and an explicit
+		// `bridge_executable`. Which of them a supported configuration uses depends on how
+		// the host binds the verified executable, and that is the host's decision, not this
+		// release's - so the maintainer adopted the measured difference as the installation
+		// contract per platform and this gate enforces it rather than re-measuring it.
 		//
-		// The outcome is platform-dependent and is a measurement rather than a verdict,
-		// because it depends on how the host binds the verified executable - the host's
-		// decision, not this release's. What is asserted on both platforms is the
-		// contract: the chain either reaches the Cursor SDK, or it fails explicitly,
-		// naming the packaged location, offering the operator remedy, and provisioning or
-		// falling back to nothing.
-		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, hostCertBackend(t, true, ""))
-		host.serve(t, func(client *http.Client, addr string) {
-			// The request is deliberately best-effort: on a platform where the default
-			// cannot be reached the host fails at bootstrap and never listens, which is
-			// itself the outcome this case decides on.
-			tryPostResponses(t, client, addr, `{"model":"`+hostCertModel+`","input":"certification ping","stream":false}`)
+		// Both arms run on every platform, and each one asserts what that platform's
+		// contract requires. The first arm is the configuration a supported operator runs,
+		// and it has to reach the Cursor SDK through the real shipped launcher and the real
+		// operator-provisioned runtime. The second arm is the unset path, which the
+		// contract either keeps working or requires to fail explicitly by name.
+		contract := hostCertCurrentContract(t)
+
+		t.Run("the_supported_spelling_reaches_the_cursor_sdk", func(t *testing.T) {
+			bridgeExecutable := env.supportedCompanionPath(t, env.tree)
+			host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser,
+				hostCertBackend(t, true, bridgeExecutable))
+			if bridgeExecutable == "" {
+				t.Logf("certifying the packaged default companion, which this platform's contract keeps supported")
+			} else {
+				t.Logf("certifying an explicit bridge_executable at %s, which this platform's contract requires",
+					filepath.ToSlash(bridgeExecutable))
+			}
+
+			host.serve(t, func(client *http.Client, addr string) {
+				// The host has to answer: composition succeeded, so a refused connection here
+				// would mean the supported configuration does not even come up. The answer
+				// itself is not a success - the credential is a fixed non-secret string, so
+				// the run ends at Cursor's own credential check with no provider work done.
+				status, body := postResponses(t, client, addr,
+					`{"model":"`+hostCertModel+`","input":"certification ping","stream":false}`)
+				assert.NotEqual(t, http.StatusOK, status,
+					"a fixed non-secret credential cannot produce a completed response, so a 200 here would mean "+
+						"the run reached something other than the credential check:\n%s\nhost output:\n%s",
+					body, host.combinedOutput())
+			})
+
+			// Reaching the SDK at all is the proof the companion chain ran: the packaged
+			// launcher started the packaged Node runtime, which loaded the
+			// operator-provisioned SDK and answered models/list. A companion that was never
+			// reached could not produce a Cursor-side answer.
+			denial := host.combinedOutput()
+			assert.Contains(t, denial, hostCertModelsListReached,
+				"the supported companion path has to reach the Cursor SDK, so the log has to show models/list "+
+					"answering; host output:\n%s", denial)
+			assert.NotContains(t, denial, hostCertBridgeExited,
+				"the bridge answered, so it cannot also have exited before answering")
+			assert.NotContains(t, denial, "npm ci",
+				"the plugin must not provision anything to reach its companion")
+			assert.NotContains(t, denial, hostCertAPIKey,
+				"the static credential must not appear anywhere in the host's own output")
 		})
 
-		denial := host.combinedOutput()
-		if !strings.Contains(denial, hostCertCompanionUnreachable) {
-			// The chain ran. Reaching the SDK at all is the proof: the private launcher
-			// started the packaged Node runtime, which loaded the operator-provisioned SDK
-			// and answered models/list, and only the credential is wrong. A companion that
-			// was never reached could not produce a Cursor-side answer.
-			assert.Contains(t, denial, hostCertModelsListReached,
-				"the packaged default reached the Cursor SDK, so the log has to show models/list answering; "+
-					"host output:\n%s", denial)
-			assert.NotContains(t, denial, hostCertBridgeExited,
-				"the bridge ran, so it cannot also have exited before answering")
-			t.Logf("MEASURED packaged default companion resolution on %s: REACHABLE", hostCertPlatformLabel())
-			return
-		}
+		t.Run("the_unset_path_is_what_this_platforms_contract_requires", func(t *testing.T) {
+			// An operator who configures nothing. Where the contract keeps the packaged
+			// default supported, that configuration has to reach the SDK; where it does not,
+			// it has to fail as an explicit prerequisite naming the field, without
+			// rewriting the path, searching for it, or provisioning anything.
+			//
+			// This arm is where the gate spends its startup budget on platforms whose
+			// contract makes the unset path fail. The connector reports the missing
+			// companion while the host composes its first generation, so the host exits
+			// before it ever logs `listening addr=` and never opens the port. `serve`
+			// waits for that line rather than for process exit, so it waits out its full
+			// hostCertStartupBudget (90s) on this platform and returns immediately on one
+			// where the default resolves. The wait is the contract's expected cost, not a
+			// slow host: the diagnostic that decides the arm has already been written by
+			// then, and a shorter budget would only make a correctly failing host look
+			// like a hung one.
+			host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, hostCertBackend(t, true, ""))
+			host.serve(t, func(client *http.Client, addr string) {
+				// Best-effort by design: where the unset path fails at composition the host
+				// never listens, and that is the outcome this arm decides on rather than a
+				// harness failure.
+				status, _ := tryPostResponses(t, client, addr,
+					`{"model":"`+hostCertModel+`","input":"certification ping","stream":false}`)
+				assert.NotEqual(t, http.StatusOK, status,
+					"the configured credential is not a real one, so an unset companion path must not serve a request")
+			})
 
-		assert.Contains(t, denial, env.archive.LauncherPath(),
-			"the diagnostic has to name the packaged companion location")
-		assert.Contains(t, denial, "bridge_executable",
-			"the diagnostic has to name the operator remedy")
-		assert.NotContains(t, denial, "npm ci",
-			"the plugin must not provision anything to reach its companion")
-		assert.NotContains(t, denial, hostCertAPIKey,
-			"a prerequisite failure must not carry the configured credential")
-		t.Logf("MEASURED packaged default companion resolution on %s: UNREACHABLE", hostCertPlatformLabel())
+			denial := host.combinedOutput()
+			if contract.packagedDefaultSupported {
+				assert.Contains(t, denial, hostCertModelsListReached,
+					"this platform's contract keeps the packaged default supported, so an operator who configures "+
+						"nothing still has to reach the Cursor SDK; host output:\n%s", denial)
+				assert.NotContains(t, denial, hostCertCompanionLauncher,
+					"the packaged default is supported here, so the connector must not report its own packaged "+
+						"launcher as unreachable")
+				assert.NotContains(t, denial, hostCertBridgeExited,
+					"the bridge answered, so it cannot also have exited before answering")
+				t.Logf("CERTIFIED packaged default companion resolution on %s: REACHABLE and supported",
+					hostCertPlatformLabel())
+				return
+			}
+
+			// The unset path is not a supported configuration here, and the contract is that
+			// it says so: the packaged location it expected, the field that fixes it, and
+			// no silent repair of either.
+			assert.Contains(t, denial, hostCertCompanionUnreachable,
+				"this platform's contract requires an explicit path, so the unset path has to report the packaged "+
+					"companion as unreachable instead of resolving something else; host output:\n%s", denial)
+			assert.Contains(t, denial, env.archive.LauncherPath(),
+				"the diagnostic has to name the packaged companion location an operator is expected to point at")
+			assert.Contains(t, denial, "bridge_executable",
+				"the diagnostic has to name the field whose value is the supported configuration")
+			assert.NotContains(t, denial, "npm ci",
+				"the plugin must not provision anything to reach its companion")
+			assert.NotContains(t, denial, hostCertAPIKey,
+				"a prerequisite failure must not carry the configured credential")
+			t.Logf("CERTIFIED packaged default companion resolution on %s: UNREACHABLE by contract, explicit "+
+				"bridge_executable required", hostCertPlatformLabel())
+		})
 	})
 
 	t.Run("the_installed_tree_is_unchanged_by_the_certified_run", func(t *testing.T) {
@@ -638,6 +789,28 @@ func (t *hostCertInstallTree) launcherPath(tb testing.TB) string {
 	archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
 	require.NoError(tb, err)
 	return filepath.Join(t.root, filepath.FromSlash(archive.LauncherPath()))
+}
+
+// supportedCompanionPath is the `bridge_executable` value this platform's supported
+// configuration uses: the full installed launcher path where the packaged default cannot
+// be reached, and unset - the documented default an operator relies on - where it can.
+//
+// Every enabled certified case composes with this value, so each one measures the
+// configuration a supported operator actually runs rather than a configuration that only
+// one platform accepts. The launcher is required to exist, because the point of the
+// explicit spelling is that it names a real packaged file; a run that pointed at an absent
+// path would prove the same thing the prerequisite cases already prove.
+func (in *hostCertInputs) supportedCompanionPath(tb testing.TB, tree *hostCertInstallTree) string {
+	tb.Helper()
+
+	if hostCertCurrentContract(tb).packagedDefaultSupported {
+		return ""
+	}
+	path := tree.launcherPath(tb)
+	require.FileExists(tb, path,
+		"the supported configuration on this platform is an explicit bridge_executable path to the "+
+			"packaged private launcher, so the launcher has to be installed in this tree")
+	return path
 }
 
 // verifyShippedChecksums re-derives the shipped checksum record against the tree.

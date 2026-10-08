@@ -30,6 +30,12 @@ Everything above certifies the plugin against this repository's own released hos
 *binary*, which is the artifact an operator actually has. That boundary is where a host can
 disagree with this repository's assumptions, so it is measured rather than reasoned about.
 
+The requirements in scope are 3.1, 3.2, 3.3, 3.4, 4.5, and 6.1, and the rows below map each
+of them to the case that covered it. **Requirement 3.5's platform-specific
+companion-path contract is certified here too**: its rows are marked 3.5 because the
+installation contract an operator depends on is only meaningful against a real host, and
+because it was the one behaviour the measurement made platform-dependent.
+
 Measured against **`github.com/matdev83/go-llm-interactive-proxy` v0.1.0**, on **both**
 platforms this project declares, by
 `TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`
@@ -37,15 +43,38 @@ platforms this project declares, by
 
 | Platform | Host binary digest | Plugin archive | Result |
 | --- | --- | --- | --- |
-| `windows/amd64` | `6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4` | assembled natively, Windows | 13/13 pass, packaged default **unreachable** |
-| `linux/amd64` | `ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c` | assembled natively, linux/amd64, official Node 22.22.3 distribution | 13/13 pass, packaged default **reachable** |
+| `windows/amd64` | `6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4` | assembled natively, Windows, `cursorsdk-0.1.0-windows-amd64.zip` (`3cf1e8bf02389dd21dec87a0c3d48411912f9f1479db140723f8e7b321775fff`) | 13/13 pass, packaged default **unreachable by contract** |
+| `linux/amd64` | `ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c` | assembled natively, linux/amd64, official Node 22.22.3 distribution, `cursorsdk-0.1.0-linux-amd64.tar.gz` (`fbd02587128d270253ae9de5ebbd63179b879b437056639e89c9369cb75b81e9`) | 13/13 pass, packaged default **reachable and supported** |
 
-The linux archive was assembled with `scripts/package-plugin.sh --node-dist
+Both install trees were provisioned by an operator step with the shipped runtime's own
+bundled npm and resolved the operator-provided **`@cursor/sdk 1.0.23`** with the pinned
+`undici 6.28.1` override; both launchers report `doctor: ok bridge=0.1.0 sdk=1.0.23
+node=22.22.3`. The linux archive was assembled with `scripts/package-plugin.sh --node-dist
 <node-v22.22.3-linux-x64>`, so its `compatibility.json` records
-`node_source_kind: official-distribution` rather than a PATH fallback. Both install trees
-were provisioned with the shipped runtime's own bundled npm and resolved the
-operator-provided **`@cursor/sdk 1.0.23`**; both launchers report
-`doctor: ok bridge=0.1.0 sdk=1.0.23`.
+`node_source_kind: official-distribution` rather than a PATH fallback; the windows archive
+was assembled with `scripts/package-plugin.ps1 -NodeDist node-v22.22.3-win-x64.zip`.
+
+### What these two archives are, and what they are not
+
+Both were assembled natively on their own platform, in a work tree that carried the
+uncommitted changes this record is written with, and neither is a publication artifact:
+
+- **windows/amd64** — `compatibility.json` records `source_revision:
+  2915fee5a89fe7da10ad6cac8f4e9c045bf69acd` together with `source_modified: true`. The
+  revision is named; the tree behind it was not clean. Of the modified files, only
+  `release.yaml` ships (the two test files and the documents are not staged into an archive),
+  so the shipped `host_certification_reason` is this record's reason, not the committed one.
+- **linux/amd64** — `compatibility.json` records **no** `source_revision` at all, with its
+  stated reason that the staged `bin/lip-backend-cursorsdk` carries no Go VCS stamp because the
+  build ran in a linked work tree. That is weaker than the windows record, not equivalent to
+  it: the linux measurement is not bound to any revision a reader can name.
+
+So this run certifies the plugin **as it stands at that base revision with these edits**, on
+both platforms, and nothing more. Publication needs clean, revision-bound natively assembled
+artifacts — assembled from a committed, clean tree so each `compatibility.json` names a
+revision with nothing modified — and the certification run repeated against those. That is
+task 3.5's work, together with the `certified` posture and the per-host `--tested-host`
+digests; none of it is claimed here, and no revision or digest is invented to fill the gap.
 
 The gate is **opt-in** and never runs on a push, because it needs a host binary this
 repository neither builds nor ships. A green default run is therefore not host
@@ -65,15 +94,20 @@ GOWORK=off go test -count=1 -timeout 40m -run TestHostReleaseCertification -v .
 One host-side precondition applies to running this on Linux: the released host refuses to
 compose its request plane as an administrative user (`stdhttp: refusing to start as
 administrative user on linux`), so the gate has to run as an unprivileged user. That is a
-host policy about serving, not a plugin finding.
+host policy about serving, not a plugin finding. The certified linux/amd64 run above was
+made as `mateusz` inside WSL2, without `-race`; race evidence for this repository comes from
+remote CI, not from this lane.
 
 The gate refuses to run without the binary *and* its expected digest, re-checks that digest
 when it finishes, verifies the install tree against the archive's own shipped
 `checksums.sha256` before it starts and again at the end, and runs the host with a minimal
 environment so nothing from the operator's machine leaks into the measurement. No Cursor
 credential is forwarded and no provider is contacted: the deterministic bridge stands in for
-the Cursor SDK, and the two cases that need the real shipped runtime are the two that end in
-an explicit prerequisite failure.
+the Cursor SDK, and where the real shipped runtime runs, the credential is a fixed
+non-secret string, so the run ends at Cursor's own credential check or in an explicit
+prerequisite failure. **That is the honest limit of this evidence**: canonical execution over
+a real Cursor SDK with a real credential is a live-provider scenario, opt-in through
+`CURSOR_SDK_LIVE=1`, and is not part of this run.
 
 | Requirement | What was verified | Case |
 | --- | --- | --- |
@@ -83,71 +117,110 @@ an explicit prerequisite failure.
 | 3.3 | The instance activates over the approved secure channel: `doctor` reports `active`, `launched: true`, and that the channel was peer-authenticated. | `secure_negotiation_activates_the_configured_instance` |
 | 3.3 | The host's own inventory lists the configured `cursorsdk` instance, so a route can select it. | `inventory_lists_the_configured_plugin_instance` |
 | 3.4 | A canonical request through the host's `openai-responses` frontend returns a completed canonical response with content, and the host's attempt log shows one attempt opened on the plugin's own candidate key. | `canonical_execution_serves_a_canonical_response_over_http` |
+| 3.5 | The platform's **supported** companion spelling reaches the Cursor SDK: on `windows/amd64` the full installed `bridge_executable` path, on `linux/amd64` the packaged default, both through the real shipped launcher and the operator-provisioned runtime, with `models/list` answering and no credential in any log. | `the_supported_companion_path_contract_holds_on_this_platform/the_supported_spelling_reaches_the_cursor_sdk` |
+| 3.5 | The **unset** path does what this platform's contract requires: still reaching the SDK where the packaged default is supported, and failing as an explicit prerequisite naming `bridge_executable` and the packaged location where it is not, without searching, rewriting, or provisioning. | `the_supported_companion_path_contract_holds_on_this_platform/the_unset_path_is_what_this_platforms_contract_requires` |
 | 4.5 | A capability the resolved profile does not serve is refused by name — HTTP 400 `missing required capabilities: tools` — with no provider content, and the same instance serves the plain request in the same run. | `a_capability_the_plugin_does_not_serve_is_refused_explicitly` |
 | 6.1 | A local-only agent runtime is denied composition under `access.mode: multi_user`, before it starts listening, while the same artifact composes in single-user mode. | `multi_user_access_denies_the_local_only_agent_runtime` |
 | 3.4 | A configured instance whose plugin artifact is absent fails closed (`enabled kind unresolved`), starts nothing, and provisions nothing. | `a_missing_plugin_artifact_fails_closed_without_automatic_installation` |
 | 3.4 | An installed tree with the private runtime removed fails as an explicit prerequisite naming the packaged location and `reinstall`. | `a_missing_private_runtime_is_an_explicit_prerequisite` |
 | 3.4 | A freshly installed, unprovisioned tree fails as an explicit prerequisite naming `@cursor/sdk`, the pinned version, and the exact per-platform `npm ci --omit=dev` invocation. | `an_unprovisioned_cursor_sdk_is_an_explicit_prerequisite` |
 
-The last two cases ran the **real shipped launcher, the real shipped private Node runtime,
-and the real operator-provisioned Cursor SDK 1.0.23** — the trees they used were unpacked
-release archives with `node_modules/@cursor/sdk` provisioned by each archive's own bundled
-npm. That is the whole private-runtime packaging decision exercised through a real host on
-both platforms: the runtime starts, the SDK resolves at the pinned version, and a missing
-prerequisite is reported rather than worked around.
+The three runtime cases ran the **real shipped launcher, the real shipped private Node
+runtime, and the real operator-provisioned Cursor SDK 1.0.23** — the trees they used were
+unpacked release archives with `node_modules/@cursor/sdk` provisioned by each archive's own
+bundled npm. That is the whole private-runtime packaging decision exercised through a real
+host on both platforms: the runtime starts, the SDK resolves at the pinned version, and a
+missing prerequisite is reported rather than worked around.
 
-### What the measurement found: the packaged default is platform-dependent
+Every enabled case composes with the companion spelling its own platform's contract
+supports, so negotiation, inventory, access denial, and the two contract arms all measure a
+configuration an operator on that platform is actually meant to run.
+
+### The companion-path contract: measured, then adopted, then enforced
 
 The archive's headline convenience is that an operator who configures nothing gets the
 packaged private companion, resolved as `../private/bridge/lip-cursor-sdk-bridge[.exe]`
 relative to the installed outer executable. **Measured, that works on `linux/amd64` and does
-not work on `windows/amd64`** with host v0.1.0. The gate decides it from the host's own log
-(`the_packaged_default_bridge_resolution_is_what_the_operator_gets`) and prints the verdict:
+not work on `windows/amd64`** with host v0.1.0. The gate decides this per platform from the
+host's own log and prints the verdict it reached:
 
 ```text
-MEASURED packaged default companion resolution on linux/amd64:   REACHABLE
-MEASURED packaged default companion resolution on windows/amd64: UNREACHABLE
+CERTIFIED packaged default companion resolution on linux/amd64:   REACHABLE and supported
+CERTIFIED packaged default companion resolution on windows/amd64: UNREACHABLE by contract, explicit bridge_executable required
 ```
 
-**linux/amd64 — reachable.** The host binds the verified executable by descriptor and execs
-it, so `os.Executable()` inside the plugin is the install-root path. The default companion
-started the packaged launcher, the packaged Node runtime loaded the provisioned SDK, and the
-chain reached Cursor's own credential check. Every other case on that platform also passes
-with an explicit `bridge_executable`.
+**linux/amd64 — reachable, and kept that way.** The host binds the verified executable by
+descriptor and execs it, so `os.Executable()` inside the plugin is the install-root path.
+The default companion started the packaged launcher, the packaged Node runtime loaded the
+provisioned SDK, and the chain reached Cursor's own credential check. An explicit
+`bridge_executable` is accepted there too, and is optional.
 
-**windows/amd64 — unreachable.** The host verifies the outer executable's digest, copies it
-into a private digest-addressed staging directory, and launches *those staged bytes*. The
-plugin then resolves its companion relative to that staging copy, which has no `private/`
-tree beside it. Measured diagnostic:
+**windows/amd64 — unreachable, by the host's staging, and that is now the contract.** The
+host verifies the outer executable's digest, copies it into a private digest-addressed
+staging directory, and launches *those staged bytes*. The plugin then resolves its companion
+relative to that staging copy, which has no `private/` tree beside it. Measured diagnostic
+from the released binary on the certified tree:
 
 ```text
-cursorsdk: private bridge launcher "...\Temp\private\bridge\lip-cursor-sdk-bridge.exe" not found
-(expected ../private/bridge/lip-cursor-sdk-bridge.exe next to the installed plugin executable;
-reinstall the Cursor plugin package or set bridge_executable to a direct bridge binary)
+bootstrap failed: runtimebundle: compile initial generation: runtimebundle: backend instance cursor-sdk
+(factory cursorsdk): runtimebundle: discovered backend "cursorsdk" instance "cursor-sdk": activate:
+handshake_failed: adapter: dial configured session: host: configure: rpc error: code = Unknown desc =
+cursorsdk: private bridge launcher "C:\Users\<operator>\AppData\Local\Temp\private\bridge\lip-cursor-sdk-bridge.exe"
+not found (expected ../private/bridge/lip-cursor-sdk-bridge.exe next to the installed plugin
+executable; reinstall the Cursor plugin package or set bridge_executable to a direct bridge binary)
 ```
 
-The failure itself is the correct behaviour — explicit, naming the packaged location, no
-installation, no fallback to another Cursor integration — and the remedy it names is the
-remedy every other measured Windows case uses: an explicit `bridge_executable` pointing at
-the packaged launcher in the install tree. That is what
-[`docs/installation.md`](installation.md#running-under-a-go-lip-host) documents.
+That failure is the correct behaviour, and it is what the Windows contract turns into a
+requirement: an operator on `windows/amd64` sets `bridge_executable` to the full path of the
+installed private launcher, and the connector's own explicit-override validation applies to
+that path unchanged. The supported arm on Windows was measured through that real launcher as
+well - the host came up, answered the request with HTTP 500, and ended at Cursor's own
+credential check. From the host's own log, taken by an out-of-band probe of the released
+binary outside the gate:
 
-This is therefore a **blocker on the packaged-default claim on Windows, not on the plugin
-and not on Linux**. Two things are deliberately not done here:
+```text
+level=WARN msg="modelregistry: inventory load failed" backend_id=cursor-sdk kind=cursorsdk
+  error_code=unavailable error.message="rpc error: code = Unknown desc = cursorsdk: models/list:
+  model_discovery_failed: models/list failed: Invalid User API Key"
+```
+
+The same `models/list` answer is what the **linux/amd64 gate run** asserts on both arms:
+`the_supported_spelling_reaches_the_cursor_sdk` and
+`the_unset_path_is_what_this_platforms_contract_requires` both require `models/list` to appear
+in the host's own output. The linux out-of-band probe adds only the wire shape, `500
+{"error":{"message":"internal error","type":"api_error","param":null}}` - the probe's value is
+that the host came up and answered at all, not the models/list evidence, which comes from the
+gate assertion. `models/list` answering with `Invalid User API Key` is the proof that the
+packaged launcher started the packaged Node runtime, that runtime loaded the
+operator-provisioned SDK, and that only the fixed non-secret credential is wrong — no provider
+work was performed and no quota spent.
+
+Three things follow from that measurement, and all three are now decided:
 
 - **The host is not patched.** Fixing it means either handing a discovered plugin its
   install tree or teaching plugins to locate it, both of which are the host's decisions and
-  would change a trust boundary this repository does not own.
-- **The posture is not flipped.** `release.yaml` stays `host_certification: uncertified` and
-  records the measured reason; `compatibility.json` carries no host artifact digest.
-  Certifying would require flipping it to `certified` and passing `-tested-host`, and
-  certifying a release whose packaged default is broken on one of the two declared
-  platforms would publish a claim the measurement contradicts.
+  would change a trust boundary this repository does not own. An explicit path is the
+  operator-visible contract instead.
+- **The connector still has one resolution rule.** There is no platform-specific search for
+  the companion anywhere in resolution: no staging-relative fallback, no `PATH` or npm lookup
+  for the default, and no automatic installation on either platform. The one place the
+  platform is read is the executable suffix that names the *same* packaged path -
+  `privateCompanionRelPath` appends `.exe` on Windows (`internal/product/private_companion.go`)
+  - and the per-platform difference lives in the installation contract and in this gate,
+  not in how the connector looks for the file.
+- **The gate enforces the contract instead of re-measuring it.** It previously accepted
+  either outcome on either platform, which meant a healthy platform and an unhealthy one
+  produced the same green result. `the_supported_companion_path_contract_holds_on_this_platform`
+  now runs both arms on both platforms and holds the run to what the contract requires, and
+  `TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract` keeps the
+  gate's contract table covering exactly the platforms the manifest declares.
 
-Whether the packaged default must work on Windows before this release can ship, or whether
-an explicit `bridge_executable` is an acceptable operator step there, is a maintainer
-decision about the host contract. What this record establishes is that the behaviour is
-platform-dependent, measured on both declared platforms, and has a tested workaround.
+**The posture is still not flipped.** `release.yaml` declares
+`host_certification: uncertified`, and `compatibility.json` carries no host artifact digest.
+That is now because **this release is not published yet** and there is no release artifact to
+certify — not because of a host defect. Flipping the posture and passing
+`--tested-host <sha256>` per host artifact is task 3.5's, and neither a digest nor a
+certification is invented here.
 
 ## Requirement 4.1 — provider and stream semantics survive extraction
 
@@ -380,9 +453,9 @@ The real-host gate is opt-in and therefore does not run on a push, which means t
 around it could drift away from it with nothing failing. `host_certification_record_test.go`
 closes that gap: it fails if the declared certification posture stops naming the measured
 result, if this document stops naming the gate and the environment it needs, if the measured
-incompatibility stops being described together with its remedy, if the installation guide
-stops printing the per-platform remedy path derived from the archive layout, or if any of
-the non-claims below disappears.
+platform difference stops being described together with its adopted remedy, if the installation
+guide stops printing the per-platform remedy path derived from the archive layout, or if any
+of the non-claims below disappears.
 
 ## Known boundary constraints
 
@@ -421,16 +494,18 @@ the third row from becoming a declaration by accident.
   those reports `BLOCKED` and exits successfully when it is not opted in, so a blocked run
   can never be mistaken for a green one. They spend real Cursor quota against a real
   credential and are run deliberately, never on a push.
-- **This plugin is not certified against a host, and that is a measured result rather
-  than a missing measurement.** A downloadable host release exists and it was measured on
-  both platforms this project declares:
+- **This plugin is not certified against a host yet, and the remaining reason is
+  publication rather than a host defect.** A downloadable host release exists and the plugin
+  was certified against it on both platforms this project declares:
   `github.com/matdev83/go-llm-interactive-proxy` v0.1.0 on windows/amd64 and
   linux/amd64. Everything in
   [the section above](#requirement-3123333445-61--real-host-install-trust-and-optional-activation)
-  passed on both except the packaged-default companion resolution, which the host's private
-  staging makes unreachable on Windows. `release.yaml` therefore declares
-  `host_certification: uncertified` with that measured reason, `compatibility.json` carries
-  no host artifact digest, and no digest is invented anywhere.
+  passed on both, including the per-platform companion-path contract, whose measured
+  difference is now the adopted installation contract rather than a finding.
+  `release.yaml` therefore still declares `host_certification: uncertified`, because this
+  release is not published and has no release artifact to certify, `compatibility.json`
+  carries no host artifact digest, and no digest is invented anywhere. Flipping the posture
+  with a measured digest is task 3.5's.
 - **No Linux host evidence is missing, and none is claimed beyond what was run.** The
   linux/amd64 run used the published linux `lipstd` from the same release and a
   natively assembled linux archive. It covered the same thirteen cases. It did **not** run

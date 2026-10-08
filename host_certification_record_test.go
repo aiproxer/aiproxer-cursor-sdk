@@ -22,8 +22,8 @@ import (
 // So the prose is bound to the gate instead. Each assertion here checks one way a release
 // claim could become false while the suite stays green: a posture that no longer matches
 // the measured result, a documented command that does not exist, an operator instruction
-// whose path no longer matches the archive layout, or a blocker that has quietly stopped
-// being described.
+// whose path no longer matches the archive layout, or a measured platform difference that
+// has quietly stopped being described.
 
 // hostCertifiedRelease declares the host release this repository's certification ran
 // against. It is recorded here rather than only in prose so the documents, the release
@@ -70,8 +70,8 @@ func TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence(
 
 	meta := readHostReleaseMetadata(t)
 	require.Equal(t, "uncertified", meta.HostCertification,
-		"the released host does not hand a discovered plugin its install tree on the platform that was "+
-			"measured, so this release cannot be certified against it yet")
+		"the certification run over this release is done on both declared platforms, but the release "+
+			"itself is not published yet, and an unpublished release is not what gets certified")
 	require.NotEmpty(t, meta.HostCertificationReason,
 		"an uncertified posture has to carry the measured reason, not an absent key")
 
@@ -90,6 +90,68 @@ func TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence(
 	}
 	assert.Contains(t, reason, "unreachable on windows",
 		"the reason has to say which platform the packaged default fails on, not just that something failed")
+
+	// The measured difference stopped being a blocker, and the reason has to say so in
+	// the same breath. Leaving it phrased as a defect would tell a reader that the
+	// release is blocked by the host when the host behaviour is now the documented
+	// contract.
+	assert.Contains(t, reason, "bridge_executable",
+		"the reason has to name the field that makes the Windows default unnecessary, because an explicit "+
+			"path to the installed launcher is the supported spelling there rather than a workaround")
+	assert.Contains(t, reason, "not published yet",
+		"the reason has to name what actually still blocks certification, which is that this release has "+
+			"not been published and therefore has no release artifact to certify")
+	assert.Contains(t, reason, "no host artifact digest",
+		"the reason has to keep stating that no host artifact digest is recorded or invented")
+}
+
+// TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract is the
+// unit test for the decision requirements 3.5 records.
+//
+// The real-host gate used to decide the companion-path question by measurement and accept
+// either answer on either platform, which made a run that found nothing wrong and a run
+// that found the packaged default unusable indistinguishable. The contract is now
+// adopted per platform, so the gate has to know, before it runs anything, what this
+// platform's supported spelling is. That knowledge is asserted here rather than trusted:
+// a table that covered one platform, or that said the same thing everywhere, would let
+// the gate certify a configuration no operator on that platform is meant to run.
+func TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract(t *testing.T) {
+	t.Parallel()
+
+	contracts := hostCertCompanionContracts()
+	declared := packagelayout.SupportedPlatforms()
+
+	platforms := make([]string, 0, len(contracts))
+	for platform := range contracts {
+		platforms = append(platforms, platform)
+	}
+	assert.ElementsMatch(t, declared, platforms,
+		"every platform the manifest declares needs a companion-path contract, or the gate would certify "+
+			"it against an answer nobody wrote down")
+	require.Len(t, contracts, 2, "the contract is per platform; a single entry would state one thing everywhere")
+
+	windows := contracts["windows/amd64"]
+	assert.Equal(t, hostCertExplicitRequired, windows.explicitCompanion,
+		"the host launches a digest-addressed staging copy of the outer executable on windows/amd64, so the "+
+			"packaged default cannot reach the installed launcher and an explicit full path is the supported spelling")
+	assert.False(t, windows.packagedDefaultSupported,
+		"windows/amd64 has no supported packaged default to fall back on")
+
+	linux := contracts["linux/amd64"]
+	assert.Equal(t, hostCertExplicitOptional, linux.explicitCompanion,
+		"the host execs the installed executable on linux/amd64, so the packaged default resolves on its own "+
+			"and an explicit override is optional there")
+	assert.True(t, linux.packagedDefaultSupported,
+		"linux/amd64 has to keep the packaged default supported with no operator action")
+
+	// One contract per platform, so the two entries cannot agree about both halves by
+	// accident, and the gate's own answer has to be the one this platform declares.
+	current, ok := contracts[hostCertPlatformLabel()]
+	require.True(t, ok, "this host runs on %s, which the manifest does not declare a contract for", hostCertPlatformLabel())
+	assert.NotEqual(t, windows.explicitCompanion, linux.explicitCompanion,
+		"the measured difference between the platforms is the whole reason the contract is per platform")
+	assert.Equal(t, current.packagedDefaultSupported, current.explicitCompanion != hostCertExplicitRequired,
+		"a platform cannot both require the explicit path and support the packaged default")
 }
 
 // TestHostCertificationRecord_DocumentsNameTheGateAndItsOptIn keeps the real-host record
@@ -136,20 +198,21 @@ func TestHostCertificationRecord_DocumentsNameTheGateAndItsOptIn(t *testing.T) {
 		"the packaging decision has to state the same posture release.yaml declares")
 }
 
-// TestHostCertificationRecord_BlockingFindingIsRecordedWithItsRemedy keeps the measured
-// finding usable.
+// TestHostCertificationRecord_MeasuredPlatformDifferenceIsRecordedWithItsAdoptedRemedy
+// keeps the measured difference usable.
 //
-// A blocker nobody can act on is not a blocker, it is a dead end. So the record has to name
-// what the host does, what the plugin then reports, the operator remedy the plugin itself
-// prints, and the fact that the remedy was exercised successfully - otherwise a reader would
-// have to re-derive the workaround from the test.
+// It is a measured difference between the two platforms, not a defect, and it now has an
+// adopted remedy. So the record has to name what the host does, what the plugin then
+// reports, the operator remedy the plugin itself prints, and the fact that the remedy was
+// exercised successfully - otherwise a reader would have to re-derive the remedy from the
+// test.
 //
-// It also has to keep the finding scoped to the platform it was measured on. The default
+// It also has to keep the difference scoped to the platform it was measured on. The default
 // resolution works on one declared platform and not the other, so a record that described it
 // as broken everywhere would send a Linux operator to set a field they do not need, and one
 // that described it as working everywhere would send a Windows operator to a bootstrap
 // failure.
-func TestHostCertificationRecord_BlockingFindingIsRecordedWithItsRemedy(t *testing.T) {
+func TestHostCertificationRecord_MeasuredPlatformDifferenceIsRecordedWithItsAdoptedRemedy(t *testing.T) {
 	t.Parallel()
 
 	doc := hostCertificationDocument(t)
@@ -158,7 +221,7 @@ func TestHostCertificationRecord_BlockingFindingIsRecordedWithItsRemedy(t *testi
 		"private/bridge",
 	} {
 		assert.Contains(t, doc, subject,
-			"the record has to name %s as part of the measured finding", subject)
+			"the record has to name %s as part of the measured platform difference", subject)
 	}
 	for _, platform := range packagelayout.SupportedPlatforms() {
 		assert.Contains(t, doc, platform,
@@ -172,6 +235,12 @@ func TestHostCertificationRecord_BlockingFindingIsRecordedWithItsRemedy(t *testi
 		"the record has to state that the packaged default fails as an explicit prerequisite rather than silently")
 	assert.Contains(t, strings.ToLower(doc), "not certified against a host",
 		"the record has to keep saying plainly that this release is not certified against a host")
+
+	// The difference is adopted, so the record has to say the remedy is the contract on
+	// one platform and optional on the other. A record that kept calling it a blocker
+	// would describe a decision the maintainer has already made.
+	assert.Contains(t, strings.ToLower(doc), "adopted",
+		"the record has to say the per-platform difference is an adopted contract, not an open question")
 
 	// The installation guide has to answer the operator's question per platform rather
 	// than once, because the answer differs.

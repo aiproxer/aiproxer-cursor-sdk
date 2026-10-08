@@ -40,12 +40,13 @@ The plugin-private bridge launcher exists as source in `cmd/lip-cursor-sdk-bridg
 
 Native archive assembly exists as tooling in this repository; see
 [Native archives](#native-archives). **No plugin release has been published and none is published from
-this branch:** there is no tag and no GitHub release, no host binary release exists to certify this plugin
-against - so the release is **uncertified** with respect to the host, and `compatibility.json` in a built
-archive says exactly that, with the reason and no invented host artifact hash - and no redistribution right is
+this branch:** there is no tag and no GitHub release - so the release is **uncertified** with respect to the
+host, because an unpublished release has no artifact to certify, and `compatibility.json` in a built archive
+says exactly that, with the reason and no invented host artifact hash. The plugin itself was certified against
+the downloadable Go-LIP `v0.1.0` release binary on both declared platforms; see
+[Host certification](docs/packaging.md#host-certification) - and no redistribution right is
 claimed for the proprietary Cursor SDK, because the archive does not ship it at all - see
-[Redistribution posture](#redistribution-posture) and
-[Host certification](docs/packaging.md#host-certification).
+[Redistribution posture](#redistribution-posture).
 
 The packaging decision behind the archive shape, including what was measured and what was only reasoned
 about, is in [`docs/packaging.md`](docs/packaging.md).
@@ -265,8 +266,9 @@ Verifying the actual content of the tree you provisioned is your responsibility;
 [Provenance and trust](docs/installation.md#provenance-and-trust).
 
 **No plugin release has been published and none may be published from this branch:** there is no tag and no
-GitHub release, and no host binary release exists to certify the plugin against, so `compatibility.json`
-records the release as uncertified with the reason and no host artifact digest.
+GitHub release, so `compatibility.json` records the release as uncertified with the reason - publication, not a
+host defect - and no host artifact digest, even though the plugin was certified against the downloadable Go-LIP
+`v0.1.0` release binary on windows/amd64 and linux/amd64.
 
 ### Verification limitations
 
@@ -354,7 +356,9 @@ explicitly when running from a source checkout, for example
 outer executable's digest and then launches a private staged copy of it, so on
 windows/amd64 the default resolution above finds no `private/` tree beside the running
 executable. The failure is explicit and names this field as the remedy. The default was
-measured working on linux/amd64; the per-platform values are in
+measured working on linux/amd64, and the two measurements together are the adopted
+installation contract: the field is required on windows/amd64 and optional on
+linux/amd64. The real-host gate enforces both halves per platform; the per-platform values are in
 [`docs/installation.md`](docs/installation.md#running-under-a-go-lip-host), and the
 measurement is in [`docs/certification.md`](docs/certification.md).
 
