@@ -173,10 +173,11 @@ func TestVerifierScriptsReportTheSameRecordedEvidence(t *testing.T) {
 // certification posture a fact rather than a default.
 //
 // The posture is declared in release.yaml, it is what compatibility.json records, and the
-// operator documentation restates it. An uncertified release has to carry a reason and
-// the prose has to agree with it; a certified one has no reason to carry, because its
-// evidence is the host artifact digests. The failure this catches is a release that reads
-// as certified - or as deliberately uncertified - in one place and not the other.
+// operator documentation restates it. The two postures owe different evidence: an uncertified
+// release owes an auditor a reason, and a certified one owes host artifact digests instead
+// and no reason at all. The failure this catches is a release that reads as certified - or as
+// deliberately uncertified - in one place and not the other, and the prose assertion follows
+// whatever release.yaml declares rather than pinning one of the two words.
 func TestReleaseMetadata_DoesNotClaimACertificationItCannotBack(t *testing.T) {
 	t.Parallel()
 
@@ -185,16 +186,17 @@ func TestReleaseMetadata_DoesNotClaimACertificationItCannotBack(t *testing.T) {
 	case "uncertified":
 		require.NotEmpty(t, meta.HostCertificationReason,
 			"an uncertified release has to say why; an absent reason reads as an oversight")
-		for _, doc := range []string{"README.md", filepath.Join("docs", "packaging.md")} {
-			require.Contains(t, readFileText(t, filepath.Join(repoRoot(t), doc)), "uncertified",
-				"%s has to state the same certification posture release.yaml declares", doc)
-		}
 	case "certified":
 		require.Empty(t, meta.HostCertificationReason,
 			"a certified release carries host artifact digests instead of a reason")
 	default:
 		t.Fatalf("release.yaml declares host_certification %q; the postures are certified and uncertified",
 			meta.HostCertification)
+	}
+
+	for _, doc := range []string{"README.md", filepath.Join("docs", "packaging.md")} {
+		require.Contains(t, readFileText(t, filepath.Join(repoRoot(t), doc)), meta.HostCertification,
+			"%s has to state the certification posture release.yaml declares", doc)
 	}
 }
 

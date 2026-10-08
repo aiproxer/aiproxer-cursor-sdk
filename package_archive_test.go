@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/aiproxer/aiproxer-cursor-sdk/internal/packagelayout"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -160,11 +161,37 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, recordString(record, "cursor_sdk_redistribution"), "not redistributed")
 		require.NotContains(t, recordString(record, "licensing_status"), "confirm redistribution rights")
 
-		// Nothing in this task certified a host artifact, so the record says so with the
-		// reason rather than naming a host it never ran against, and no digest is invented.
-		require.Equal(t, "uncertified", record["host_certification_state"])
-		require.NotEmpty(t, record["host_certification_reason"])
-		require.Empty(t, record["tested_host_artifacts"])
+		// The certification posture is whatever release.yaml declares, and the evidence
+		// beside it has to agree: a certified record names one host artifact per declared
+		// platform, and an uncertified one names none and says why. The posture is read
+		// rather than written here, so this stays a statement about the record describing
+		// what the release metadata actually declares.
+		certification := readReleaseMetadata(t).HostCertification
+		require.Equal(t, certification, record["host_certification_state"],
+			"the record has to carry the posture release.yaml declares")
+		switch certification {
+		case "certified":
+			require.Empty(t, record["host_certification_reason"],
+				"a certified record carries host artifacts instead of a reason")
+			platforms := record["host_certification_platforms"]
+			entries, ok := platforms.([]any)
+			require.True(t, ok, "a certified record has to carry its per-platform evidence")
+			require.Len(t, entries, len(packagelayout.SupportedPlatforms()),
+				"one certified platform per declared platform")
+			for _, raw := range entries {
+				entry, ok := raw.(map[string]any)
+				require.True(t, ok, "a certified platform entry has to be an object")
+				assert.Len(t, recordString(entry, "host_artifact_sha256"), 64,
+					"each certified platform names the measured host binary digest")
+				assert.NotEmpty(t, recordString(entry, "companion_contract"),
+					"each certified platform names the companion spelling it supports")
+			}
+		default:
+			require.NotEmpty(t, record["host_certification_reason"],
+				"an uncertified record has to say why, or it reads as an oversight")
+			require.Empty(t, record["tested_host_artifacts"])
+			require.Empty(t, record["host_certification_platforms"])
+		}
 		require.NotContains(t, record, "tested_host_artifact_sha256")
 
 		// The record's package verification state is written while the archive is

@@ -143,6 +143,17 @@ json_list() {
     tr ',' '\n' | sed 's/^ *//; s/ *$//; s/^"//; s/"$//; s/\r$//' | grep -v '^$' || true
 }
 
+# json_objects prints one object of a JSON array-of-objects field per line, as the compact
+# text json_string can read. The array's brackets go first, and the objects are split on the
+# brace pair between them rather than on commas, because the fields inside an object are
+# separated by commas too. The whitespace between them is part of the separator: the record
+# is indented, so a split on `},{` alone would return the whole array as one object and each
+# field lookup would then answer with the last element's value.
+json_objects() {
+  printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\": *\(\[[^]]*\]\).*/\1/p" |
+    sed 's/^\[//; s/\]$//; s/},[[:space:]]*{/}\n{/g' || true
+}
+
 # add_list_lines reports each element of a JSON array field, prefixed, or one report
 # line when the array holds nothing. It reads the elements through a here-document
 # rather than a pipe so that it appends to this run's report instead of a subshell's.
@@ -725,6 +736,27 @@ if [ -n "$record_json" ]; then
   fi
   add_list_lines tested_host_artifacts "$record_json" 'tested host artifact sha256: ' \
     'tested host artifacts: none recorded'
+
+  # The per-platform record is what makes the flat digest list above auditable, so it is
+  # reported as well: which host release and asset each platform was measured against, at
+  # which digest, and which companion spelling that platform supports. A certified record
+  # with no platform behind it is the same bare claim the digest check above rejects, so it
+  # is a finding here too rather than a silently empty line.
+  certified_platforms="$(json_objects host_certification_platforms "$record_json")"
+  if [ -z "$certified_platforms" ]; then
+    if [ "$certification_state" = certified ]; then
+      finding 'release metadata declares host_certification certified but records no host_certification_platforms; without the platform each digest belongs to, the digests cannot be checked against anything'
+    fi
+    line 'certified platforms: none recorded'
+  else
+    while IFS= read -r platform_entry; do
+      [ -n "$platform_entry" ] || continue
+      line "certified platform $(json_string platform "$platform_entry"): host $(json_string host_project "$platform_entry") $(json_string host_version "$platform_entry") asset $(json_string host_release_asset "$platform_entry") binary $(json_string host_binary "$platform_entry") sha256 $(json_string host_artifact_sha256 "$platform_entry")"
+      line "certified platform $(json_string platform "$platform_entry") companion contract: $(json_string companion_contract "$platform_entry") (bridge_executable=$(json_string bridge_executable_rel "$platform_entry"))"
+    done <<EOF
+$certified_platforms
+EOF
+  fi
 
   # What the record says about verification of this package. The packager writes the
   # record before verification can run, so the recorded state is not-performed and the

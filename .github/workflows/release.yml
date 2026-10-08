@@ -1,0 +1,604 @@
+name: Release
+
+# Every published plugin archive is produced here. There is no other path from a commit to a
+# release artifact, and that is deliberate: what a release claims about itself - the revision
+# its bytes came from, that its build tree was clean, that its source identity came from the
+# toolchain's own stamp, that the host binary it certifies against still has the digest this
+# repository recorded, and that it ships no Cursor SDK - is only checkable while the artifact is
+# being built. So it is checked here, on the platform the artifact is for, and publication is
+# gated on all of it.
+#
+# The tag is the maintainer's decision. This workflow never creates or moves one: it publishes
+# the tag that was pushed, verifies that the tag is the one the tagged revision declares, that
+# its commit is on main, and that no release for it exists yet.
+#
+# Nothing here waits for a person. The gates below are evidence, and the maintainer authorized
+# publication on their strength; a run that publishes has published something every gate
+# accepted.
+
+on:
+  push:
+    tags:
+      - cursorsdk-v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, exactly as the tagged revision declares it (for example cursorsdk-v0.1.0)
+        required: true
+        type: string
+      publish:
+        description: Publish the GitHub release once every gate has passed. Leave off to rehearse.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Two runs for one tag must not race each other into a second publication. A publication is not
+# cancellable part way through, so a second run waits instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: guard (tag, revision, and single publication)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: the Go toolchain stamps the revision it builds from only in a primary
+          # checkout with its version-control metadata present, and that stamp is what binds a
+          # published archive to a revision at all.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve the tag, its revision, and whether this run publishes
+        id: release
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Fetch the tag by name before resolving it. The checkout that started this run
+          # brought the history the tag points at, but resolving "$tag^{commit}" needs the tag
+          # itself, and a run dispatched on a branch has no reason to have it yet.
+          git fetch --force --tags origin
+          tag="${REQUESTED_TAG:-$REF_NAME}"
+          case "$tag" in
+            cursorsdk-v*) ;;
+            *) echo "::error::tag $tag is outside this project's cursorsdk-v<version> namespace"; exit 1 ;;
+          esac
+          # ^{commit} rather than the ref itself: an annotated tag resolves to the tag object,
+          # which is not the revision the archives are built from.
+          commit="$(git rev-parse "$tag^{commit}")"
+          if [ "$EVENT" = push ]; then publish=true; else publish="$REQUESTED_PUBLISH"; fi
+          {
+            echo "tag=$tag"
+            echo "commit=$commit"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "releasing $tag as $commit (publish=$publish)"
+
+      - name: The declaration has to be the one the tagged revision carries
+        env:
+          COMMIT: ${{ steps.release.outputs.commit }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Check the tagged commit out before reading anything out of the repository. A manual
+          # run starts on the branch it was dispatched from, so reading the declaration first
+          # would judge the tag against a version some other commit declares - and on the one
+          # platform this job runs on, a mismatch would look like a correct release.
+          git checkout --detach "$COMMIT"
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the checkout of $COMMIT is not clean"
+            exit 1
+          fi
+          declared="$(GOWORK=off go run ./cmd/lip-cursor-sdk-packaging release)"
+          echo "$declared"
+          want_tag="$(jq -r .tag <<<"$declared")"
+          version="$(jq -r .plugin_version <<<"$declared")"
+          if [ "$want_tag" != "$TAG" ]; then
+            echo "::error::the revision $COMMIT declares tag $want_tag, so it publishes $want_tag and not $TAG; declare a new tag in the same reviewed change, or push the declared one"
+            exit 1
+          fi
+          if [ "$want_tag" != "cursorsdk-v$version" ]; then
+            echo "::error::release metadata declares tag $want_tag for plugin version $version; the tag and the version have to agree"
+            exit 1
+          fi
+          if [ "$(jq -r .host_certification <<<"$declared")" != certified ]; then
+            echo "::error::the revision $COMMIT declares no certified host posture; publishing an uncertified plugin release is a separate decision"
+            exit 1
+          fi
+          if [ "$(jq '.platforms | length' <<<"$declared")" -ne "$(jq '.declared_platforms | length' <<<"$declared")" ]; then
+            echo "::error::the revision declares fewer certified host platforms than platforms it publishes"
+            exit 1
+          fi
+
+      - name: The tagged revision has to be a reviewed commit on main
+        env:
+          COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "::error::$COMMIT is not on origin/main; a release is published from a reviewed commit, not from a branch or an unreviewed push"
+            exit 1
+          fi
+
+      - name: A release for this tag must not exist yet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::a GitHub release already exists for $TAG: a published tag is immutable and its assets are never replaced. Rehearse the next release instead"
+            exit 1
+          fi
+          echo "no release exists for $TAG yet"
+
+  package:
+    name: package + certify (${{ matrix.slug }})
+    needs: [guard]
+    runs-on: ${{ matrix.os }}
+    # Long on purpose: this leg resolves the Cursor SDK over the network, verifies the tree
+    # several times, provisions it, and then drives the real-host certification gate, which
+    # starts a host process per case. The budget the default packaging lane uses is not one
+    # this leg can meet, and a kill would report no platform evidence at all.
+    timeout-minutes: 90
+    strategy:
+      # Both legs are evidence. Cancelling the other one when this one fails would replace a
+      # reported failure with silence for a platform nobody would learn anything about.
+      fail-fast: false
+      matrix:
+        include:
+          # Each leg names its packager and verifier in that implementation's own option
+          # spelling, because the POSIX and PowerShell scripts do not take the same flags: the
+          # packaging harness in this repository keeps that mapping for the same reason. Each
+          # verifier invocation is spelled out rather than assembled from a flag and a
+          # directory, because the tree-state flag is one of the options that differs.
+          #
+          # slug is the platform as it appears in file names - report names and the uploaded
+          # artifact's name. A platform claim is "os/arch", and a slash in it is a path
+          # separator everywhere it is used as a name, so the two spellings are kept apart
+          # deliberately rather than converted into one another at each use.
+          - os: ubuntu-latest
+            platform: linux/amd64
+            slug: linux-amd64
+            archive_extension: tar.gz
+            node_dist: node-v22.22.3-linux-x64.tar.gz
+            packager: bash scripts/package-plugin.sh --out-dir dist --node-dist $env:NODE_DIST
+            verifier_staged: bash scripts/verify-package.sh --package-root $env:STAGED_ROOT --tree-state shipped
+            verifier_unpacked: bash scripts/verify-package.sh --package-root $env:INSTALL_ROOT --tree-state shipped
+            verifier_installed: bash scripts/verify-package.sh --package-root $env:INSTALL_ROOT
+          - os: windows-latest
+            platform: windows/amd64
+            slug: windows-amd64
+            archive_extension: zip
+            node_dist: node-v22.22.3-win-x64.zip
+            packager: "& ./scripts/package-plugin.ps1 -OutDir dist -NodeDist $env:NODE_DIST"
+            verifier_staged: "& ./scripts/verify-package.ps1 -PackageRoot $env:STAGED_ROOT -TreeState shipped"
+            verifier_unpacked: "& ./scripts/verify-package.ps1 -PackageRoot $env:INSTALL_ROOT -TreeState shipped"
+            verifier_installed: "& ./scripts/verify-package.ps1 -PackageRoot $env:INSTALL_ROOT"
+    defaults:
+      run:
+        # One shell for both legs: the steps below are about release evidence rather than about
+        # either platform's scripting dialect, and the packager and verifier each leg uses are
+        # named by the matrix.
+        shell: pwsh
+    env:
+      GOWORK: "off"
+      RELEASE_TAG: ${{ needs.guard.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.guard.outputs.commit }}
+      RELEASE_PLATFORM: ${{ matrix.platform }}
+      RELEASE_SLUG: ${{ matrix.slug }}
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.guard.outputs.commit }}
+          # Full history, so the toolchain stamps the revision each record then has to name.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tree has to be exactly the tagged revision
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:RELEASE_COMMIT) {
+            throw "the checkout is not $env:RELEASE_COMMIT; a published archive is built from the tagged revision or not at all"
+          }
+          $dirty = @(git status --porcelain)
+          if ($dirty.Count -gt 0) { throw "the checkout is dirty: $($dirty -join ', ')" }
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node (22.22.3)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: bridge-node/package-lock.json
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Read this platform's certified host artifact out of the declared release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The declaration is read through the same tool that renders it into an archive, so
+          # the workflow cannot act on a host artifact the release metadata would refuse to
+          # ship.
+          $release = go run ./cmd/lip-cursor-sdk-packaging release | ConvertFrom-Json
+          $entry = @($release.platforms) | Where-Object { $_.platform -eq $env:RELEASE_PLATFORM }
+          if (-not $entry) { throw "the release declares no certified host artifact for $env:RELEASE_PLATFORM" }
+          foreach ($name in @('host_release_url', 'host_checksums_url', 'host_release_asset', 'host_checksums_asset',
+              'host_binary', 'host_artifact_sha256', 'companion_contract', 'bridge_executable_rel')) {
+            if (-not $entry.$name) { throw "the declared host artifact for $env:RELEASE_PLATFORM has no $name" }
+            "$($name.ToUpper())=$($entry.$name)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+          "declared: tag $($release.tag), plugin $($release.plugin_version), host certification $($release.host_certification)"
+
+      - name: Download the recorded host artifact and check it against the host's own digests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'host' | Out-Null
+          $asset = Join-Path 'host' $env:HOST_RELEASE_ASSET
+          Invoke-WebRequest -Uri $env:HOST_RELEASE_URL -OutFile $asset
+          Invoke-WebRequest -Uri $env:HOST_CHECKSUMS_URL -OutFile (Join-Path 'host' $env:HOST_CHECKSUMS_ASSET)
+          # Two checks, in this order. The host's published checksum file says these are the
+          # bytes it released; the digest this repository recorded says which of them the
+          # certification ran against. Either one alone would accept a re-uploaded asset, or
+          # the wrong build of the right release.
+          $downloaded = (Get-FileHash -Algorithm SHA256 -Path $asset).Hash.ToLower()
+          $published = @(Select-String -Path (Join-Path 'host' $env:HOST_CHECKSUMS_ASSET) `
+              -Pattern ('^([0-9a-f]{64})\s+' + [regex]::Escape($env:HOST_RELEASE_ASSET) + '\s*$'))
+          if ($published.Count -ne 1) { throw "$($env:HOST_CHECKSUMS_ASSET) does not list $($env:HOST_RELEASE_ASSET) exactly once" }
+          $released = $published[0].Matches[0].Groups[1].Value
+          if ($released -ne $downloaded) {
+            throw "the downloaded host asset hashes to $downloaded, not to the $released the host published"
+          }
+          # Unpack by what the asset actually is. Expand-Archive is PowerShell's own and reads
+          # a zip on either platform; tar is the system's and reads the POSIX archive on either
+          # platform. Neither is asked to read a format it does not read, which is the whole
+          # reason the branch exists rather than one call for both.
+          if ($env:HOST_RELEASE_ASSET.EndsWith('.zip')) {
+            Expand-Archive -LiteralPath $asset -DestinationPath 'host' -Force
+          } else {
+            tar -xzf $asset -C host
+            if ($LASTEXITCODE -ne 0) { throw "tar could not unpack $($env:HOST_RELEASE_ASSET)" }
+          }
+          $binary = Join-Path 'host' $env:HOST_BINARY
+          if (-not (Test-Path -LiteralPath $binary)) { throw "the host asset carries no $($env:HOST_BINARY)" }
+          # The recorded digest is the certification's evidence, so it is checked against the
+          # bytes rather than trusted: a host release that was rebuilt and re-tagged would
+          # otherwise certify this release against a binary nobody measured.
+          $digest = (Get-FileHash -Algorithm SHA256 -Path $binary).Hash.ToLower()
+          if ($digest -ne $env:HOST_ARTIFACT_SHA256) {
+            throw "the host binary hashes to $digest but this release certifies $($env:HOST_ARTIFACT_SHA256); the recorded certification no longer describes this host"
+          }
+          "HOST_BINARY_PATH=$binary" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "certified host $($env:RELEASE_PLATFORM): $($env:HOST_BINARY) $digest from $($env:HOST_RELEASE_ASSET)"
+
+      - name: Download the private runtime and check it against the Node release digests
+        env:
+          NODE_DIST_NAME: ${{ matrix.node_dist }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:NODE_DIST_NAME -replace '^node-v([0-9.]+)-.*$', '$1'
+          $sums = (Invoke-WebRequest -Uri "https://nodejs.org/dist/v$version/SHASUMS256.txt").Content
+          New-Item -ItemType Directory -Force -Path 'node-dist' | Out-Null
+          $file = Join-Path 'node-dist' $env:NODE_DIST_NAME
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$version/$($env:NODE_DIST_NAME)" -OutFile $file
+          # The archive ships this runtime, so the bytes have to be the ones nodejs.org
+          # published: a distribution re-uploaded under the same name would otherwise ship
+          # inside a release whose record claims an official distribution.
+          $listed = @(($sums -split "`n") | Where-Object {
+            $_ -match ('^\s*([0-9a-f]{64})\s+' + [regex]::Escape($env:NODE_DIST_NAME) + '\s*$')
+          })
+          if ($listed.Count -ne 1) { throw "the Node digests for v$version do not list $($env:NODE_DIST_NAME) exactly once" }
+          $expected = ([regex]::Match($listed[0], '([0-9a-f]{64})')).Groups[1].Value
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $file).Hash.ToLower()
+          if ($actual -ne $expected) { throw "$($env:NODE_DIST_NAME) hashes to $actual, not to the $expected nodejs.org published" }
+          "NODE_DIST=$file" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "private runtime $($env:NODE_DIST_NAME) $actual"
+
+      - name: Assemble the release archive natively
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ${{ matrix.packager }}
+          if ($LASTEXITCODE -ne 0) { throw "the packager exited $LASTEXITCODE" }
+
+      - name: The archive has to be the tagged revision, built clean, and certified
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The source identity gate. Three separate claims, because a record can satisfy two
+          # of them and fail the third: the revision the bytes were compiled from, the
+          # cleanliness of the tree they were compiled in, and the basis the record says that
+          # came from. The last one is what rules out a resolved-by-the-packager revision, which
+          # is the basis this repository's own work trees produce and a published archive must
+          # not: the point of stamping is that the identity is a fact about the bytes.
+          $staged = @(Get-ChildItem dist -Directory)[0].FullName
+          $record = Get-Content (Join-Path $staged 'compatibility.json') -Raw | ConvertFrom-Json
+          if ($record.source_revision -ne $env:RELEASE_COMMIT) {
+            throw "the record names source_revision $($record.source_revision), but this release is $env:RELEASE_COMMIT; a published archive has to name the revision its bytes were built from"
+          }
+          if ($record.source_modified -ne $false) {
+            throw "the record says source_modified $($record.source_modified); a published archive is built from a clean tree, and an unestablished state is not a clean one"
+          }
+          # The stamp's own wording is matched rather than the words "VCS stamp", because the
+          # record's *absence* message also contains that phrase ("carries no Go build VCS
+          # stamp"): a shorter pattern would accept a build with no stamp at all.
+          if ($record.source_stamp_evidence -notmatch 'Go build VCS stamp inside the staged') {
+            throw "the record's source identity came from: $($record.source_stamp_evidence); this release builds in a primary checkout of the tagged commit, so the toolchain's own stamp is what binds it"
+          }
+
+          # The certification gate. The archive has to say it is certified, name the host
+          # artifact this platform was measured against, and repeat that platform's contract -
+          # so a record whose per-platform evidence disagreed with the declaration, or whose
+          # contract had quietly become one general rule, cannot be published.
+          if ($record.host_certification_state -ne 'certified') { throw "the record is $($record.host_certification_state), not certified" }
+          if (@($record.tested_host_artifacts) -notcontains $env:HOST_ARTIFACT_SHA256) {
+            throw "the record does not name the $($env:HOST_ARTIFACT_SHA256) this platform was certified against"
+          }
+          $entry = @($record.host_certification_platforms) | Where-Object { $_.platform -eq $env:RELEASE_PLATFORM }
+          if (-not $entry) { throw "the record certifies no platform for this archive" }
+          if ($entry.host_artifact_sha256 -ne $env:HOST_ARTIFACT_SHA256) { throw "the record's per-platform host digest disagrees with the declaration" }
+          if ($entry.companion_contract -ne $env:HOST_COMPANION_CONTRACT) { throw "the record's companion contract for $env:RELEASE_PLATFORM disagrees with the declared one" }
+          if ($entry.bridge_executable_rel -ne $env:HOST_BRIDGE_EXECUTABLE_REL) { throw "the record's bridge_executable path for $env:RELEASE_PLATFORM disagrees with the archive layout" }
+
+          $archives = @(Get-ChildItem dist -Filter "cursorsdk-*.${{ matrix.archive_extension }}" -File)
+          if ($archives.Count -ne 1) { throw "expected exactly one assembled archive in dist for $env:RELEASE_PLATFORM" }
+          $sidecar = Get-Content "$($archives[0].FullName).sha256" -Raw
+          $archiveDigest = ($sidecar.Trim() -split '\s+')[0].ToLower()
+          "STAGED_ROOT=$staged" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PLUGIN_ARCHIVE=$($archives[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PLUGIN_ARCHIVE_SHA256=$archiveDigest" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "staged tree: $($record.source_revision), clean, $($entry.companion_contract), certified against $($entry.host_artifact_sha256)"
+
+      - name: Unpack the archive into a fresh tree
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Everything below runs against the bytes that are about to be published, unpacked
+          # from the archive itself, and not against the packager's staging directory. The two
+          # are not the same tree - an archive round trip can drop a file, flatten a mode, or
+          # nest a directory differently - and the certification is evidence about the archive
+          # an operator downloads, so it is run on that archive.
+          #
+          # The staging directory is deliberately left behind untouched, and its shipped audit
+          # runs on it: what must carry no Cursor SDK is the archive as assembled, before
+          # anything in this job provisioned a tree anywhere.
+          Remove-Item -Recurse -Force 'unpacked' -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path 'unpacked' | Out-Null
+          if ($env:PLUGIN_ARCHIVE.EndsWith('.zip')) {
+            Expand-Archive -LiteralPath $env:PLUGIN_ARCHIVE -DestinationPath 'unpacked' -Force
+          } else {
+            tar -xzf $env:PLUGIN_ARCHIVE -C unpacked
+            if ($LASTEXITCODE -ne 0) { throw "tar could not unpack $($env:PLUGIN_ARCHIVE)" }
+          }
+          $tree = @(Get-ChildItem 'unpacked' -Directory)
+          if ($tree.Count -ne 1) { throw "the archive unpacks to $($tree.Count) directories; it has to be exactly one install directory" }
+          if (-not (Test-Path -LiteralPath (Join-Path $tree[0].FullName 'plugin.backendplugin.json'))) {
+            throw "the unpacked archive has no plugin.backendplugin.json at the top of its one directory"
+          }
+          "INSTALL_ROOT=$($tree[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "unpacked $(Split-Path -Leaf $env:PLUGIN_ARCHIVE) into $($tree[0].FullName)"
+
+      - name: Audit the staged archive as it leaves the build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ${{ matrix.verifier_staged }} |
+            Tee-Object -FilePath "verify-shipped-$env:RELEASE_SLUG.txt"
+          if ($LASTEXITCODE -ne 0) { throw "the shipped archive failed verification on $env:RELEASE_PLATFORM" }
+
+      - name: Audit the unpacked archive as an operator receives it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ${{ matrix.verifier_unpacked }} |
+            Tee-Object -FilePath "verify-unpacked-$env:RELEASE_SLUG.txt"
+          if ($LASTEXITCODE -ne 0) { throw "the unpacked archive failed shipped-state verification on $env:RELEASE_PLATFORM" }
+
+      - name: Provision the Cursor SDK the way an operator does
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The command comes from the unpacked archive's own record, which the shipped audit
+          # above has just cross-checked, rather than from a second spelling of it here: a
+          # workflow that composed the path itself could provision a tree that is not the one
+          # the archive documents.
+          #
+          # This downloads @cursor/sdk from npm under the operator terms the archive names. It
+          # contacts no provider and spends no quota: the certification gate below runs with a
+          # fixed non-secret credential and ends at the SDK's own credential check.
+          $record = Get-Content (Join-Path $env:INSTALL_ROOT 'compatibility.json') -Raw | ConvertFrom-Json
+          $command = $record.cursor_sdk_provisioning_command.Replace('<plugin-root>', $env:INSTALL_ROOT)
+          Write-Host "provisioning with: $command"
+          Invoke-Expression $command
+          if ($LASTEXITCODE -ne 0) { throw "provisioning exited $LASTEXITCODE" }
+
+      - name: Verify the provisioned install tree
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ${{ matrix.verifier_installed }} |
+            Tee-Object -FilePath "verify-installed-$env:RELEASE_SLUG.txt"
+          if ($LASTEXITCODE -ne 0) { throw "the provisioned install tree failed verification on $env:RELEASE_PLATFORM" }
+
+      - name: The released host refuses to serve as an administrative user
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Say so here, where it is obvious, instead of inside a gate failure: a
+          # certification run that reached this as root would fail on the host's own policy
+          # rather than on anything about the plugin.
+          if ((id -u) -eq 0) {
+            throw "the released host refuses to compose its request plane as an administrative user, so this leg has to run as an unprivileged user"
+          }
+
+      - name: Certify this archive against the released host on this platform
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The gate is given the archive about to be published and its recorded digest, the
+          # host binary and the digest this release certifies, and the provisioned install
+          # tree unpacked from that same archive. Set here rather than in the step's env so the
+          # values the earlier steps resolved are the ones the gate reads.
+          #
+          # No Cursor credential is set here and none is forwarded: the gate's own cases use a
+          # fixed non-secret value and stop at the SDK's credential check, so this leg spends no
+          # provider quota.
+          $env:LIP_HOST_CERT_GATE = '1'
+          $env:LIP_HOST_CERT_HOST_BINARY = $env:HOST_BINARY_PATH
+          $env:LIP_HOST_CERT_HOST_SHA256 = $env:HOST_ARTIFACT_SHA256
+          $env:LIP_HOST_CERT_PLUGIN_ROOT = $env:INSTALL_ROOT
+          $env:LIP_HOST_CERT_PLUGIN_ARCHIVE = $env:PLUGIN_ARCHIVE
+          $env:LIP_HOST_CERT_PLUGIN_ARCHIVE_SHA256 = $env:PLUGIN_ARCHIVE_SHA256
+          go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 |
+            Tee-Object -FilePath "host-cert-$env:RELEASE_SLUG.txt"
+          if ($LASTEXITCODE -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM" }
+
+      - name: Collect what this leg publishes
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'publish' | Out-Null
+          Copy-Item $env:PLUGIN_ARCHIVE publish/
+          Copy-Item "$($env:PLUGIN_ARCHIVE).sha256" publish/
+          Copy-Item "verify-shipped-$env:RELEASE_SLUG.txt" publish/
+          Copy-Item "verify-unpacked-$env:RELEASE_SLUG.txt" publish/
+          Copy-Item "verify-installed-$env:RELEASE_SLUG.txt" publish/
+          Copy-Item "host-cert-$env:RELEASE_SLUG.txt" publish/
+          Get-ChildItem publish | Select-Object Name, Length
+
+      - name: Upload the assembled archive and its evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cursorsdk-${{ needs.guard.outputs.tag }}-${{ matrix.slug }}
+          path: publish/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish (immutable release, checksums, provenance)
+    needs: [guard, package]
+    # The guard decides whether this run publishes; a rehearsal stops here with every gate
+    # above already reported.
+    if: needs.guard.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Scoped by permission, not by approval: this job writes the release, so it needs write
+    # access and an identity token for the attestation, and it needs nothing else.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.guard.outputs.tag }}
+    steps:
+      # The notes are written from the same declaration the artifacts were built from, so the
+      # published release describes the release that was actually published: the checkout is
+      # the tagged commit, not whatever the run's default ref happens to be.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.guard.outputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Download what the matrix legs produced
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          pattern: cursorsdk-${{ needs.guard.outputs.tag }}-*
+          merge-multiple: true
+
+      - name: Re-check every archive and write the release checksum file
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archives = @(Get-ChildItem artifacts -Filter 'cursorsdk-*' -File | Where-Object { $_.Name -match '\.(zip|tar\.gz)$' })
+          if ($archives.Count -eq 0) { throw 'no archive to publish' }
+          $lines = foreach ($archive in $archives) {
+            # The digest each packaging leg recorded beside its archive, re-checked here
+            # against the file that was uploaded: the artifact that reached this job is the one
+            # that gets published, not the one a log said was built.
+            $sidecar = "$($archive.FullName).sha256"
+            if (-not (Test-Path -LiteralPath $sidecar)) { throw "$($archive.Name) has no recorded digest beside it" }
+            $recorded = ((Get-Content $sidecar -Raw).Trim() -split '\s+')[0].ToLower()
+            $actual = (Get-FileHash -Algorithm SHA256 -Path $archive.FullName).Hash.ToLower()
+            if ($recorded -ne $actual) { throw "$($archive.Name) hashes to $actual, not to the $recorded its packaging leg recorded" }
+            "$actual  $($archive.Name)"
+          }
+          Set-Content -Path artifacts/checksums.txt -Value $lines -Encoding utf8
+          # Checked with the tool an operator uses, over the file that is about to be
+          # published: a checksum file nothing has ever verified is decoration.
+          Push-Location artifacts
+          try { sha256sum -c checksums.txt } finally { Pop-Location }
+          Get-Content artifacts/checksums.txt
+
+      - name: Write the release notes from the declared release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = go run ./cmd/lip-cursor-sdk-packaging release | ConvertFrom-Json
+          $platforms = @($release.platforms)
+          $notes = @(
+            "Cursor SDK backend plugin $($release.plugin_version) ($($release.plugin_id)).",
+            '',
+            'Install the archive for your platform, check it against `checksums.txt`, unpack it into the Go-LIP',
+            'plugin root, and provision the Cursor SDK with the command the archive records in `compatibility.json`.',
+            'A system Node is not required, and the Cursor SDK is not redistributed: this archive ships the pinned',
+            '`package.json` and `package-lock.json`, and you provision the SDK yourself.',
+            '',
+            'Companion configuration, as certified per platform:',
+            ''
+          )
+          foreach ($platform in $platforms) {
+            $notes += "- ``$($platform.platform)``: $($platform.companion_contract), pointing ``bridge_executable`` at ``$($platform.bridge_executable_rel)`` inside the install root"
+          }
+          $notes += @(
+            '',
+            "Certified against $($platforms[0].host_project) $($platforms[0].host_version): each archive records the host",
+            'binary digest it was certified against, per platform, in `host_certification_platforms`.',
+            '',
+            'Every archive is assembled natively, audited as shipped and as unpacked with `scripts/verify-package`,',
+            'and certified against the released host on its own platform before publication. Build provenance is',
+            'attested for every asset on this release.'
+          )
+          Set-Content -Path artifacts/release-notes.md -Value $notes -Encoding utf8
+          Get-Content artifacts/release-notes.md
+
+      - name: Attest build provenance for the published archives
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: artifacts/cursorsdk-*
+
+      - name: Publish the release for the tag that was reviewed
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # --verify-tag publishes the tag the guard reviewed and never creates one, so a run
+          # cannot publish something the guard did not check. gh release create also refuses to
+          # replace an existing release, which is the same immutability the guard asserted
+          # before it started building.
+          $assets = @(Get-ChildItem artifacts -File | Where-Object { $_.Name -ne 'release-notes.md' } |
+              ForEach-Object { $_.FullName })
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag `
+            --title $env:RELEASE_TAG --notes-file artifacts/release-notes.md $assets
+          if ($LASTEXITCODE -ne 0) { throw "gh release create exited $LASTEXITCODE" }

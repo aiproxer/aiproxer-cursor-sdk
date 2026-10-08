@@ -105,9 +105,17 @@ shipped bridge manifest names. `scripts/verify-package --tree-state shipped` add
 that contains the provisioned tree at all, so the no-redistribution rule is checkable on the bytes an
 operator receives rather than only asserted by the packager.
 
-**No plugin artifact has been released: there is no tag and no GitHub release. No Go-LIP host binary release
-exists to certify this plugin against either, so `compatibility.json` records the release as `uncertified`
-with the reason and carries no host artifact digest; none is invented anywhere.**
+**The host certification evidence is recorded, per platform, and nothing is invented in it.**
+`release.yaml` declares `host_certification: certified` with one `certified_host_artifacts`
+entry per declared platform, naming the Go-LIP host release
+(`matdev83/go-llm-interactive-proxy` `v0.1.0`), the asset of it that was downloaded, the
+checksum file the host published beside it, the host binary inside it, the sha256 that binary
+was measured at, and the companion contract that platform supports. The renderer copies that
+into every archive's `host_certification_platforms` and `tested_host_artifacts` and refuses a
+certified posture with a missing, malformed, duplicated, or undeclared-platform entry, so a
+published artifact cannot name host evidence this repository does not record. Those digests are
+measurements of downloaded host binaries; none of them is a claim about this repository's own
+code, and no digest here was produced by anything other than hashing the artifact it names.
 
 The private Node runtime is staged from one of three sources, and `compatibility.json` records which one
 in `private_runtime_source`, so an archive never overstates where its runtime came from:
@@ -141,9 +149,14 @@ clean, or as `unknown`: a state nothing established is left out of the record an
 recording it as clean would assert something about the artifact that nobody checked. The record also carries
 the declared platform set alongside the platforms that one archive is not evidence for, and the package
 verification state - which is `not-performed` in every archive, because the packager writes the record before
-verification can run. It never records a verification outcome that has not happened. `release_tag_declared`
-records the tag `release.yaml` declares for a future publication - a declaration, not a publication: no such
-tag exists and no release has been made. Neither artifact is checked into this repository.
+verification can run. It never records a verification outcome that has not happened.
+`release_tag_declared` records the tag `release.yaml` declares for this publication -
+`cursorsdk-v0.1.0` - and the release itself is produced by
+`.github/workflows/release.yml` from that tag, which is where the source identity above is
+established for a published archive: each matrix leg builds in a primary checkout of the tagged
+commit, so the toolchain's VCS stamp is the basis the record states, and the leg refuses to
+continue unless `source_revision` is the tagged commit with `source_modified: false`. No
+release artifact is checked into this repository.
 
 ## Current commit scope
 
@@ -170,9 +183,10 @@ under the same terms as the rest of it: `internal/packagelayout` (the single arc
 `cmd/lip-cursor-sdk-packaging` (its build-time reporting and metadata-rendering surface),
 `scripts/package-plugin.{sh,ps1}`, `scripts/verify-package.{sh,ps1}`, `scripts/lib/install-ownership.ps1`,
 `cmd/lip-cursor-sdk-bridge/sdk.go` (the run-time SDK preflight), `docs/installation.md` (the operator
-guide), and the packaging tests. They contain no relocated host code and no JavaScript. **No plugin
-artifact has been released: there is no tag and no GitHub release, and no built archive in this
-repository records a tested host artifact.**
+guide), and the packaging tests. They contain no relocated host code and no JavaScript. The
+release process itself is original work as well: `.github/workflows/release.yml` assembles,
+audits, and certifies each platform's archive natively before publication and never creates or
+moves a tag.
 
 The plugin-private bridge launcher in `cmd/lip-cursor-sdk-bridge/` is original work added in this
 repository and is MIT-licensed under the same terms as the rest of this repository. It is a small

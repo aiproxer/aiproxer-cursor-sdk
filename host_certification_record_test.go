@@ -60,49 +60,70 @@ func hostCertificationDocument(tb testing.TB) string {
 // TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence keeps the
 // release metadata's reason true.
 //
-// The reason used to say no downloadable host release existed. That is no longer the state
-// of the world: v0.1.0 is published and was measured. A reason that still claimed the
-// deferral would be stale in the direction that hides work that was actually done, and it
-// would leave a reader with no way to tell "we could not test this" from "we tested it and
-// found something".
+// The reason used to say no downloadable host release existed, and then that the release was
+// simply not published yet. Neither is the state of the world: v0.1.0 is published, this
+// release carries the measured host artifacts per platform, and a stale reason in either
+// direction would hide work that was done or describe a blocker that does not exist. The
+// shape of the assertion follows the posture, because the two postures carry different
+// evidence: an uncertified release owes an auditor a reason, and a certified one owes
+// nothing but its artifacts.
 func TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence(t *testing.T) {
 	t.Parallel()
 
 	meta := readHostReleaseMetadata(t)
-	require.Equal(t, "uncertified", meta.HostCertification,
-		"the certification run over this release is done on both declared platforms, but the release "+
-			"itself is not published yet, and an unpublished release is not what gets certified")
-	require.NotEmpty(t, meta.HostCertificationReason,
-		"an uncertified posture has to carry the measured reason, not an absent key")
+	switch meta.HostCertification {
+	case "uncertified":
+		require.NotEmpty(t, meta.HostCertificationReason,
+			"an uncertified posture has to carry the measured reason, not an absent key")
 
-	reason := strings.ToLower(strings.Join(strings.Fields(meta.HostCertificationReason), " "))
-	assert.NotContains(t, reason, "no downloadable",
-		"a published host release exists now; the reason has to state what the measurement found")
-	assert.NotContains(t, reason, "deferred pending separate maintainer authorization",
-		"host publication happened; the reason has to name the measured finding instead")
-	assert.Contains(t, reason, hostCertifiedHostVersion,
-		"the reason has to name the host release the measurement ran against")
-	assert.Contains(t, reason, "staging",
-		"the measured finding is that the host stages the verified executable; the reason has to say so")
-	for _, platform := range packagelayout.SupportedPlatforms() {
-		assert.Contains(t, reason, platform,
-			"the measurement covers %s, so the reason has to name what was measured there", platform)
+		reason := strings.ToLower(strings.Join(strings.Fields(meta.HostCertificationReason), " "))
+		assert.NotContains(t, reason, "no downloadable",
+			"a published host release exists now; the reason has to state what the measurement found")
+		assert.NotContains(t, reason, "deferred pending separate maintainer authorization",
+			"host publication happened; the reason has to name the measured finding instead")
+		for _, platform := range packagelayout.SupportedPlatforms() {
+			assert.Contains(t, reason, platform,
+				"the measurement covers %s, so the reason has to name what was measured there", platform)
+		}
+	case "certified":
+		assert.Empty(t, meta.HostCertificationReason,
+			"a certified release carries the per-platform host artifacts instead of a reason; a reason here "+
+				"would state why the recorded digests are not evidence")
+	default:
+		t.Fatalf("release.yaml declares host_certification %q; the postures are certified and uncertified",
+			meta.HostCertification)
 	}
-	assert.Contains(t, reason, "unreachable on windows",
-		"the reason has to say which platform the packaged default fails on, not just that something failed")
+}
 
-	// The measured difference stopped being a blocker, and the reason has to say so in
-	// the same breath. Leaving it phrased as a defect would tell a reader that the
-	// release is blocked by the host when the host behaviour is now the documented
-	// contract.
-	assert.Contains(t, reason, "bridge_executable",
-		"the reason has to name the field that makes the Windows default unnecessary, because an explicit "+
-			"path to the installed launcher is the supported spelling there rather than a workaround")
-	assert.Contains(t, reason, "not published yet",
-		"the reason has to name what actually still blocks certification, which is that this release has "+
-			"not been published and therefore has no release artifact to certify")
-	assert.Contains(t, reason, "no host artifact digest",
-		"the reason has to keep stating that no host artifact digest is recorded or invented")
+// TestHostCertificationRecord_NamesTheHostReleaseTheMeasurementRanAgainst keeps the
+// declared evidence tied to a release anybody can download.
+//
+// A digest is only evidence about a version if the record says which version, and it is only
+// checkable if it says which artifact of that release was measured. Both are declared per
+// platform, so this asserts they are declared rather than asserting any particular digest:
+// the digests themselves are the measurement, and this repository records them in one place
+// rather than restating them here.
+func TestHostCertificationRecord_NamesTheHostReleaseTheMeasurementRanAgainst(t *testing.T) {
+	t.Parallel()
+
+	meta := readCertifiedReleaseMetadata(t)
+	// A release's asset names carry its version without the leading v, so the relation the
+	// assertion can hold is between the recorded version and the recorded asset, not between
+	// the recorded version and one spelling of it.
+	version := strings.TrimPrefix(hostCertifiedHostVersion, "v")
+	for _, artifact := range meta.Artifacts {
+		assert.Equal(t, hostCertifiedHostProject, artifact.HostProject,
+			"%s has to name the host project the measurement ran against", artifact.Platform)
+		assert.Equal(t, hostCertifiedHostVersion, artifact.HostVersion,
+			"%s has to name the host release version the measurement ran against", artifact.Platform)
+		assert.Contains(t, artifact.HostReleaseAsset, version,
+			"%s has to name an asset of that same release; a digest measured against some other artifact is not "+
+				"evidence for this host version", artifact.Platform)
+		assert.NotEmpty(t, artifact.HostChecksumsAsset,
+			"%s has to name the checksum file the host published its artifacts in", artifact.Platform)
+		assert.NotEmpty(t, artifact.HostBinary,
+			"%s has to name the binary inside the asset the measurement ran", artifact.Platform)
+	}
 }
 
 // TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract is the
@@ -118,7 +139,7 @@ func TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence(
 func TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract(t *testing.T) {
 	t.Parallel()
 
-	contracts := hostCertCompanionContracts()
+	contracts := hostCertCompanionContracts(t)
 	declared := packagelayout.SupportedPlatforms()
 
 	platforms := make([]string, 0, len(contracts))
@@ -190,11 +211,14 @@ func TestHostCertificationRecord_DocumentsNameTheGateAndItsOptIn(t *testing.T) {
 	assert.Contains(t, lowered, "opt-in",
 		"the record has to say the real-host gate is opt-in rather than default verification")
 
-	// The packaging decision and the record must agree on the posture.
+	// The packaging decision and the record must agree on the posture, and the posture is
+	// read from release.yaml rather than written here: a test that pinned one of the two
+	// words would have to be edited at every flip, and would keep passing in the direction
+	// that hid the change.
 	packaging := readFileText(t, filepath.Join(repoRoot(t), "docs", "packaging.md"))
 	assert.Contains(t, packaging, hostCertifiedHostVersion,
 		"the packaging decision has to name the host release the certification ran against")
-	assert.Contains(t, packaging, "uncertified",
+	assert.Contains(t, packaging, readHostReleaseMetadata(t).HostCertification,
 		"the packaging decision has to state the same posture release.yaml declares")
 }
 
@@ -233,12 +257,6 @@ func TestHostCertificationRecord_MeasuredPlatformDifferenceIsRecordedWithItsAdop
 	}
 	assert.Contains(t, doc, "explicit prerequisite",
 		"the record has to state that the packaged default fails as an explicit prerequisite rather than silently")
-	assert.Contains(t, strings.ToLower(doc), "not certified against a host",
-		"the record has to keep saying plainly that this release is not certified against a host")
-
-	// The difference is adopted, so the record has to say the remedy is the contract on
-	// one platform and optional on the other. A record that kept calling it a blocker
-	// would describe a decision the maintainer has already made.
 	assert.Contains(t, strings.ToLower(doc), "adopted",
 		"the record has to say the per-platform difference is an adopted contract, not an open question")
 
@@ -278,10 +296,15 @@ func TestHostCertificationRecord_InstallationGuidePrintsTheOperatorRemedy(t *tes
 
 // TestHostCertificationRecord_NoClaimOutrunsTheGate keeps the record inside what was run.
 //
-// The gate measured one host release, on one platform, with a deterministic bridge in
-// place of the Cursor SDK. A record that read as host certification of every platform, of
-// live provider behaviour, or of a published plugin release would be claiming more than any
-// run established, so each of those three over-claims is named explicitly as absent.
+// The gate measured two host binaries of one host release, one per platform, with a
+// deterministic bridge in place of the Cursor SDK and no race detector. A record that read as
+// certification of every host, of live provider behaviour, of every platform, or of a race
+// that was never run would be claiming more than any run established, so each of those is
+// named explicitly as absent.
+//
+// Each phrase is one the record has to state in that sense; a broader phrase like "no claim"
+// would be satisfied by any sentence in the document that disclaims anything at all, which is
+// why none is used here.
 func TestHostCertificationRecord_NoClaimOutrunsTheGate(t *testing.T) {
 	t.Parallel()
 
@@ -289,8 +312,10 @@ func TestHostCertificationRecord_NoClaimOutrunsTheGate(t *testing.T) {
 	for _, nonClaim := range []string{
 		"no linux host evidence is missing",
 		"not live provider runs",
-		"no plugin artifact has been released",
-		"provider quota",
+		"did **not** run with `-race`",
+		"a certification is a statement about specific host artifacts",
+		"not a certification about every host",
+		"not macos support",
 	} {
 		assert.Contains(t, doc, nonClaim,
 			"the record has to state the %s position explicitly, so a green gate is not read as more than it is",

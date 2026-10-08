@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiproxer/aiproxer-cursor-sdk/internal/packagelayout"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -468,14 +469,67 @@ func TestRender_NeverRecordsAnUnestablishedSourceStateAsClean(t *testing.T) {
 	}
 }
 
+// The host artifacts one certified release records. They are per platform on purpose: the
+// real-host gate downloaded each platform's own host archive and measured the binary inside
+// it, so a certification names two artifacts rather than one artifact that stood in for two
+// platforms.
+var (
+	windowsHostDigest = strings.Repeat("6a", 32)
+	linuxHostDigest   = strings.Repeat("ce", 32)
+)
+
+// certifyRelease declares the certified posture and the per-platform host artifacts a
+// certified release records, replacing the uncertified posture the harness stages by
+// default.
+func certifyRelease(tb testing.TB, lay *stagedRelease) {
+	tb.Helper()
+
+	certifyPlatforms(tb, lay, "windows/amd64", "linux/amd64")
+}
+
+// certifyPlatforms declares the certified posture for the named platforms only, so a case
+// can stage a certification that leaves one declared platform without an artifact.
+func certifyPlatforms(tb testing.TB, lay *stagedRelease, platforms ...string) {
+	tb.Helper()
+
+	patchRelease(tb, lay, "host_certification: uncertified", "host_certification: certified")
+
+	artifacts := []string{"certified_host_artifacts:"}
+	for _, platform := range platforms {
+		windows := platform == "windows/amd64"
+		asset, binary, digest := "linux_amd64.tar.gz", "lipstd", linuxHostDigest
+		contract := packagelayout.CompanionPackagedDefault
+		if windows {
+			asset, binary, digest = "windows_amd64.zip", "lipstd.exe", windowsHostDigest
+			contract = packagelayout.CompanionExplicitBridgeExecutable
+		}
+		artifacts = append(artifacts,
+			"  - platform: "+platform,
+			"    host_project: "+rootModule,
+			"    host_version: v0.1.0",
+			"    host_release_asset: "+rootModule+"_0.1.0_"+asset,
+			"    host_checksums_asset: checksums.txt",
+			"    host_binary: "+binary,
+			"    host_artifact_sha256: "+digest,
+			"    companion_contract: "+string(contract))
+	}
+
+	patchRelease(tb, lay,
+		"host_certification_reason: no downloadable host binary release exists to certify against",
+		strings.Join(artifacts, "\n"))
+}
+
 // TestRender_RecordsHostCertificationWithoutInventingEvidence keeps the host
 // certification line honest in both directions.
 //
-// No host artifact has been certified, so the record carries no host digest and states
-// why. The mechanism that will carry real evidence later is a caller-supplied digest,
-// validated as a digest: a certified claim with nothing behind it, an uncertified
-// claim carrying a digest, and an unparsable digest all fail the render instead of
-// producing a record that reads as evidence nobody produced.
+// An uncertified release has no host artifact to name and says why. A certified one carries
+// the host artifacts it was measured against, one per declared platform, and the digests are
+// read from that declaration rather than from anything a caller typed: a caller-supplied
+// digest is now an assertion about what was measured, and it has to agree with the record.
+// Every way of getting this wrong - a certified claim with nothing behind it, an uncertified
+// claim carrying artifacts, an artifact that is not a digest, an artifact for a platform the
+// manifest does not declare, a platform with no artifact, and a contract nobody documented -
+// fails the render instead of producing a record that reads as evidence nobody produced.
 func TestRender_RecordsHostCertificationWithoutInventingEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -488,20 +542,32 @@ func TestRender_RecordsHostCertificationWithoutInventingEvidence(t *testing.T) {
 	require.Empty(t, compatibility["tested_host_artifacts"])
 	require.NotContains(t, compatibility, "tested_host_artifact_sha256",
 		"an empty digest field could only ever record the absence of a certification")
+	require.Empty(t, compatibility["host_certification_platforms"],
+		"an uncertified record names no certified platform")
 
-	t.Run("certified with a supplied digest", func(t *testing.T) {
+	t.Run("certified with the declared artifacts", func(t *testing.T) {
 		t.Parallel()
 
 		certified := newStagedRelease(t)
-		patchRelease(t, certified, "host_certification: uncertified", "host_certification: certified")
-		patchRelease(t, certified,
-			"host_certification_reason: no downloadable host binary release exists to certify against",
-			"host_certification_reason:")
-		certified.testedHosts = []string{strings.Repeat("cd", 32)}
+		certifyRelease(t, certified)
 
 		_, record := renderAndRead(t, certified)
 		require.Equal(t, "certified", record["host_certification_state"])
-		require.Equal(t, []any{strings.Repeat("cd", 32)}, record["tested_host_artifacts"])
+		require.Equal(t, []any{linuxHostDigest, windowsHostDigest}, record["tested_host_artifacts"],
+			"the recorded digests are the ones release.yaml declares, sorted by platform so the record is stable "+
+				"across runs rather than dependent on the order the metadata lists them in")
+	})
+
+	t.Run("the declared digests are what the caller asserts", func(t *testing.T) {
+		t.Parallel()
+
+		certified := newStagedRelease(t)
+		certifyRelease(t, certified)
+		certified.testedHosts = []string{windowsHostDigest, linuxHostDigest}
+
+		_, record := renderAndRead(t, certified)
+		require.Equal(t, []any{linuxHostDigest, windowsHostDigest}, record["tested_host_artifacts"],
+			"a caller may assert the measured digests in any order, but the record keeps the declared order")
 	})
 
 	for _, tc := range []struct {
@@ -510,56 +576,81 @@ func TestRender_RecordsHostCertificationWithoutInventingEvidence(t *testing.T) {
 		wants string
 	}{
 		{
-			name: "certified without any digest",
+			name: "certified with no declared artifact",
 			alter: func(t *testing.T, lay *stagedRelease) {
 				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
 				patchRelease(t, lay,
 					"host_certification_reason: no downloadable host binary release exists to certify against",
 					"host_certification_reason:")
 			},
-			wants: "-tested-host",
+			wants: "certified_host_artifacts",
 		},
 		{
-			name: "uncertified with a digest",
+			name: "uncertified with a declared artifact",
 			alter: func(t *testing.T, lay *stagedRelease) {
-				lay.testedHosts = []string{strings.Repeat("cd", 32)}
+				certifyPlatforms(t, lay, "windows/amd64")
+				patchRelease(t, lay, "host_certification: certified", "host_certification: uncertified")
 			},
-			wants: "-tested-host",
+			wants: "certified_host_artifacts",
 		},
 		{
-			name: "digest is not a digest",
+			name: "declared digest is not a digest",
 			alter: func(t *testing.T, lay *stagedRelease) {
-				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
-				patchRelease(t, lay,
-					"host_certification_reason: no downloadable host binary release exists to certify against",
-					"host_certification_reason:")
+				certifyRelease(t, lay)
 				lay.testedHosts = []string{"v0.1.0"}
+			},
+			wants: "-tested-host",
+		},
+		{
+			name: "declared artifact digest is not a digest",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				certifyRelease(t, lay)
+				patchRelease(t, lay, windowsHostDigest, "v0.1.0")
 			},
 			wants: "sha256",
 		},
 		{
-			// Hexadecimal of the right alphabet but the wrong length: the shape check
-			// has to be about the whole digest, not only about whether it is hex.
-			name: "digest is hex but the wrong length",
+			// Hexadecimal of the right alphabet but the wrong length: the shape check has to
+			// be about the whole digest, not only about whether it is hex.
+			name: "declared artifact digest is hex but the wrong length",
 			alter: func(t *testing.T, lay *stagedRelease) {
-				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
-				patchRelease(t, lay,
-					"host_certification_reason: no downloadable host binary release exists to certify against",
-					"host_certification_reason:")
-				lay.testedHosts = []string{strings.Repeat("ab", 31)}
+				certifyRelease(t, lay)
+				patchRelease(t, lay, windowsHostDigest, strings.Repeat("ab", 31))
 			},
 			wants: "64 lowercase hex characters",
 		},
 		{
-			name: "digest is hex but one character too long",
+			name: "artifact for a platform the manifest does not declare",
 			alter: func(t *testing.T, lay *stagedRelease) {
-				patchRelease(t, lay, "host_certification: uncertified", "host_certification: certified")
-				patchRelease(t, lay,
-					"host_certification_reason: no downloadable host binary release exists to certify against",
-					"host_certification_reason:")
-				lay.testedHosts = []string{strings.Repeat("ab", 32) + "a"}
+				certifyRelease(t, lay)
+				patchRelease(t, lay, "  - platform: linux/amd64", "  - platform: darwin/amd64")
 			},
-			wants: "64 lowercase hex characters",
+			wants: "platform",
+		},
+		{
+			name: "a declared platform with no artifact",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				certifyPlatforms(t, lay, "windows/amd64")
+			},
+			wants: "certified_host_artifacts for linux/amd64",
+		},
+		{
+			name: "a companion contract nobody documented",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				certifyRelease(t, lay)
+				patchRelease(t, lay,
+					"    companion_contract: "+string(packagelayout.CompanionExplicitBridgeExecutable),
+					"    companion_contract: maybe")
+			},
+			wants: "companion_contract",
+		},
+		{
+			name: "a certified artifact missing the host it was measured against",
+			alter: func(t *testing.T, lay *stagedRelease) {
+				certifyRelease(t, lay)
+				patchRelease(t, lay, "    host_version: v0.1.0", "    host_version:")
+			},
+			wants: "host_version",
 		},
 		{
 			name: "unknown certification state",
@@ -589,6 +680,65 @@ func TestRender_RecordsHostCertificationWithoutInventingEvidence(t *testing.T) {
 			require.Contains(t, err.Error(), tc.wants)
 		})
 	}
+}
+
+// TestRender_RecordsTheCertifiedContractPerPlatform keeps a certified record from collapsing
+// its evidence into one general claim.
+//
+// The measured difference between the two platforms is the reason a per-platform record is
+// worth carrying at all: on one platform an operator who configures nothing still reaches the
+// Cursor SDK, and on the other the packaged default cannot be reached and the field naming the
+// installed launcher is the supported configuration. A record that stated the certification
+// without stating that contract would leave an operator on the wrong platform with either a
+// bootstrap failure or a field they do not need.
+//
+// The record carries the platform's packaged launcher path as well, derived from the layout
+// contract rather than written here, so the remedy it names is a file the archive really
+// ships.
+func TestRender_RecordsTheCertifiedContractPerPlatform(t *testing.T) {
+	t.Parallel()
+
+	lay := newStagedRelease(t)
+	certifyRelease(t, lay)
+	_, record := renderAndRead(t, lay)
+
+	entries := decodeList(t, record["host_certification_platforms"])
+	require.Len(t, entries, 2, "one certified platform per declared platform")
+
+	contracts := map[string]string{}
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		require.True(t, ok, "a certified platform entry has to be an object")
+		platform, _ := entry["platform"].(string)
+		archive, err := packagelayout.ForPlatform(splitTestPlatform(platform))
+		require.NoError(t, err)
+
+		assert.Equal(t, rootModule, entry["host_project"])
+		assert.Equal(t, "v0.1.0", entry["host_version"])
+		assert.NotEmpty(t, entry["host_release_asset"])
+		assert.NotEmpty(t, entry["host_binary"])
+		assert.NotEmpty(t, entry["host_artifact_sha256"])
+		assert.Equal(t, archive.LauncherPath(), entry["bridge_executable_rel"],
+			"%s has to name the packaged launcher an operator points bridge_executable at, spelled as the "+
+				"archive layout spells it", platform)
+
+		contract, _ := entry["companion_contract"].(string)
+		require.NotEmpty(t, contract, "%s has to record which companion spelling it supports", platform)
+		contracts[platform] = contract
+	}
+
+	// The two platforms disagree, because the host binds the verified executable
+	// differently on each; and the record has to say so rather than leaving an operator to
+	// discover it.
+	require.NotEqual(t, contracts["windows/amd64"], contracts["linux/amd64"],
+		"the host stages the verified executable on windows/amd64 and execs the installed one on linux/amd64, so "+
+			"the two platforms' supported companion spellings are different and the record has to say which is which")
+}
+
+// splitTestPlatform splits one "os/arch" platform claim.
+func splitTestPlatform(platform string) (goos, goarch string) {
+	goos, goarch, _ = strings.Cut(platform, "/")
+	return goos, goarch
 }
 
 // TestRender_RecordsPackageVerificationAsUnperformed keeps the release record from

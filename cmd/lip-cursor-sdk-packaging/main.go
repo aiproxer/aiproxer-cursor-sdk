@@ -1,12 +1,15 @@
 // Command lip-cursor-sdk-packaging is the plugin's build-time packaging
-// contract reporter, bounded probe runner, and metadata renderer.
+// contract reporter, bounded probe runner, metadata renderer, and release
+// reporter.
 //
 // scripts/package-plugin.{sh,ps1} and scripts/verify-package.{sh,ps1} drive it
 // instead of restating the archive layout, the closed host manifest, or the
-// release metadata shape. internal/packagelayout stays the single layout
-// contract; this command is only its reporting and rendering surface. Without
-// it the scripts would carry a second copy of the layout, and JSON surgery in two
-// different shells would be the second copy of the manifest.
+// release metadata shape, and the release workflow reads the declared release
+// through it rather than parsing release metadata of its own. internal/packagelayout
+// stays the single layout contract; this command is only its reporting and
+// rendering surface. Without it the scripts would carry a second copy of the
+// layout, and JSON surgery in two different shells would be the second copy of
+// the manifest.
 //
 // The probe verb is what the verifiers run a staged executable through, and the
 // bound it applies lives here so neither script can choose it: how long a shipped
@@ -40,6 +43,8 @@ func main() {
 		err = runProbe(os.Args[2:])
 	case "render":
 		err = runRender(os.Args[2:])
+	case "release":
+		err = runRelease(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -55,7 +60,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: lip-cursor-sdk-packaging <layout|probe|render> [flags]
+	fmt.Fprint(os.Stderr, `usage: lip-cursor-sdk-packaging <layout|probe|render|release> [flags]
 
   layout   print the archive layout of a platform as a JSON report
   probe    run one packaged executable under a fixed deadline and report what
@@ -63,6 +68,9 @@ func usage() {
            deadline=<duration> on stderr
   render   write the host manifest and compatibility metadata for a staged
            install root, deriving every value from the staged tree
+  release  report the release this repository declares: its tag and version,
+           the platforms it declares, and the host artifact each platform was
+           certified against, with the URL to download it from
 
 `)
 }

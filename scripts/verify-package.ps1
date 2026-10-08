@@ -663,6 +663,31 @@ if ($script:Record) {
         }
     }
 
+    # The per-platform record is what makes the flat digest list above auditable, so it is
+    # reported as well: which host release and asset each platform was measured against, at
+    # which digest, and which companion spelling that platform supports. A certified record
+    # with no platform behind it is the same bare claim the digest check above rejects, so
+    # it is a finding here too rather than a silently empty line.
+    $certifiedPlatforms = @()
+    $certifiedPlatformProperty = $record.PSObject.Properties['host_certification_platforms']
+    if ($certifiedPlatformProperty) {
+        $certifiedPlatforms = @($certifiedPlatformProperty.Value)
+    }
+    if ($certifiedPlatforms.Count -eq 0) {
+        if ($certification -eq 'certified') {
+            Add-Finding 'release metadata declares host_certification certified but records no host_certification_platforms; without the platform each digest belongs to, the digests cannot be checked against anything'
+        }
+        Add-Line 'certified platforms: none recorded'
+    } else {
+        foreach ($platform in $certifiedPlatforms) {
+            Add-Line ("certified platform {0}: host {1} {2} asset {3} binary {4} sha256 {5}" -f
+                $platform.platform, $platform.host_project, $platform.host_version,
+                $platform.host_release_asset, $platform.host_binary, $platform.host_artifact_sha256)
+            Add-Line ("certified platform {0} companion contract: {1} (bridge_executable={2})" -f
+                $platform.platform, $platform.companion_contract, $platform.bridge_executable_rel)
+        }
+    }
+
     # What the record says about verification of this package. The packager writes the
     # record before verification can run, so the recorded state is not-performed and the
     # runs that have to be performed are named instead. This report is the evidence those

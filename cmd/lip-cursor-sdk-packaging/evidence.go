@@ -373,31 +373,65 @@ type hostCertificationRecord struct {
 	State string
 	// Reason explains an uncertified posture and is empty when certified.
 	Reason string
-	// TestedArtifacts are the host artifact digests supplied as evidence. It is empty
-	// for every uncertified record, and never anything but caller-supplied digests.
+	// TestedArtifacts are the host artifact digests this record carries, sorted so the
+	// record is byte-stable across runs. It is empty for every uncertified record, and
+	// never anything but the digests the release metadata declares.
 	TestedArtifacts []string
+	// Platforms is that same evidence per platform: which host release and asset were
+	// measured, at which digest, and which companion spelling that platform supports.
+	Platforms []hostCertificationPlatform
 }
 
-// hostCertification resolves the declared certification posture against the evidence
-// the caller supplied.
+// hostCertificationPlatform is one declared platform's certified host artifact as the
+// archive records it.
 //
-// The posture is declared in release.yaml so it is reviewable, and the evidence is a
-// digest the release operator passes in, so it can only be what someone actually
-// measured. The two are checked against each other because either one alone is
-// misleading: a certified record with no digest behind it is a bare claim, and an
-// uncertified record carrying a digest contradicts itself.
-func hostCertification(meta releaseMeta, supplied []string) (hostCertificationRecord, error) {
+// The packaged launcher path is derived from the archive layout rather than written here,
+// because the remedy an operator on this platform has to configure is a file the archive
+// really ships, and a path recorded by hand would be a path nothing checks.
+type hostCertificationPlatform struct {
+	Platform            string `json:"platform"`
+	HostProject         string `json:"host_project"`
+	HostVersion         string `json:"host_version"`
+	HostReleaseAsset    string `json:"host_release_asset"`
+	HostChecksumsAsset  string `json:"host_checksums_asset"`
+	HostBinary          string `json:"host_binary"`
+	HostArtifactSHA256  string `json:"host_artifact_sha256"`
+	CompanionContract   string `json:"companion_contract"`
+	BridgeExecutableRel string `json:"bridge_executable_rel"`
+}
+
+// hostCertification resolves the declared certification posture against the evidence the
+// release metadata declares.
+//
+// The posture is declared in release.yaml so it is reviewable, and the host artifacts it was
+// measured against are declared beside it, so the evidence is reviewable too and cannot be a
+// digest somebody typed into a command line for one run. A caller may still pass
+// -tested-host to assert what it believes was measured; the assertion is checked against the
+// declaration rather than recorded in place of it, so a packaging run can corroborate the
+// record but never substitute a host of its own choosing.
+//
+// The two are checked against each other because either one alone is misleading: a certified
+// record with no artifact behind it is a bare claim, an uncertified record carrying artifacts
+// contradicts itself, and a certified record that leaves a declared platform without an
+// artifact would claim compatibility for a platform nothing was measured on.
+func hostCertification(meta releaseMeta, supplied, declared []string) (hostCertificationRecord, error) {
 	state := strings.TrimSpace(meta.HostCertification)
 	reason := strings.TrimSpace(meta.HostCertificationReason)
 
 	switch state {
 	case hostUncertified:
+		if len(meta.CertifiedHostArtifacts) > 0 {
+			return hostCertificationRecord{}, fmt.Errorf(
+				"release.yaml declares host_certification: %s with %d certified_host_artifacts; the artifacts are "+
+					"what a certified record carries, so an uncertified one carrying them contradicts itself",
+				hostUncertified, len(meta.CertifiedHostArtifacts))
+		}
 		if len(supplied) > 0 {
 			return hostCertificationRecord{}, fmt.Errorf(
 				"%d -tested-host digest(s) were supplied but release.yaml declares host_certification: %s; "+
 					"either the release is certified against those artifacts, which is host_certification: %s "+
-					"with an empty host_certification_reason, or those digests are not evidence for this "+
-					"archive and -tested-host should not name any",
+					"together with one certified_host_artifacts entry per declared platform, or those digests "+
+					"are not evidence for this archive and -tested-host should not name any",
 				len(supplied), hostUncertified, hostCertified)
 		}
 		if reason == "" {
@@ -408,39 +442,157 @@ func hostCertification(meta releaseMeta, supplied []string) (hostCertificationRe
 		}
 		return hostCertificationRecord{State: hostUncertified, Reason: reason, TestedArtifacts: []string{}}, nil
 	case hostCertified:
-		if len(supplied) == 0 {
-			return hostCertificationRecord{}, fmt.Errorf(
-				"release.yaml declares host_certification: %s but no host artifact digest was supplied; "+
-					"pass -tested-host <sha256> once per host artifact this archive was certified against, "+
-					"or declare host_certification: %s with the reason it is not certified",
-				hostCertified, hostUncertified)
-		}
 		if reason != "" {
 			return hostCertificationRecord{}, fmt.Errorf(
 				"release.yaml declares host_certification: %s and also gives a host_certification_reason; "+
-					"the reason is what an uncertified record carries", hostCertified)
+					"the reason is what an uncertified record carries, and a certified one carries the "+
+					"certified_host_artifacts in its place", hostCertified)
 		}
-		artifacts := make([]string, 0, len(supplied))
-		for _, supplied := range supplied {
-			digest, err := checkDigest(supplied, "host artifact")
-			if err != nil {
-				return hostCertificationRecord{}, err
-			}
-			if !slices.Contains(artifacts, digest) {
-				artifacts = append(artifacts, digest)
-			}
+		if len(meta.CertifiedHostArtifacts) == 0 {
+			return hostCertificationRecord{}, fmt.Errorf(
+				"release.yaml declares host_certification: %s but declares no certified_host_artifacts; one "+
+					"entry per declared platform names the host release, the asset, the binary and the measured "+
+					"sha256 the certification ran against, and without them the posture is a bare claim",
+				hostCertified)
 		}
-		return hostCertificationRecord{State: hostCertified, TestedArtifacts: artifacts}, nil
+		record, err := certifiedPlatforms(meta.CertifiedHostArtifacts, declared)
+		if err != nil {
+			return hostCertificationRecord{}, err
+		}
+		if err := checkSuppliedHosts(supplied, record.TestedArtifacts); err != nil {
+			return hostCertificationRecord{}, err
+		}
+		return record, nil
 	case "":
 		return hostCertificationRecord{}, fmt.Errorf(
 			"release.yaml has no host_certification; declare %s with the reason, or %s together with the "+
-				"host artifact digests the release was certified against, instead of leaving an absent key "+
+				"certified_host_artifacts the release was measured against, instead of leaving an absent key "+
 				"to read as an unremarked absence of evidence", hostUncertified, hostCertified)
 	default:
 		return hostCertificationRecord{}, fmt.Errorf(
 			"release.yaml declares host_certification %q; the postures are %s and %s",
 			state, hostUncertified, hostCertified)
 	}
+}
+
+// certifiedPlatforms validates the declared host artifacts and turns them into the record's
+// per-platform evidence.
+//
+// Coverage is exact rather than partial: every declared platform needs an artifact it was
+// measured against, and an artifact for a platform the manifest does not declare would be a
+// claim outside the published platform set. The output is sorted by platform so the rendered
+// record does not depend on the order the YAML happens to list its entries in.
+func certifiedPlatforms(artifacts []certifiedHostArtifact, declared []string) (hostCertificationRecord, error) {
+	seen := make(map[string]bool, len(artifacts))
+	platforms := make([]hostCertificationPlatform, 0, len(artifacts))
+	digests := make([]string, 0, len(artifacts))
+
+	for _, artifact := range artifacts {
+		if seen[artifact.Platform] {
+			return hostCertificationRecord{}, fmt.Errorf(
+				"release.yaml declares certified_host_artifacts twice for %s; one artifact that certified a "+
+					"platform twice would make the per-platform record ambiguous", artifact.Platform)
+		}
+		seen[artifact.Platform] = true
+		if !slices.Contains(declared, artifact.Platform) {
+			return hostCertificationRecord{}, fmt.Errorf(
+				"release.yaml certifies a host artifact for platform %s, which the manifest does not declare "+
+					"(declared: %s); a certification for an undeclared platform is a claim this release "+
+					"publishes nowhere", artifact.Platform, strings.Join(declared, ", "))
+		}
+		for _, field := range []struct{ name, value string }{
+			{"host_project", artifact.HostProject},
+			{"host_version", artifact.HostVersion},
+			{"host_release_asset", artifact.HostReleaseAsset},
+			{"host_checksums_asset", artifact.HostChecksumsAsset},
+			{"host_binary", artifact.HostBinary},
+		} {
+			if strings.TrimSpace(field.value) == "" {
+				return hostCertificationRecord{}, fmt.Errorf(
+					"release.yaml declares a certified host artifact for %s with no %s; the measurement names the "+
+						"host release it ran against, so a digest without it is not tied to a release anybody can "+
+						"download", artifact.Platform, field.name)
+			}
+		}
+		digest, err := checkDigest(artifact.HostArtifactSHA256, "host artifact for "+artifact.Platform)
+		if err != nil {
+			return hostCertificationRecord{}, err
+		}
+		contract, err := packagelayout.ParseCompanionContract(artifact.CompanionContract)
+		if err != nil {
+			return hostCertificationRecord{}, fmt.Errorf("%s declares companion_contract %q: %w",
+				artifact.Platform, artifact.CompanionContract, err)
+		}
+		platformArchive, err := packagelayout.ForPlatform(splitPlatform(artifact.Platform))
+		if err != nil {
+			return hostCertificationRecord{}, err
+		}
+		platforms = append(platforms, hostCertificationPlatform{
+			Platform:            artifact.Platform,
+			HostProject:         artifact.HostProject,
+			HostVersion:         artifact.HostVersion,
+			HostReleaseAsset:    artifact.HostReleaseAsset,
+			HostChecksumsAsset:  artifact.HostChecksumsAsset,
+			HostBinary:          artifact.HostBinary,
+			HostArtifactSHA256:  digest,
+			CompanionContract:   string(contract),
+			BridgeExecutableRel: platformArchive.LauncherPath(),
+		})
+		digests = append(digests, digest)
+	}
+
+	var missing []string
+	for _, platform := range declared {
+		if !seen[platform] {
+			missing = append(missing, platform)
+		}
+	}
+	if len(missing) > 0 {
+		return hostCertificationRecord{}, fmt.Errorf(
+			"release.yaml declares host_certification: %s with no certified_host_artifacts for %s; every platform "+
+				"this release publishes needs the host artifact it was measured against",
+			hostCertified, strings.Join(missing, ", "))
+	}
+
+	slices.SortStableFunc(platforms, func(left, right hostCertificationPlatform) int {
+		return strings.Compare(left.Platform, right.Platform)
+	})
+	// The flat digest list is read in the same platform order as the per-platform record
+	// above it, so the two halves of the evidence line up instead of the flat list being a
+	// second, differently ordered statement of the same fact.
+	digests = digests[:0]
+	for _, platform := range platforms {
+		digests = append(digests, platform.HostArtifactSHA256)
+	}
+	return hostCertificationRecord{
+		State:           hostCertified,
+		Reason:          "",
+		TestedArtifacts: digests,
+		Platforms:       platforms,
+	}, nil
+}
+
+// checkSuppliedHosts holds a caller-supplied assertion to the declared evidence.
+//
+// The digests a packaging run passes are a claim about what it measured, and they are checked
+// against the declaration rather than recorded. That direction matters: a run that certified
+// against a host this repository does not record would otherwise produce an archive naming an
+// artifact no reader can check, while a run that re-asserts the declared digests is
+// corroboration and nothing more.
+func checkSuppliedHosts(supplied, declared []string) error {
+	for _, supplied := range supplied {
+		normalized, err := checkDigest(supplied, "-tested-host")
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(declared, normalized) {
+			return fmt.Errorf(
+				"-tested-host %s is not a host artifact this release declares; the certified evidence is "+
+					"release.yaml's certified_host_artifacts (%s), and a packaging run may assert those but "+
+					"cannot substitute a host of its own", normalized, strings.Join(declared, ", "))
+		}
+	}
+	return nil
 }
 
 // packageVerificationRecord is what the packaged record says about the verification of
