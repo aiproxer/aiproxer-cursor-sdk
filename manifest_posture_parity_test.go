@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/aiproxer/aiproxer-cursor-sdk/internal/packagelayout"
 	"github.com/aiproxer/aiproxer-cursor-sdk/internal/service"
 	"github.com/matdev83/go-llm-interactive-proxy/pkg/lipsdk/backendplugin"
 )
@@ -20,6 +21,10 @@ type manifestExport struct {
 	AccessScope    string `json:"access_scope"`
 	ProcessSharing string `json:"process_sharing"`
 	ExecutionClass string `json:"execution_class"`
+	// CredentialContract is the versioned static-key registration the host reads
+	// before it composes the connector. The host refuses a static export without
+	// one, so the packaged manifest has to carry it.
+	CredentialContract *packagelayout.CredentialContract `json:"credential_contract"`
 }
 
 func packagedManifestExports(t *testing.T) map[string]manifestExport {
@@ -95,6 +100,17 @@ func TestParity_PackagedManifestMatchesRuntimeDescriptor(t *testing.T) {
 		}
 		if err := backendplugin.ValidateCredentialMode(fac.CredentialMode); err != nil {
 			t.Errorf("factory %q: descriptor credential_mode %q is not a known posture", fac.Kind, fac.CredentialMode)
+		}
+		// The host refuses a static export whose manifest does not declare the
+		// versioned static-key registration, so the packaged manifest has to carry
+		// exactly the registration the host holds for this kind.
+		if want.CredentialContract == nil {
+			t.Errorf("factory %q: manifest declares no credential_contract; the host refuses a static export without one", fac.Kind)
+			continue
+		}
+		if *want.CredentialContract != packagelayout.CursorSDKCredentialContract {
+			t.Errorf("factory %q: manifest credential_contract %+v, want %+v",
+				fac.Kind, *want.CredentialContract, packagelayout.CursorSDKCredentialContract)
 		}
 	}
 }

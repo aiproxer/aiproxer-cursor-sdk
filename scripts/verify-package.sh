@@ -639,10 +639,17 @@ if [ -f "$manifest_path" ]; then
     finding "manifest platforms claim $claimed but this archive was assembled for $archive_platform: only the natively validated platform may be claimed"
   fi
 
+  # The manifest's own identity fields are read from a copy of the document with
+  # its exports array removed. The export declares a nested "version" of its own
+  # (the versioned credential contract), and a scan of the whole document would
+  # read that one instead of the manifest's own version.
+  manifest_identity="$(printf '%s' "$manifest_json" | tr -d '\n' |
+    sed "s/\"exports\": *\[[^]]*\]//")"
+
   for field in plugin_id version build_id; do
     declared="$(release_scalar "$field")"
     [ -n "$declared" ] || continue
-    value="$(json_string "$field" "$manifest_json")"
+    value="$(json_string "$field" "$manifest_identity")"
     [ "$value" = "$declared" ] ||
       finding "manifest $field is $value but release.yaml declares $declared"
   done
@@ -654,6 +661,27 @@ if [ -f "$manifest_path" ]; then
     [ "$got" = "$want" ] ||
       finding "manifest export $field is '$got' but the plugin declares '$want'"
   done
+
+  # The versioned static-key registration is part of the export posture: the host
+  # refuses a static export that does not declare it, and refuses one that names
+  # another environment root, slot, selection or quota domain than the namespace
+  # it holds for the kind. A tree that ships the wrong registration would be
+  # refused at discovery time, before the connector is ever composed.
+  contract_json="$(printf '%s' "$manifest_json" | tr -d '\n' | sed "s/.*\"credential_contract\": *{\([^}]*\)}.*/\1/")"
+  if [ -z "$contract_json" ] || [ "$contract_json" = "$manifest_json" ]; then
+    finding "manifest export declares no credential_contract; the host refuses a static export without one"
+  else
+    contract_version="$(printf '%s' "$contract_json" | tr -d '\n' | sed "s/.*\"version\": *\([0-9][0-9]*\).*/\1/")"
+    [ "$contract_version" = "2" ] ||
+      finding "manifest credential_contract version is '$contract_version' but the host registers '2'"
+    for pair in 'class:api_key' 'source:host_env' 'env_root:CURSOR_API_KEY' 'slot:api_key' 'selection:session_admission' 'quota_domain:cursor'; do
+      field="${pair%%:*}"
+      want="${pair#*:}"
+      got="$(json_string "$field" "$contract_json")"
+      [ "$got" = "$want" ] ||
+        finding "manifest credential_contract $field is '$got' but the host registers '$want'"
+    done
+  fi
   line 'export posture: static, local_only, per_instance, agent_runtime'
 
   # The release metadata records the digest of the manifest bytes this archive carries.

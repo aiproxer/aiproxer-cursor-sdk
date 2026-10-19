@@ -128,6 +128,15 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			"access_scope":    "local_only",
 			"process_sharing": "per_instance",
 			"execution_class": "agent_runtime",
+			"credential_contract": map[string]any{
+				"version":      2,
+				"class":        "api_key",
+				"source":       "host_env",
+				"env_root":     "CURSOR_API_KEY",
+				"slot":         "api_key",
+				"selection":    "session_admission",
+				"quota_domain": "cursor",
+			},
 		}}, manifest["exports"])
 		require.NotContains(t, manifest, "private_runtime")
 		require.NotContains(t, manifest, "compatibility")

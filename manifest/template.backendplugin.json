@@ -18,7 +18,16 @@
       "credential_mode": "static",
       "access_scope": "local_only",
       "process_sharing": "per_instance",
-      "execution_class": "agent_runtime"
+      "execution_class": "agent_runtime",
+      "credential_contract": {
+        "version": 2,
+        "class": "api_key",
+        "source": "host_env",
+        "env_root": "CURSOR_API_KEY",
+        "slot": "api_key",
+        "selection": "session_admission",
+        "quota_domain": "cursor"
+      }
     }
   ]
 }

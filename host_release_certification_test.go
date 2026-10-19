@@ -299,6 +299,23 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 			assert.Equal(t, want, export[field],
 				"the certified manifest has to declare %s=%q; that is the posture the host enforces", field, want)
 		}
+		// The host refuses a static export whose manifest does not declare the
+		// versioned static-key registration, so a certified manifest without it
+		// would be a manifest the host never composes.
+		contract, ok := export["credential_contract"].(map[string]any)
+		require.True(t, ok, "the certified manifest has to declare a credential_contract")
+		assert.Equal(t, float64(packagelayout.CursorSDKCredentialContract.Version), contract["version"])
+		for field, want := range map[string]string{
+			"class":        packagelayout.CursorSDKCredentialContract.Class,
+			"source":       packagelayout.CursorSDKCredentialContract.Source,
+			"env_root":     packagelayout.CursorSDKCredentialContract.EnvRoot,
+			"slot":         packagelayout.CursorSDKCredentialContract.Slot,
+			"selection":    packagelayout.CursorSDKCredentialContract.Selection,
+			"quota_domain": packagelayout.CursorSDKCredentialContract.QuotaDomain,
+		} {
+			assert.Equal(t, want, contract[field],
+				"the certified manifest has to declare credential_contract %s=%q; that is the registration the host holds", field, want)
+		}
 	})
 
 	t.Run("inactive_install_is_reported_without_starting_the_runtime", func(t *testing.T) {

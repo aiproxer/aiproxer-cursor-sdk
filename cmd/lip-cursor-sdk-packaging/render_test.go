@@ -86,6 +86,15 @@ func TestRender_PreservesManifestIdentityAndNativePlatformClaim(t *testing.T) {
 		"access_scope":    "local_only",
 		"process_sharing": "per_instance",
 		"execution_class": "agent_runtime",
+		"credential_contract": map[string]any{
+			"version":      float64(2),
+			"class":        "api_key",
+			"source":       "host_env",
+			"env_root":     "CURSOR_API_KEY",
+			"slot":         "api_key",
+			"selection":    "session_admission",
+			"quota_domain": "cursor",
+		},
 	}, exports[0])
 
 	// A natively assembled archive may claim only the platform it was assembled
@@ -1208,7 +1217,16 @@ func newStagedRelease(tb testing.TB) *stagedRelease {
 		`      "credential_mode": "static",`,
 		`      "access_scope": "local_only",`,
 		`      "process_sharing": "per_instance",`,
-		`      "execution_class": "agent_runtime"`,
+		`      "execution_class": "agent_runtime",`,
+		`      "credential_contract": {`,
+		`        "version": 2,`,
+		`        "class": "api_key",`,
+		`        "source": "host_env",`,
+		`        "env_root": "CURSOR_API_KEY",`,
+		`        "slot": "api_key",`,
+		`        "selection": "session_admission",`,
+		`        "quota_domain": "cursor"`,
+		`      }`,
 		`    }`,
 		`  ]`,
 		"}",

@@ -523,6 +523,15 @@ func probeHostManifest(tb testing.TB, archive packagelayout.Archive, root string
 			"access_scope":    "local_only",
 			"process_sharing": "per_instance",
 			"execution_class": "agent_runtime",
+			"credential_contract": map[string]any{
+				"version":      2,
+				"class":        "api_key",
+				"source":       "host_env",
+				"env_root":     "CURSOR_API_KEY",
+				"slot":         "api_key",
+				"selection":    "session_admission",
+				"quota_domain": "cursor",
+			},
 		}},
 	}
 	body, err := json.MarshalIndent(manifest, "", "  ")
