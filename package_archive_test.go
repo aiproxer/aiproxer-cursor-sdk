@@ -129,7 +129,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			"process_sharing": "per_instance",
 			"execution_class": "agent_runtime",
 			"credential_contract": map[string]any{
-				"version":      2,
+				"version":      float64(2),
 				"class":        "api_key",
 				"source":       "host_env",
 				"env_root":     "CURSOR_API_KEY",
