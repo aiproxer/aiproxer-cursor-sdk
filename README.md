@@ -47,10 +47,12 @@ archive natively from a clean checkout of the tag, refuses to continue unless th
 names the tagged commit with `source_modified: false`, audits the shipped archive with
 `scripts/verify-package --tree-state shipped`, and runs the real-host certification gate
 against that archive on its own platform before publication. The release metadata is
-**certified** with respect to the host: `compatibility.json` records, per declared platform, the
+currently **uncertified** with respect to the host: the packaged manifest declares the v2
+credential contract and no host release carrying the v2 credential-contract ABI exists yet,
+so no archive from this source can be certified - see the `host_certification_reason` in
+`release.yaml` and [Host certification](docs/packaging.md#host-certification). `compatibility.json` records, per declared platform, the
 Go-LIP host release, the asset, the host binary, and the sha256 that binary was measured at, plus
-the companion contract that platform supports - see
-[Host certification](docs/packaging.md#host-certification) - and no redistribution right is
+the companion contract that platform supports once certification is re-established - and no redistribution right is
 claimed for the proprietary Cursor SDK, because the archive does not ship it at all - see
 [Redistribution posture](#redistribution-posture).
 

@@ -160,16 +160,25 @@ alongside the platforms that archive is *not* evidence for.
 
 ## Host certification
 
-**This release is `certified` with respect to the Go-LIP host binary.** A downloadable host
-release exists — `matdev83/go-llm-interactive-proxy` `v0.1.0` — and this plugin was certified
-against it on both platforms this project declares, `windows/amd64` and `linux/amd64`, by
-`TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`, 15/15 cases on each.
-Trusted discovery, manifest identity, secure negotiation, inventory listing, canonical
-execution, explicit capability errors, inactive discovery, default-deny multi-user denial, the
-per-platform companion-path contract, and explicit prerequisite failures for a missing plugin,
-a missing private runtime, and an unprovisioned Cursor SDK all passed on both. The full table,
-with the diagnostics each case observed, is in
+**This source tree is `uncertified` with respect to the Go-LIP host binary, deliberately.**
+The packaged manifest declares the v2 credential contract and no host release carrying
+the v2 credential-contract ABI exists yet — the last certified host release,
+`matdev83/go-llm-interactive-proxy` `v0.1.0`, cannot parse it — so no archive from this
+source can be certified. The release workflow refuses to publish an uncertified revision,
+and certification will be re-established against a v2-capable host release on both
+platforms this project declares before anything is published.
+
+The last certified evidence stands, and it stands only for what it measured:
+`TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`, 15/15 cases on
+each of `windows/amd64` and `linux/amd64`, against host `v0.1.0`. Trusted discovery,
+manifest identity, secure negotiation, inventory listing, canonical execution, explicit
+capability errors, inactive discovery, default-deny multi-user denial, the per-platform
+companion-path contract, and explicit prerequisite failures for a missing plugin, a
+missing private runtime, and an unprovisioned Cursor SDK all passed on both. The full
+table, with the diagnostics each case observed, is in
 [`docs/certification.md`](certification.md#requirement-3123333445-61--real-host-install-trust-and-optional-activation).
+That evidence covers the published `cursorsdk-v0.1.0` archives, whose manifest predates
+the v2 contract; it is not carried forward as coverage for the v2 manifest.
 
 The certified artifacts are recorded per platform, because the measurement was per platform:
 each leg downloaded its own host archive from that release and measured the binary inside it.

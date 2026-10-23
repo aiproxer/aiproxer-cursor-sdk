@@ -52,10 +52,22 @@ func (s *Service) Configure(_ context.Context, req backendplugin.ConfigureReques
 	if err != nil {
 		return nil, err
 	}
-	secret := ""
-	if req.Secrets.Values != nil {
-		secret = string(req.Secrets.Values["api_key"])
+	// session_admission binds exactly one host-delivered slot at Configure:
+	// no YAML key material, no connector-side environment or file fallback,
+	// no rotation and no pooling across sessions.
+	slots, err := decodeAPIKeySlotSecrets(req.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("cursorsdk: %w (want %s via host Configure secrets)", err, EnvAPIKeyRoot)
 	}
+	if len(slots) != 1 {
+		names := make([]string, 0, len(slots))
+		for _, slot := range slots {
+			names = append(names, slot.Name)
+		}
+		return nil, fmt.Errorf("cursorsdk: session_admission binds exactly one api_key slot for %s (got %d: %s); supply only %s via host Configure secrets",
+			EnvAPIKeyRoot, len(slots), strings.Join(names, ", "), EnvAPIKeyRoot)
+	}
+	secret := slots[0].Secret
 	in, err := cfg.toProductInput(secret)
 	if err != nil {
 		return nil, err

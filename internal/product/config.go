@@ -119,7 +119,7 @@ func Normalize(in Input, fallbackAPIKey string) (Config, error) {
 		apiKey = strings.TrimSpace(fallbackAPIKey)
 	}
 	if apiKey == "" {
-		return Config{}, errors.New("cursorsdk: api_key is required (set api_key or CURSOR_API_KEY)")
+		return Config{}, errors.New("cursorsdk: api_key is required (host Configure secrets for CURSOR_API_KEY)")
 	}
 
 	sandbox := SandboxMode(strings.TrimSpace(in.SandboxMode))

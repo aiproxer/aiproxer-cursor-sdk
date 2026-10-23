@@ -105,6 +105,13 @@ const (
 	// hostCertAPIKey is a fixed non-secret string. A certification must never read a real
 	// credential, and the negative cases deliberately rely on it not being one.
 	hostCertAPIKey = "certification-not-a-real-credential"
+	// hostCertAPIKeyEnv is the host environment root the certification binds the
+	// synthetic key through. The connector's contract admits exactly one api_key
+	// slot from the host environment; the harness provides it the way an
+	// operator does, through backend_discovery.instances secret_refs, so every
+	// enabled-backend case proves the host-secret path rather than an inline
+	// YAML key.
+	hostCertAPIKeyEnv = "CURSOR_API_KEY"
 
 	hostCertCommandTimeout = 4 * time.Minute
 	hostCertStartupBudget  = 90 * time.Second
@@ -178,8 +185,30 @@ type hostCertCompanionContract struct {
 func hostCertCompanionContracts(tb testing.TB) map[string]hostCertCompanionContract {
 	tb.Helper()
 
+	artifacts := readCertifiedReleaseMetadata(tb).Artifacts
+	if len(artifacts) == 0 {
+		// An uncertified tree declares no artifacts by construction, but the
+		// gate still has to know what each platform supports before it runs
+		// anything: a run on a platform whose supported configuration nobody
+		// wrote down would quietly certify whatever the measurement happened
+		// to find. The fallback is the adopted per-platform contract the
+		// measurement recorded in docs/certification.md - packaged default on
+		// linux/amd64, explicit bridge_executable on windows/amd64 - and it
+		// applies only while uncertified; a certified tree enforces exactly
+		// what its artifacts declare.
+		return map[string]hostCertCompanionContract{
+			"linux/amd64": {
+				explicitCompanion:        hostCertExplicitOptional,
+				packagedDefaultSupported: true,
+			},
+			"windows/amd64": {
+				explicitCompanion:        hostCertExplicitRequired,
+				packagedDefaultSupported: false,
+			},
+		}
+	}
 	contracts := map[string]hostCertCompanionContract{}
-	for _, artifact := range readCertifiedReleaseMetadata(tb).Artifacts {
+	for _, artifact := range artifacts {
 		contract, err := packagelayout.ParseCompanionContract(
 			packagelayout.CompanionContract(artifact.CompanionContract))
 		require.NoError(tb, err,
@@ -570,6 +599,48 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 			"the provisioning command has to be the shipped lockfile's npm ci --omit=dev")
 		assert.NotContains(t, denial, hostCertAPIKey,
 			"a prerequisite failure must not carry the configured credential")
+	})
+
+	t.Run("an_inline_api_key_is_rejected_before_host_secrets", func(t *testing.T) {
+		// The legacy inline mechanism is dead: connector YAML carries no key
+		// material under the session_admission contract, so a literal api_key
+		// field has to fail closed at composition even when a valid host
+		// secret is bound through the instances entry. This is the real-host
+		// half of the credential-parity proof: the unit suite pins the
+		// parser, and this case pins that the certified host actually runs
+		// the parser that rejects.
+		backend := "    - kind: " + hostCertFactoryKind + "\n" +
+			"      id: " + hostCertInstanceID + "\n" +
+			"      enabled: true\n" +
+			"      config:\n" +
+			`        api_key: "inline-key-the-host-must-never-accept"` + "\n" +
+			"        default_workspace: " + hostCertQuote(t.TempDir()) + "\n" +
+			"        sandbox_mode: \"off\"\n"
+		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, backend)
+
+		// doctor runs the connector's Configure path for the bound instance,
+		// which is where the rejection lives: check-config is structural
+		// only and never activates the plugin.
+		_, _, err := host.run(t, "doctor", "--instance", hostCertInstanceID)
+		require.Error(t, err,
+			"a literal api_key field has to fail closed in doctor")
+
+		// serve must refuse the same configuration rather than start
+		// without it: composition runs the same Configure path at startup.
+		_, _, err = host.run(t, "serve")
+		require.Error(t, err, "serve has to fail closed on the same configuration")
+		assert.NotContains(t, host.combinedOutput(), "listening addr=",
+			"a configuration with a rejected credential must not start listening")
+
+		denial := host.combinedOutput()
+		assert.Contains(t, denial, "api_key",
+			"the diagnostic has to name the forbidden field")
+		assert.Contains(t, denial, hostCertAPIKeyEnv,
+			"the diagnostic has to name the approved environment root")
+		assert.NotContains(t, denial, "inline-key-the-host-must-never-accept",
+			"a credential rejection must not carry the rejected key material")
+		assert.NotContains(t, denial, hostCertAPIKey,
+			"a credential rejection must not carry the bound host secret either")
 	})
 
 	t.Run("the_supported_companion_path_contract_holds_on_this_platform", func(t *testing.T) {
@@ -1010,8 +1081,11 @@ func newHostCertRun(tb testing.TB, inputs *hostCertInputs, pluginRoot string,
 // hostCertEnvironment is the environment a certified host process runs with.
 //
 // It is deliberately minimal: the gate measures a released artifact, so nothing about the
-// operator's machine may leak into it, and Cursor credentials are not forwarded because no
-// case here may reach a provider.
+// operator's machine may leak into it. The one exception is the synthetic host secret the
+// session_admission contract is certified against: CURSOR_API_KEY carries the fixed
+// non-credential string the harness binds through the instances entry, and no case here may
+// reach a provider - execution runs against the deterministic fake bridge - so the value
+// can never leave the machine. A real credential is never forwarded.
 func (r *hostCertRun) hostCertEnvironment() []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -1019,6 +1093,7 @@ func (r *hostCertRun) hostCertEnvironment() []string {
 		"USERPROFILE=" + r.dir,
 		"TEMP=" + os.Getenv("TEMP"),
 		"TMP=" + os.Getenv("TMP"),
+		hostCertAPIKeyEnv + "=" + hostCertAPIKey,
 	}
 	if systemRoot := os.Getenv("SYSTEMROOT"); systemRoot != "" {
 		env = append(env, "SYSTEMROOT="+systemRoot)
@@ -1267,7 +1342,6 @@ func hostCertBackend(tb testing.TB, enabled bool, bridgeExecutable string) strin
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "    - kind: %s\n      id: %s\n      enabled: %t\n      config:\n",
 		hostCertFactoryKind, hostCertInstanceID, enabled)
-	fmt.Fprintf(&sb, "        api_key: %q\n", hostCertAPIKey)
 	if bridgeExecutable != "" {
 		fmt.Fprintf(&sb, "        bridge_executable: %q\n", filepath.ToSlash(bridgeExecutable))
 	}
@@ -1333,6 +1407,18 @@ func hostCertConfigYAML(pluginRoot, backendYAML, addr string, access hostCertAcc
 		"      - " + hostCertQuote(filepath.ToSlash(pluginRoot)),
 		"    strict: true",
 		"    development_mode: false",
+		// The connector's credential contract is session_admission over a host
+		// secret: the single api_key slot is bound from the host environment
+		// root CURSOR_API_KEY through this instances entry. Connector YAML
+		// carries no key material - a literal api_key field fails closed -
+		// so every enabled-backend case below proves the host-secret path and
+		// none of them can pass through the legacy inline mechanism.
+		"    instances:",
+		"      " + hostCertInstanceID + ":",
+		"        kind: " + hostCertFactoryKind,
+		"        secret_refs:",
+		"          api_key:",
+		"            env: " + hostCertAPIKeyEnv,
 		"  frontends:",
 		"    - id: openai-responses",
 		"      enabled: true",

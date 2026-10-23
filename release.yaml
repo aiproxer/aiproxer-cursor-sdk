@@ -20,50 +20,26 @@ replace_policy: released-dependency-pins-no-replace
 private_companions:
   - bridge-node
 
-# Host certification posture. A downloadable Go-LIP host release exists, this plugin has
-# been certified against it through the real host binary on both platforms the manifest
-# declares, and the measured platform difference in companion resolution is the adopted
-# per-platform installation contract rather than an incompatibility.
+# Host certification posture. This source tree is deliberately uncertified: the
+# packaged manifest declares the v2 credential contract and no host release
+# carrying the v2 credential-contract ABI exists yet, so no archive from this
+# source can be certified. The release workflow refuses to publish an
+# uncertified revision, which is the point: publication waits for a host
+# release the new manifest parses against, a re-run of the real-host gate
+# against that artifact on both declared platforms, and this record flipped
+# back to certified with per-platform entries.
 #
-# The certified evidence is declared here, one entry per declared platform, rather than
-# typed into a packaging command: each entry names the host project and release, the asset
-# that release published, the binary inside it, the measured sha256 of that binary, and the
-# companion contract this platform supports. The renderer copies that into every archive's
-# compatibility.json and refuses a certified posture with a missing, malformed, duplicated,
-# or undeclared-platform entry, so a published artifact cannot name host evidence this
-# repository does not record. scripts/package-plugin still accepts --tested-host: it is now
-# an assertion about what the run measured, checked against this declaration rather than
-# recorded in place of it.
-#
-# Evidence: docs/certification.md, "Requirement 3.1, 3.2, 3.3, 3.4, 4.5, 6.1", produced by
-# TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation against
-# go-llm-interactive-proxy v0.1.0, 15/15 cases on each platform. Publication is produced by
-# .github/workflows/release.yml from this tag, and each leg of that matrix re-runs the gate
-# against the archive it is about to publish.
-host_certification: certified
-certified_host_artifacts:
-  - platform: windows/amd64
-    host_project: github.com/matdev83/go-llm-interactive-proxy
-    host_version: v0.1.0
-    host_release_asset: go-llm-interactive-proxy_0.1.0_windows_amd64.zip
-    host_checksums_asset: checksums.txt
-    host_binary: lipstd.exe
-    host_artifact_sha256: 6a6f7462d94bd3c5fae16e799e10ec236bfc116c86baaca19544dc3fed6b20c4
-    # The host verifies the outer executable's digest and then launches a private staged
-    # copy of it from a digest-addressed staging directory, so the packaged default
-    # companion path cannot reach the installed launcher. An explicit bridge_executable
-    # pointing at the installed launcher is the supported configuration here, and an unset
-    # path fails as an explicit prerequisite naming that field.
-    companion_contract: explicit-bridge_executable-required
-  - platform: linux/amd64
-    host_project: github.com/matdev83/go-llm-interactive-proxy
-    host_version: v0.1.0
-    host_release_asset: go-llm-interactive-proxy_0.1.0_linux_amd64.tar.gz
-    host_checksums_asset: checksums.txt
-    host_binary: lipstd
-    host_artifact_sha256: ce52b7e3f02c12ce00f67eac6b0ee8a038af17d0f62b15ee8e11e34d130b7d3c
-    # The host binds the verified install-root executable by descriptor and execs it, so
-    # os.Executable() inside the plugin is the installed path and the packaged default
-    # companion resolves with no operator action. An explicit bridge_executable is accepted
-    # there too and is optional.
-    companion_contract: packaged-default-supported
+# The certified shape is unchanged: each entry names the host project and
+# release, the asset that release published, the binary inside it, the measured
+# sha256 of that binary, and the companion contract this platform supports.
+# The renderer copies that into every archive's compatibility.json and refuses
+# a certified posture with a missing, malformed, duplicated, or
+# undeclared-platform entry, so a published artifact cannot name host evidence
+# this repository does not record. scripts/package-plugin still accepts
+# --tested-host: it is an assertion about what the run measured, checked
+# against that declaration rather than recorded in place of it. The last
+# certified evidence (host v0.1.0, 15/15 cases per platform) is recorded in
+# docs/certification.md and remains the evidence for the published
+# cursorsdk-v0.1.0 archives only; it does not cover the v2 manifest.
+host_certification: uncertified
+host_certification_reason: the packaged manifest declares the v2 credential contract, which the last certified host release (matdev83/go-llm-interactive-proxy v0.1.0) cannot parse on either declared platform (windows/amd64, linux/amd64); no host release carrying the v2 credential-contract ABI exists yet, so no archive from this source can be certified. Certification will be re-established against that host release, and the release metadata re-certified with per-platform artifacts, before publication.
