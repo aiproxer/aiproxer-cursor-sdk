@@ -406,8 +406,8 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 		assert.Equal(t, "ok", result.Reason)
 		assert.True(t, result.Launched,
 			"doctor reports the plugin process as launched; a negotiation that launched nothing is not negotiation")
-		assert.Contains(t, strings.ToLower(result.Guidance), "secure",
-			"the host has to state that the channel it used is the approved secure one")
+		assert.Contains(t, strings.ToLower(result.Guidance), "peer-authenticated",
+			"the host has to state that the channel it used is peer-authenticated")
 	})
 
 	t.Run("inventory_lists_the_configured_plugin_instance", func(t *testing.T) {
