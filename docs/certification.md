@@ -276,11 +276,11 @@ cannot become three contracts.
 ### The release process, and how to reproduce a publication
 
 Every published archive comes from [`.github/workflows/release.yml`](.github/workflows/release.yml),
-and the tag is `cursorsdk-v<version>` — `cursorsdk-v0.1.0` for this release.
+and the tag is `cursorsdk-v<version>` — `cursorsdk-v0.2.0` for this release.
 
 ```text
 # 1. the maintainer tags the reviewed commit and pushes the tag; the workflow never creates or moves one
-git tag cursorsdk-v0.1.0 <reviewed-commit> && git push origin cursorsdk-v0.1.0
+git tag cursorsdk-v0.2.0 <reviewed-commit> && git push origin cursorsdk-v0.2.0
 
 # 2. guard: resolve the tag to its commit, check THAT commit out, and only then read the declaration
 #    out of it; then require the tag to be the one release.yaml declares, its commit to be on

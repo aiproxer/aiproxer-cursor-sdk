@@ -511,7 +511,7 @@ func probeHostManifest(tb testing.TB, archive packagelayout.Archive, root string
 	manifest := map[string]any{
 		"schema":     "golip.backendplugin.manifest/v1",
 		"plugin_id":  "io.golip.backend.cursorsdk",
-		"version":    "0.1.0",
+		"version":    readReleaseMetadata(tb).Version,
 		"build_id":   "localdev",
 		"executable": archive.OuterExecutablePath(),
 		"sha256": fileSHA256(tb,

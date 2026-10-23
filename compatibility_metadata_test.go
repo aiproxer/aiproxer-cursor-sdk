@@ -26,6 +26,7 @@ import (
 // release.yaml reads as empty here, which fails the audit below rather than silently
 // dropping the check that referenced it.
 type releaseMetadata struct {
+	Version                 string `yaml:"version"`
 	PublishedRootModule     string `yaml:"published_root_module"`
 	PublishedACPModule      string `yaml:"published_acp_module"`
 	ReplacePolicy           string `yaml:"replace_policy"`

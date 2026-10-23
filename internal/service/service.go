@@ -24,7 +24,7 @@ func New() *Service { return &Service{} }
 func (s *Service) Describe(context.Context) (backendplugin.PluginDescriptor, error) {
 	return backendplugin.PluginDescriptor{
 		ProtocolMajor: 1, ProtocolMinor: backendplugin.ProtocolMinorCancellationHandshake,
-		PluginID: PluginID, Version: "0.1.0", BuildID: "localdev",
+		PluginID: PluginID, Version: "0.2.0", BuildID: "localdev",
 		Features: []backendplugin.Feature{
 			{Name: backendplugin.FeatureAccountingEvidence},
 			{Name: backendplugin.FeatureCancellationHandshake},

@@ -256,7 +256,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 
 		// The record may not read as a publication: release.yaml declares the tag a
 		// future release would carry, and there is no such tag.
-		require.Equal(t, "cursorsdk-v0.1.0", record["release_tag_declared"])
+		require.Equal(t, "cursorsdk-v0.2.0", record["release_tag_declared"])
 		require.NotContains(t, record, "release_tag")
 
 		// The recorded runtime provenance has to name the source the packager

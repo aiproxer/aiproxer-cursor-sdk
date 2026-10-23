@@ -213,7 +213,7 @@ invented anywhere — not in the record, not in this document, not in a verifier
 
 ## Release process
 
-This release is **prepared for tag `cursorsdk-v0.1.0` and is not yet published.** The process
+This release is **prepared for tag `cursorsdk-v0.2.0` and is not yet published.** The process
 that will publish it is [`.github/workflows/release.yml`](.github/workflows/release.yml), which is
 the only path from a commit to a published archive; nothing here is a claim that a run has
 happened. The tag exists as a declaration in `release.yaml`, and until that workflow completes
