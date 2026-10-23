@@ -40,11 +40,27 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - dependencies
+    ignore:
+      # Enforce the policy below instead of only restating it. Without this,
+      # Dependabot classified `@cursor/sdk` 1.0.23 -> 1.0.40 as a semver patch,
+      # swept the exact pin into `npm-patch`, and opened #4 - which cannot pass
+      # the bridge and package lanes that assert the certified baseline. The
+      # SDK moves only through a deliberate, re-certified upgrade.
+      - dependency-name: "@cursor/sdk"
+      # The `undici` override is a release decision, not an update stream.
+      - dependency-name: "undici"
+      # `@types/node` must describe the oldest runtime the bridge supports
+      # (engines `>=22.13`, CI Node 22.22.3); a newer major would type APIs
+      # that runtime does not have.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     groups:
       # The certified baseline is deliberately not automated: `@cursor/sdk` is
       # an exact pin and the `undici` security override is a release decision,
       # so neither moves through an unattended update. Only the bridge's own
-      # development tooling is grouped here.
+      # development tooling is grouped here. The `ignore` block above is the
+      # enforcement of that sentence, not a duplicate of it.
       npm-patch:
         patterns:
           - "*"
