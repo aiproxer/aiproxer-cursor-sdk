@@ -551,6 +551,30 @@ if (Test-Path -LiteralPath $manifestPath) {
                 Add-Finding "manifest export $field is '$got' but the plugin declares '$($posture[$field])'"
             }
         }
+        # The versioned static-key registration is part of the export posture: the
+        # host refuses a static export that does not declare it, and refuses one
+        # that names another environment root, slot, selection or quota domain
+        # than the namespace it holds for the kind.
+        $contract = Get-JsonField $exports[0] 'credential_contract'
+        if (-not $contract) {
+            Add-Finding "manifest export declares no credential_contract; the host refuses a static export without one"
+        } else {
+            $contractPosture = [ordered]@{
+                version      = '2'
+                class        = 'api_key'
+                source       = 'host_env'
+                env_root     = 'CURSOR_API_KEY'
+                slot         = 'api_key'
+                selection    = 'session_admission'
+                quota_domain = 'cursor'
+            }
+            foreach ($field in $contractPosture.Keys) {
+                $got = [string](Get-JsonField $contract $field)
+                if ($got -ne $contractPosture[$field]) {
+                    Add-Finding "manifest credential_contract $field is '$got' but the host registers '$($contractPosture[$field])'"
+                }
+            }
+        }
         Add-Line "export posture: $($posture.Values -join ', ')"
     }
 
@@ -670,7 +694,12 @@ if ($script:Record) {
     # it is a finding here too rather than a silently empty line.
     $certifiedPlatforms = @()
     $certifiedPlatformProperty = $record.PSObject.Properties['host_certification_platforms']
-    if ($certifiedPlatformProperty) {
+    # A null-valued property reads as absent: the renderer writes the key with
+    # a null value for an uncertified record rather than omitting it, and an
+    # uncertified record carries no platforms to enforce. Treating null as
+    # present would iterate one null entry and fail closed on its missing
+    # platform field instead of reporting the uncertified posture.
+    if ($certifiedPlatformProperty -and $certifiedPlatformProperty.Value) {
         $certifiedPlatforms = @($certifiedPlatformProperty.Value)
     }
     if ($certifiedPlatforms.Count -eq 0) {

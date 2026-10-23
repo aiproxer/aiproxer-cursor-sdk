@@ -65,14 +65,24 @@ func readCertifiedReleaseMetadata(tb testing.TB) certifiedReleaseMetadata {
 // measured at - and the set has to be exactly the declared platforms, because a certified
 // platform nobody declared would be a claim outside the manifest and an undeclared
 // platform in the manifest would be a claim with no artifact behind it.
+//
+// A deliberately uncertified tree carries no artifacts by construction: the renderer
+// refuses an uncertified record that names any. That posture asserts its reason instead,
+// and this test pins that shape rather than the certified one.
 func TestHostCertificationRecord_CertifiedPostureCarriesOneHostArtifactPerDeclaredPlatform(t *testing.T) {
 	t.Parallel()
 
 	meta := readCertifiedReleaseMetadata(t)
+	if meta.HostCertification == "uncertified" {
+		require.NotEmpty(t, meta.HostReason,
+			"an uncertified release has to say why; an absent reason reads as an oversight")
+		assert.Empty(t, meta.Artifacts,
+			"an uncertified record carries a reason instead of artifacts; artifacts here would claim "+
+				"measurements no release workflow ran")
+		return
+	}
 	require.Equal(t, "certified", meta.HostCertification,
-		"the real-host gate ran against the released host on both declared platforms and the maintainer adopted "+
-			"the per-platform contract it measured, so this release is certified; an uncertified posture here "+
-			"would describe a state that no longer exists")
+		"release.yaml declares neither certified nor uncertified posture")
 	assert.Empty(t, meta.HostReason,
 		"a certified record carries host artifact digests instead of a reason; a reason here would state why the "+
 			"artifacts below are not evidence")
@@ -197,9 +207,29 @@ func TestHostCertificationRecord_TheCertifiedRecordIsWhatTheGateEnforces(t *test
 	t.Parallel()
 
 	meta := readCertifiedReleaseMetadata(t)
+	contracts := hostCertCompanionContracts(t)
+	if meta.HostCertification == "uncertified" {
+		// No artifacts are declared, so there is no record to agree with;
+		// what the gate enforces has to be exactly the adopted per-platform
+		// contracts the measurement recorded in docs/certification.md.
+		require.Len(t, contracts, 2,
+			"the gate enforces a per-platform contract even while uncertified")
+		linux, ok := contracts["linux/amd64"]
+		require.True(t, ok, "the gate has no companion contract for linux/amd64")
+		assert.True(t, linux.packagedDefaultSupported,
+			"linux/amd64 keeps the adopted packaged-default contract while uncertified")
+		assert.Equal(t, hostCertExplicitOptional, linux.explicitCompanion,
+			"linux/amd64 keeps bridge_executable optional while uncertified")
+		windows, ok := contracts["windows/amd64"]
+		require.True(t, ok, "the gate has no companion contract for windows/amd64")
+		assert.False(t, windows.packagedDefaultSupported,
+			"windows/amd64 keeps no packaged default while uncertified")
+		assert.Equal(t, hostCertExplicitRequired, windows.explicitCompanion,
+			"windows/amd64 keeps the explicit bridge_executable requirement while uncertified")
+		return
+	}
 	require.Len(t, meta.Artifacts, 2, "the gate enforces a per-platform contract, so the record declares one per platform")
 
-	contracts := hostCertCompanionContracts(t)
 	for _, artifact := range meta.Artifacts {
 		declared, err := packagelayout.ParseCompanionContract(
 			packagelayout.CompanionContract(artifact.CompanionContract))

@@ -151,7 +151,7 @@ the declared platform set alongside the platforms that one archive is not eviden
 verification state - which is `not-performed` in every archive, because the packager writes the record before
 verification can run. It never records a verification outcome that has not happened.
 `release_tag_declared` records the tag `release.yaml` declares for this publication -
-`cursorsdk-v0.1.0` - and the release itself is produced by
+`cursorsdk-v0.2.0` - and the release itself is produced by
 `.github/workflows/release.yml` from that tag, which is where the source identity above is
 established for a published archive: each matrix leg builds in a primary checkout of the tagged
 commit, so the toolchain's VCS stamp is the basis the record states, and the leg refuses to

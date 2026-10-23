@@ -40,17 +40,19 @@ The plugin-private bridge launcher exists as source in `cmd/lip-cursor-sdk-bridg
 
 Native archive assembly exists as tooling in this repository; see
 [Native archives](#native-archives). **This plugin's first release is prepared for tag
-`cursorsdk-v0.1.0` and is not published yet** - nothing is downloadable until
+`cursorsdk-v0.2.0` and is not published yet** - nothing is downloadable until
 [`.github/workflows/release.yml`](.github/workflows/release.yml) completes on that tag, and that
 workflow is the only path from a commit to a published archive. It assembles each platform's
 archive natively from a clean checkout of the tag, refuses to continue unless the record
 names the tagged commit with `source_modified: false`, audits the shipped archive with
 `scripts/verify-package --tree-state shipped`, and runs the real-host certification gate
 against that archive on its own platform before publication. The release metadata is
-**certified** with respect to the host: `compatibility.json` records, per declared platform, the
+currently **uncertified** with respect to the host: the packaged manifest declares the v2
+credential contract and no host release carrying the v2 credential-contract ABI exists yet,
+so no archive from this source can be certified - see the `host_certification_reason` in
+`release.yaml` and [Host certification](docs/packaging.md#host-certification). `compatibility.json` records, per declared platform, the
 Go-LIP host release, the asset, the host binary, and the sha256 that binary was measured at, plus
-the companion contract that platform supports - see
-[Host certification](docs/packaging.md#host-certification) - and no redistribution right is
+the companion contract that platform supports once certification is re-established - and no redistribution right is
 claimed for the proprietary Cursor SDK, because the archive does not ship it at all - see
 [Redistribution posture](#redistribution-posture).
 
@@ -332,13 +334,13 @@ position is recorded inside every archive.
 scripts/package-plugin.sh --out-dir dist --node-dist node-v22.22.3-linux-x64.tar.gz   # or .ps1 on Windows
 
 # audit the archive as released: it must contain no Cursor SDK and no SDK dependency closure
-scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64 --tree-state shipped   # or .ps1
+scripts/verify-package.sh --package-root dist/cursorsdk-0.2.0-linux-amd64 --tree-state shipped   # or .ps1
 
 # provision the SDK exactly as an operator does, then verify the installed tree
-cd dist/cursorsdk-0.1.0-linux-amd64/private/bridge
+cd dist/cursorsdk-0.2.0-linux-amd64/private/bridge
 ../node/node ../node/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev
 cd -
-scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64             # or .ps1 on Windows
+scripts/verify-package.sh --package-root dist/cursorsdk-0.2.0-linux-amd64             # or .ps1 on Windows
 ```
 
 `GOWORK=off` is set by the scripts themselves. The archive is written to

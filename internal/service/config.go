@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -15,7 +16,9 @@ const (
 )
 
 type Config struct {
-	APIKey                    string    `yaml:"api_key"`
+	// No credential fields: the single host-delivered session key arrives
+	// via Configure secrets and is bound in toProductInput. Literal api_key
+	// YAML fields fail closed in ParseConfigYAML.
 	BridgeExecutable          string    `yaml:"bridge_executable"`
 	Model                     string    `yaml:"model"`
 	DefaultWorkspace          string    `yaml:"default_workspace"`
@@ -35,9 +38,14 @@ type Config struct {
 }
 
 func ParseConfigYAML(raw []byte) (Config, error) {
+	if err := rejectSecretFields(raw); err != nil {
+		return Config{}, err
+	}
 	var cfg Config
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
+	if len(bytes.TrimSpace(raw)) > 0 {
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
+		dec.KnownFields(true)
+		if err := dec.Decode(&cfg); err != nil {
 			return Config{}, fmt.Errorf("cursorsdk: config yaml: %w", err)
 		}
 	}
@@ -45,10 +53,10 @@ func ParseConfigYAML(raw []byte) (Config, error) {
 }
 
 func (c Config) toProductInput(secretAPIKey string) (product.Input, error) {
-	apiKey := strings.TrimSpace(c.APIKey)
-	if s := strings.TrimSpace(secretAPIKey); s != "" {
-		apiKey = s
-	}
+	// The host Configure secret is the sole key source: connector YAML
+	// carries no key material (rejected above), and the connector never
+	// reads process environment or files for credentials.
+	apiKey := strings.TrimSpace(secretAPIKey)
 	mcpJSON, err := yamlNodeToJSON(c.MCPServers)
 	if err != nil {
 		return product.Input{}, fmt.Errorf("cursorsdk: mcp_servers: %w", err)

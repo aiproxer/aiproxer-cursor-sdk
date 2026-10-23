@@ -511,7 +511,7 @@ func probeHostManifest(tb testing.TB, archive packagelayout.Archive, root string
 	manifest := map[string]any{
 		"schema":     "golip.backendplugin.manifest/v1",
 		"plugin_id":  "io.golip.backend.cursorsdk",
-		"version":    "0.1.0",
+		"version":    readReleaseMetadata(tb).Version,
 		"build_id":   "localdev",
 		"executable": archive.OuterExecutablePath(),
 		"sha256": fileSHA256(tb,
@@ -523,6 +523,15 @@ func probeHostManifest(tb testing.TB, archive packagelayout.Archive, root string
 			"access_scope":    "local_only",
 			"process_sharing": "per_instance",
 			"execution_class": "agent_runtime",
+			"credential_contract": map[string]any{
+				"version":      2,
+				"class":        "api_key",
+				"source":       "host_env",
+				"env_root":     "CURSOR_API_KEY",
+				"slot":         "api_key",
+				"selection":    "session_admission",
+				"quota_domain": "cursor",
+			},
 		}},
 	}
 	body, err := json.MarshalIndent(manifest, "", "  ")

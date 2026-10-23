@@ -24,7 +24,7 @@ func New() *Service { return &Service{} }
 func (s *Service) Describe(context.Context) (backendplugin.PluginDescriptor, error) {
 	return backendplugin.PluginDescriptor{
 		ProtocolMajor: 1, ProtocolMinor: backendplugin.ProtocolMinorCancellationHandshake,
-		PluginID: PluginID, Version: "0.1.0", BuildID: "localdev",
+		PluginID: PluginID, Version: "0.2.0", BuildID: "localdev",
 		Features: []backendplugin.Feature{
 			{Name: backendplugin.FeatureAccountingEvidence},
 			{Name: backendplugin.FeatureCancellationHandshake},
@@ -52,10 +52,30 @@ func (s *Service) Configure(_ context.Context, req backendplugin.ConfigureReques
 	if err != nil {
 		return nil, err
 	}
-	secret := ""
-	if req.Secrets.Values != nil {
-		secret = string(req.Secrets.Values["api_key"])
+	// session_admission binds exactly one host-delivered slot at Configure:
+	// no YAML key material, no connector-side environment or file fallback,
+	// no rotation and no pooling across sessions.
+	slots, err := decodeAPIKeySlotSecrets(req.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("cursorsdk: %w (want %s via host Configure secrets)", err, EnvAPIKeyRoot)
 	}
+	if len(slots) != 1 {
+		names := make([]string, 0, len(slots))
+		for _, slot := range slots {
+			names = append(names, slot.Name)
+		}
+		return nil, fmt.Errorf("cursorsdk: session_admission binds exactly one api_key slot for %s (got %d: %s); supply only %s via host Configure secrets",
+			EnvAPIKeyRoot, len(slots), strings.Join(names, ", "), EnvAPIKeyRoot)
+	}
+	// The admitted slot has to be the bare canonical name. The contract's
+	// environment root CURSOR_API_KEY has no numbered form, so a lone
+	// api_key_2 is not a synonym for it: admitting one would accept a
+	// binding the operator documentation says does not exist.
+	if slots[0].Name != "api_key" {
+		return nil, fmt.Errorf("cursorsdk: session_admission admits the bare api_key slot for %s only (got %q); the root has no numbered form",
+			EnvAPIKeyRoot, slots[0].Name)
+	}
+	secret := slots[0].Secret
 	in, err := cfg.toProductInput(secret)
 	if err != nil {
 		return nil, err

@@ -128,6 +128,15 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 			"access_scope":    "local_only",
 			"process_sharing": "per_instance",
 			"execution_class": "agent_runtime",
+			"credential_contract": map[string]any{
+				"version":      float64(2),
+				"class":        "api_key",
+				"source":       "host_env",
+				"env_root":     "CURSOR_API_KEY",
+				"slot":         "api_key",
+				"selection":    "session_admission",
+				"quota_domain": "cursor",
+			},
 		}}, manifest["exports"])
 		require.NotContains(t, manifest, "private_runtime")
 		require.NotContains(t, manifest, "compatibility")
@@ -247,7 +256,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 
 		// The record may not read as a publication: release.yaml declares the tag a
 		// future release would carry, and there is no such tag.
-		require.Equal(t, "cursorsdk-v0.1.0", record["release_tag_declared"])
+		require.Equal(t, "cursorsdk-v0.2.0", record["release_tag_declared"])
 		require.NotContains(t, record, "release_tag")
 
 		// The recorded runtime provenance has to name the source the packager

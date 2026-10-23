@@ -435,6 +435,44 @@ func checkExports(raw any) error {
 			return fmt.Errorf("export %s is %q but the plugin declares %q", field, got, want)
 		}
 	}
+	contract, ok := entry["credential_contract"].(map[string]any)
+	if !ok {
+		return errors.New("export is missing credential_contract")
+	}
+	return checkCredentialContract(contract)
+}
+
+// checkCredentialContract keeps the packaged manifest's static-key registration
+// exactly equal to the host's closed registration for this kind.
+//
+// The host refuses a static export that does not declare a credential
+// contract, and it refuses one whose declaration names a different
+// environment root, slot, selection or quota domain than the namespace it
+// holds for the kind. Both refusals happen at discovery time, before the
+// connector is composed, so a template that dropped or weakened this block
+// would ship a plugin the host never starts.
+func checkCredentialContract(contract map[string]any) error {
+	want := packagelayout.CursorSDKCredentialContract
+	version, ok := numberField(contract, "version")
+	if !ok || version != float64(want.Version) {
+		return fmt.Errorf("export credential_contract version is %v but the host registers %d", contract["version"], want.Version)
+	}
+	for field, expected := range map[string]string{
+		"class":        want.Class,
+		"source":       want.Source,
+		"env_root":     want.EnvRoot,
+		"slot":         want.Slot,
+		"selection":    want.Selection,
+		"quota_domain": want.QuotaDomain,
+	} {
+		got, ok := contract[field].(string)
+		if !ok {
+			return fmt.Errorf("export credential_contract is missing %s", field)
+		}
+		if got != expected {
+			return fmt.Errorf("export credential_contract %s is %q but the host registers %q", field, got, expected)
+		}
+	}
 	return nil
 }
 
