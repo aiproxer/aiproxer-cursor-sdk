@@ -694,7 +694,12 @@ if ($script:Record) {
     # it is a finding here too rather than a silently empty line.
     $certifiedPlatforms = @()
     $certifiedPlatformProperty = $record.PSObject.Properties['host_certification_platforms']
-    if ($certifiedPlatformProperty) {
+    # A null-valued property reads as absent: the renderer writes the key with
+    # a null value for an uncertified record rather than omitting it, and an
+    # uncertified record carries no platforms to enforce. Treating null as
+    # present would iterate one null entry and fail closed on its missing
+    # platform field instead of reporting the uncertified posture.
+    if ($certifiedPlatformProperty -and $certifiedPlatformProperty.Value) {
         $certifiedPlatforms = @($certifiedPlatformProperty.Value)
     }
     if ($certifiedPlatforms.Count -eq 0) {
