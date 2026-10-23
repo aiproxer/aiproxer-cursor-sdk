@@ -67,6 +67,14 @@ func (s *Service) Configure(_ context.Context, req backendplugin.ConfigureReques
 		return nil, fmt.Errorf("cursorsdk: session_admission binds exactly one api_key slot for %s (got %d: %s); supply only %s via host Configure secrets",
 			EnvAPIKeyRoot, len(slots), strings.Join(names, ", "), EnvAPIKeyRoot)
 	}
+	// The admitted slot has to be the bare canonical name. The contract's
+	// environment root CURSOR_API_KEY has no numbered form, so a lone
+	// api_key_2 is not a synonym for it: admitting one would accept a
+	// binding the operator documentation says does not exist.
+	if slots[0].Name != "api_key" {
+		return nil, fmt.Errorf("cursorsdk: session_admission admits the bare api_key slot for %s only (got %q); the root has no numbered form",
+			EnvAPIKeyRoot, slots[0].Name)
+	}
 	secret := slots[0].Secret
 	in, err := cfg.toProductInput(secret)
 	if err != nil {

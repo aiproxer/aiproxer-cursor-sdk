@@ -609,38 +609,46 @@ func TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation(t *t
 		// half of the credential-parity proof: the unit suite pins the
 		// parser, and this case pins that the certified host actually runs
 		// the parser that rejects.
+		const inlineKey = "inline-key-the-host-must-never-accept"
 		backend := "    - kind: " + hostCertFactoryKind + "\n" +
 			"      id: " + hostCertInstanceID + "\n" +
 			"      enabled: true\n" +
 			"      config:\n" +
-			`        api_key: "inline-key-the-host-must-never-accept"` + "\n" +
+			`        api_key: "` + inlineKey + `"` + "\n" +
 			"        default_workspace: " + hostCertQuote(t.TempDir()) + "\n" +
 			"        sandbox_mode: \"off\"\n"
 		host := newHostCertRun(t, env, env.pluginRoot, hostCertSingleUser, backend)
 
+		// Each command is a separate activation attempt with its own output, so
+		// each is asserted on its own: a pooled assertion would pass if doctor
+		// rejected for the right reason and serve died of something else.
+		assertRejected := func(command, stderr string) {
+			t.Helper()
+			require.Contains(t, stderr, `field "api_key" is forbidden`,
+				"%s has to fail with the connector's forbidden-field rejection, not an unrelated startup error:\n%s",
+				command, stderr)
+			assert.Contains(t, stderr, hostCertAPIKeyEnv,
+				"%s has to name the approved environment root:\n%s", command, stderr)
+			assert.NotContains(t, stderr, inlineKey,
+				"%s must not carry the rejected key material:\n%s", command, stderr)
+			assert.NotContains(t, stderr, hostCertAPIKey,
+				"%s must not carry the bound host secret either:\n%s", command, stderr)
+		}
+
 		// doctor runs the connector's Configure path for the bound instance,
 		// which is where the rejection lives: check-config is structural
 		// only and never activates the plugin.
-		_, _, err := host.run(t, "doctor", "--instance", hostCertInstanceID)
-		require.Error(t, err,
-			"a literal api_key field has to fail closed in doctor")
+		_, doctorErr, err := host.run(t, "doctor", "--instance", hostCertInstanceID)
+		require.Error(t, err, "a literal api_key field has to fail closed in doctor")
+		assertRejected("doctor", doctorErr)
 
 		// serve must refuse the same configuration rather than start
 		// without it: composition runs the same Configure path at startup.
-		_, _, err = host.run(t, "serve")
+		_, serveErr, err := host.run(t, "serve")
 		require.Error(t, err, "serve has to fail closed on the same configuration")
-		assert.NotContains(t, host.combinedOutput(), "listening addr=",
+		assert.NotContains(t, serveErr, "listening addr=",
 			"a configuration with a rejected credential must not start listening")
-
-		denial := host.combinedOutput()
-		assert.Contains(t, denial, "api_key",
-			"the diagnostic has to name the forbidden field")
-		assert.Contains(t, denial, hostCertAPIKeyEnv,
-			"the diagnostic has to name the approved environment root")
-		assert.NotContains(t, denial, "inline-key-the-host-must-never-accept",
-			"a credential rejection must not carry the rejected key material")
-		assert.NotContains(t, denial, hostCertAPIKey,
-			"a credential rejection must not carry the bound host secret either")
+		assertRejected("serve", serveErr)
 	})
 
 	t.Run("the_supported_companion_path_contract_holds_on_this_platform", func(t *testing.T) {

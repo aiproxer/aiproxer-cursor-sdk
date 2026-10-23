@@ -93,6 +93,30 @@ func TestCredentialContract_RejectsSecondSlot(t *testing.T) {
 	}
 }
 
+// TestCredentialContract_RejectsNumberedSingletonSlot proves the one admitted
+// slot has to carry the bare canonical name. CURSOR_API_KEY has no numbered
+// form, so a lone api_key_2 is a different binding, not a synonym: admitting
+// it would accept credentials the operator contract says cannot exist.
+func TestCredentialContract_RejectsNumberedSingletonSlot(t *testing.T) {
+	t.Parallel()
+	_, err := service.New().Configure(context.Background(), cursorReq(
+		"",
+		map[string]string{"api_key_2": "numbered-only-key"},
+	))
+	if err == nil {
+		t.Fatal("expected a lone numbered slot to fail closed; only api_key is the approved name")
+	}
+	if strings.Contains(err.Error(), "numbered-only-key") {
+		t.Fatalf("rejection leaks secret value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "api_key_2") {
+		t.Fatalf("rejection must name the rejected slot: %v", err)
+	}
+	if !strings.Contains(err.Error(), service.EnvAPIKeyRoot) {
+		t.Fatalf("rejection must name the approved environment root: %v", err)
+	}
+}
+
 // TestCredentialContract_AdmitsSingleHostSlot proves the session_admission
 // Configure path end to end: exactly one host slot admits an instance with
 // no YAML key material anywhere. A hermetic stub bridge executable plus a
