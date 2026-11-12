@@ -1,5 +1,5 @@
 /**
- * Opt-in live scenario runner for @cursor/sdk 1.0.23.
+ * Opt-in live scenario runner for @cursor/sdk 1.3.1.
  *
  * Requires:
  *   CURSOR_SDK_LIVE=1

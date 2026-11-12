@@ -298,7 +298,7 @@ export class MockAgent {
     openAgents.delete(this.id);
   }
 
-  /** Matches SDK 1.0.23 sync fallback; pool prefers asyncDispose. */
+  /** Matches SDK 1.3.1 sync fallback; pool prefers asyncDispose. */
   close(): void {
     this.disposed = true;
     openAgents.delete(this.id);

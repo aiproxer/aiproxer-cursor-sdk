@@ -13,7 +13,7 @@ Go-LIP host binary is unchanged.
 
 Full host decoupling is the intended end state, not the current one. Node and npm are now required to
 build and test the Cursor bridge only inside this repository, and this repository verifies its own bridge
-on Node 22.22.3 with `npm ci`, `npm test`, and `npm run typecheck`. Relocation is still in progress: the
+on Node 22.23.5 with `npm ci`, `npm audit`, `npm test`, and `npm run typecheck`. Relocation is still in progress: the
 Go-LIP host repository still carries its own copy of the Cursor SDK source under `connectors/cursorsdk/`
 and still verifies its bridge with its own Node 22.22.3 `npm ci`/`npm test` lane in
 [`.github/workflows/cursor-sdk-platform.yml`](https://github.com/matdev83/go-llm-interactive-proxy/blob/main/.github/workflows/cursor-sdk-platform.yml).
@@ -29,9 +29,10 @@ and the Go test suite), the root-level `service_test.go` and `manifest_posture_p
 `scripts/test-cursor-sdk-live-bridge.ps1` and `scripts/test-cursor-sdk-live-bridge.sh`.
 
 The SDK bridge now lives here as well, under [`bridge-node/`](bridge-node), with its source, production
-lockfile, SDK fixtures/tests, and Node tooling: `@cursor/sdk` pinned to exact `1.0.23`, the `undici`
-`6.28.1` security override, `engines.node >=22.13`, and a CI lane pinned to Node `22.22.3`. Its 108 hermetic
-bridge tests pass unchanged from this repository, and the shared Go/TypeScript fixtures it reads from
+lockfile, SDK fixtures/tests, and Node tooling: `@cursor/sdk` pinned to exact `1.3.1`, its `zod` peer pinned
+to `4.6.6`, the `undici` `6.29.1` security override, `engines.node >=22.13`, and a CI lane pinned to Node
+`22.23.5`. Its hermetic
+bridge tests and the shared Go/TypeScript fixtures it reads from
 `internal/product/testdata/fixtures` were relocated with the connector. The Go-LIP host still carries its
 own copy of the bridge until the cutover completes.
 
@@ -39,15 +40,18 @@ The plugin-private bridge launcher exists as source in `cmd/lip-cursor-sdk-bridg
 [Private bridge launcher](#private-bridge-launcher).
 
 Native archive assembly exists as tooling in this repository; see
-[Native archives](#native-archives). **This plugin's first release is prepared for tag
-`cursorsdk-v0.1.0` and is not published yet** - nothing is downloadable until
-[`.github/workflows/release.yml`](.github/workflows/release.yml) completes on that tag, and that
-workflow is the only path from a commit to a published archive. It assembles each platform's
+[Native archives](#native-archives). `cursorsdk-v0.1.0` is published; this maintenance line
+prepares `cursorsdk-v0.1.1` for the released Go-LIP v0.1.0 host. It retains that host's legacy
+credential contract and is not the newer v2 contract on `main`. In particular, the legacy
+host can supply an inline `api_key` in configuration, so protect that configuration as a
+secret; this line does not provide the v2 host-secret/session-admission guarantees. The
+[release workflow](.github/workflows/release.yml) assembles each platform's
 archive natively from a clean checkout of the tag, refuses to continue unless the record
 names the tagged commit with `source_modified: false`, audits the shipped archive with
 `scripts/verify-package --tree-state shipped`, and runs the real-host certification gate
-against that archive on its own platform before publication. The release metadata is
-**certified** with respect to the host: `compatibility.json` records, per declared platform, the
+against that archive on its own platform before publication. The release metadata names the
+previously measured host artifacts; the gate must pass again for the new archive before publication.
+`compatibility.json` records, per declared platform, the
 Go-LIP host release, the asset, the host binary, and the sha256 that binary was measured at, plus
 the companion contract that platform supports - see
 [Host certification](docs/packaging.md#host-certification) - and no redistribution right is
@@ -67,10 +71,22 @@ Start at [`docs/installation.md`](docs/installation.md). In short:
    `cd <plugin-root>/private/bridge && ../node/node[.exe] ../node/<npm-root>/bin/npm-cli.js ci --omit=dev`.
 
 **A system Node is not required, and neither is a global npm.** The archive carries the
-runtime *and* that runtime's own npm, and the command above needs neither from `PATH`.
-npm specifically, not any package manager: the bridge pins `undici` to the security-fixed
-`6.28.1` through npm `overrides`, whose semantics other package managers resolve
-differently.
+runtime *and* separately pinned npm, and the command above needs neither from `PATH`.
+npm specifically, not any package manager: the bridge retains an `undici` `6.29.1` npm override,
+whose semantics other package managers resolve differently. The current SDK dependency graph does not
+install a separate `undici` package; the override does not patch code bundled inside the SDK or Node.
+
+### MCP OAuth security
+
+The Cursor SDK embeds a vendor-patched MCP client whose OAuth issuer-binding status is not established by
+`npm audit` or by this SDK upgrade. Its bundled code contains a pattern consistent with
+[GHSA-6qxp-vccf-f47h](https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-6qxp-vccf-f47h),
+which can disclose stored MCP OAuth credentials to an authorization server selected by a malicious MCP
+server. An exploit through this connector has not been confirmed. Until Cursor confirms a fix, connect
+OAuth-enabled HTTP/SSE MCP clients only to fully trusted servers and control both `mcp_servers` and any
+ambient `setting_sources` that can add servers. A trusted server can still be compromised; the shipped
+example leaves both settings empty. Stdio MCP is not affected by that advisory. This is operational guidance,
+not an enforced transport restriction.
 
 ## Native archives
 
@@ -87,7 +103,7 @@ private/bridge/dist/
 private/bridge/package.json
 private/bridge/package-lock.json
 private/node/node[.exe]
-private/node/{lib/,}node_modules/npm/          that runtime's own bundled npm
+private/node/{lib/,}node_modules/npm/          separately pinned npm
 compatibility.json
 checksums.sha256
 LICENSES/
@@ -110,16 +126,16 @@ archive stages instead of keeping a second copy of the layout.
 
 What the packager stages, and only this:
 
-- **Production JavaScript only.** `npm ci` and `npm run build` run in `bridge-node/`; the dev toolchain
-  (TypeScript, tsx, esbuild) never enters the archive. `TestPackageArchive` fails if any dev dependency is
-  staged.
+- **Production bridge JavaScript.** `npm ci` and `npm run build` run in `bridge-node/`; the compiler and
+  test tooling do not enter the archive. The separately pinned npm build dependency is staged for operator
+  provisioning, outside the bridge dependency tree.
 - **The bridge manifest and the lockfile, and no Cursor SDK dependency closure.**
   `private/bridge/package.json` pins the SDK version the bridge verifies at run time, and
   `private/bridge/package-lock.json` pins the exact closure and the `undici` override, so an operator's
   `npm ci` resolves the versions this release was built against. `cmd/lip-cursor-sdk-packaging render`
   refuses to describe a staged tree that carries that closure, so a packager that staged one fails instead
   of publishing a bundle it must not ship.
-- **The private Node runtime together with its own bundled npm**, taken from an official Node
+- **The private Node runtime**, taken from an official Node
   distribution when one is supplied (`--node-dist <zip|tar.gz|dir>`, digest-checked against
   `nodejs.org/dist/<version>/SHASUMS256.txt` by the release operator), otherwise from
   `--node-runtime`/`LIP_PACKAGE_NODE_RUNTIME`, otherwise from the `node` on `PATH` at build time.
@@ -127,11 +143,10 @@ What the packager stages, and only this:
   `nodejs-official-distribution:<artifact>` only for a distribution, and
   `nodejs-supplied-runtime:<file>` or `nodejs-path-fallback:<file>` otherwise. An archive whose runtime
   came from a `PATH` fallback says so in its own `LICENSES/THIRD-PARTY-NOTICES.md` too, because no
-  distribution digest backs that runtime; re-stage it with `--node-dist` before publishing. The bundled npm
-  is staged at the path its own distribution keeps it (`lib/node_modules/npm` on POSIX,
-  `node_modules/npm` on Windows), so nothing inside it is renamed and the entry point the provisioning
-  command names is the real one. A runtime staged with no npm beside it is a packaging failure naming
-  `--node-dist`, because without it the documented command would need a global package manager.
+  distribution digest backs that runtime; re-stage it with `--node-dist` before publishing. The packager
+  separately stages npm `12.2.2` from the integrity-pinned bridge lockfile at the usual Node npm path
+  (`lib/node_modules/npm` on POSIX, `node_modules/npm` on Windows), and checks its version and Node
+  compatibility. It does not ship the npm from the Node distribution.
   **This npm tree and the packages npm bundles inside it are the third-party package code an archive
   actually ships** — the great majority of its files by count. They are **not** covered by the Node.js
   MIT grant. npm is separately licensed: its own `LICENSE` ships inside the staged tree at
@@ -185,8 +200,10 @@ tree is, so a caller-supplied one would let the caller decide it, which is the s
 working directory with a switch. Verifying a tree that lives outside a checkout is what `--package-root` is
 for; it was verified on both implementations from a working directory that is neither the repository nor the
 install tree. The scripts also assemble and verify from any working directory, because every `go` invocation
-in them runs in the repository rather than in the caller's. Install into a protected plugin root: the
-archive is only as trustworthy as the directory it is unpacked into.
+in them runs in the repository rather than in the caller's. Protect the whole installed tree, including
+provisioned dependencies, against writes by untrusted users. On Linux the verifiers check descendant
+modes, owners and link containment, assuming the install-root owner and its ancestors are trusted. They do
+not verify Windows ACLs. See [Provenance and trust](docs/installation.md#provenance-and-trust).
 
 ### Verified platforms
 
@@ -244,15 +261,15 @@ platform package ships bundled `rg` and `cursorsandbox` binaries whose own licen
 redistribute. No redistribution right could be verified, so the decision is not to ship it: an archive that
 staged the dependency closure would assert a right nobody has confirmed. The archive ships
 `private/bridge/package.json` and `private/bridge/package-lock.json` - the manifest and the lockfile that pin
-the SDK at `1.0.23` and `undici` at `6.28.1` - and the operator resolves the tree themselves, accepting
+the SDK at `1.3.1` and `undici` at `6.29.1` - and the operator resolves the tree themselves, accepting
 Cursor's terms. `cmd/lip-cursor-sdk-packaging render` refuses to describe a staged tree that carries that
 closure, `scripts/verify-package --tree-state shipped` fails an archive that contains it, and
 `compatibility.json` records `cursor_sdk_bundled: false` next to an explicit non-redistribution statement and
 `LICENSES/THIRD-PARTY-NOTICES.md` restates it.
 
 The claim is scoped to the Cursor SDK on purpose. The archive **does** ship third-party package code: the
-private runtime's own bundled npm and the packages npm bundles inside it, staged whole from the pinned Node
-distribution. npm is licensed separately from Node.js — its own `LICENSE` ships inside the staged tree and
+separately pinned npm and the packages npm bundles inside it, staged from the bridge lockfile.
+npm is licensed separately from Node.js — its own `LICENSE` ships inside the staged tree and
 licenses the npm application under the Artistic License 2.0 — and each package npm bundles is licensed on its
 own terms by the license that package declares. Where such a package ships its own license text, it ships it
 in its own package directory. `LICENSES/THIRD-PARTY-NOTICES.md` is generated from the staged tree, reads
@@ -274,7 +291,7 @@ Verifying the actual content of the tree you provisioned is your responsibility;
 **Releases are published from a tag, once.** The maintainer pushes `cursorsdk-v<version>`;
 the release workflow resolves the tag to its commit, checks *that* commit out before reading
 anything out of it, and requires the tag to be the one `release.yaml` declares, its commit to
-be on `main`, and no release to exist for it yet. Each platform's archive is then assembled
+be the merge commit of a PR into `release/0.1`, and no release to exist for it yet. Each platform's archive is then assembled
 natively from that commit, audited as staged *and* as unpacked from the finished archive,
 certified against the released host on its own platform, and only then published. It never
 creates or moves a tag, it refuses to publish a tag whose release already exists, and it waits
@@ -316,8 +333,8 @@ Stated rather than left to be discovered:
 
 ### Licensing status
 
-The private Node runtime is MIT and its notices ship with it in `LICENSES/nodejs-LICENSE`. The npm it bundles
-and the packages npm bundles inside that npm are shipped too, and they are **not** under that MIT grant: npm
+The private Node runtime is MIT and its notices ship with it in `LICENSES/nodejs-LICENSE`. The separately
+pinned npm and the packages npm bundles inside it are shipped too, and they are **not** under that MIT grant: npm
 licenses its own application under the Artistic License 2.0 in a `LICENSE` inside the staged npm tree, and each
 package npm bundles is licensed on its own terms by the license its own manifest declares, which it ships in
 its own package directory where it has one. That npm tree is the third-party package code this archive
@@ -328,17 +345,17 @@ position is recorded inside every archive.
 ### Building and verifying an archive
 
 ```sh
-# assemble for this machine (Node 22.22.3 recommended; npm and Node are build-time only)
-scripts/package-plugin.sh --out-dir dist --node-dist node-v22.22.3-linux-x64.tar.gz   # or .ps1 on Windows
+# assemble for this machine using the release's patched Node baseline
+scripts/package-plugin.sh --out-dir dist --node-dist node-v22.23.5-linux-x64.tar.gz   # or .ps1 on Windows
 
 # audit the archive as released: it must contain no Cursor SDK and no SDK dependency closure
-scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64 --tree-state shipped   # or .ps1
+scripts/verify-package.sh --package-root dist/cursorsdk-0.1.1-linux-amd64 --tree-state shipped   # or .ps1
 
 # provision the SDK exactly as an operator does, then verify the installed tree
-cd dist/cursorsdk-0.1.0-linux-amd64/private/bridge
+cd dist/cursorsdk-0.1.1-linux-amd64/private/bridge
 ../node/node ../node/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev
 cd -
-scripts/verify-package.sh --package-root dist/cursorsdk-0.1.0-linux-amd64             # or .ps1 on Windows
+scripts/verify-package.sh --package-root dist/cursorsdk-0.1.1-linux-amd64             # or .ps1 on Windows
 ```
 
 `GOWORK=off` is set by the scripts themselves. The archive is written to
@@ -467,21 +484,36 @@ The Go checks require only a Go toolchain; Node and npm are not needed for them.
 GOWORK=off go mod download
 GOWORK=off go mod verify
 GOWORK=off go mod tidy -diff
+GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -test ./...
 GOWORK=off go build ./...
 GOWORK=off go test ./...
 ```
 
-The bridge checks require Node `>=22.13` (CI pins `22.22.3`) and run in `bridge-node/`:
+The bridge's SDK compatibility minimum is Node `>=22.13`, not a security guarantee. CI and release
+packaging pin Node `22.23.5`; when supplying a different runtime, use a currently supported, patched
+Node release. Bridge checks run in `bridge-node/`:
 
 ```sh
 cd bridge-node
 npm ci
+npm audit --audit-level=high
 npm test
 npm run typecheck
 ```
 
-Both lanes run in CI. SDK and JavaScript dependency maintenance, including the pinned `@cursor/sdk`
-version and the `undici` security override, belongs here and never to the Go-LIP host.
+CI and release scan the pinned npm tree, and release also scans the npm tree extracted from each platform
+archive. `node scripts/audit-bundled-npm.mjs <npm-directory> --fail-on-high` inventories package manifests
+and queries npm's advisory service; high/critical version matches and scanner errors fail the gate. The
+current npm `12.2.2` inventory has two unresolved moderate matches: `glob@13.0.6`
+([GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4)) and `minimatch@10.2.5`
+([GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)). For the documented
+operator-run provisioning use, these two findings are temporarily accepted on npm `12.2.2` rather than
+forcing dependency majors outside npm's supported ranges. Reassess by 2026-12-12 or when a compatible npm
+update or material advisory change appears; new findings require separate triage. This is not an assertion
+that either finding is unreachable. The scan also skips manifests without package identity and cannot see
+code embedded without package metadata, including the Cursor SDK bundle. SDK and JavaScript dependency maintenance, including
+the pinned `@cursor/sdk` version and the `undici` security override, belongs here and never to the Go-LIP
+host.
 
 A third lane validates the archive natively on its runner - the same gate as
 `TestPackageArchive_NativeArchiveIsInstallableAndVerifiable`, run on both `windows-latest` and

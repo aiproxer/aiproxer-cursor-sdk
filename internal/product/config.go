@@ -139,7 +139,7 @@ func Normalize(in Input, fallbackAPIKey string) (Config, error) {
 			if s == "" {
 				return Config{}, errors.New("cursorsdk: setting_sources entries must be non-empty")
 			}
-			return Config{}, fmt.Errorf("cursorsdk: unknown setting_sources value %q (allowed: project, user, team, mdm, plugins, all per @cursor/sdk@1.0.23)", raw)
+			return Config{}, fmt.Errorf("cursorsdk: unknown setting_sources value %q (allowed: project, user, team, mdm, plugins, all per @cursor/sdk@1.3.1)", raw)
 		}
 		sources = append(sources, s)
 	}

@@ -107,7 +107,7 @@ test("loadPublishedSdk rejects version mismatch before importing SDK", async () 
           return { Cursor: { models: { list: async () => [] } }, Agent: {} };
         },
       }),
-    /version mismatch.*1\.0\.23.*9\.9\.9/,
+    /version mismatch.*1\.3\.1.*9\.9\.9/,
   );
   assert.equal(imported, false);
 });
@@ -144,4 +144,11 @@ test("loadPublishedSdk returns pinned version when metadata matches", async () =
   });
   assert.equal(runtime.packageVersion, PINNED_SDK_VERSION);
   assert.equal(typeof runtime.Cursor.models.list, "function");
+});
+
+test("installed pinned SDK exposes bridge entry points without credentials", async () => {
+  const runtime = await loadPublishedSdk();
+  assert.equal(runtime.packageVersion, PINNED_SDK_VERSION);
+  assert.equal(typeof runtime.Cursor.models.list, "function");
+  assert.equal(typeof runtime.Agent.create, "function");
 });

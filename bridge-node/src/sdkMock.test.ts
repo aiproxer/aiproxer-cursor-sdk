@@ -26,7 +26,7 @@ test("mock models cover reasoning distinctions from fixtures", async () => {
   assert.ok(byId.get(reasoningId));
   assert.ok(byId.get(effortId));
   assert.ok(byId.get(boolOnlyId));
-  assert.equal(PINNED_SDK_VERSION, "1.0.23");
+  assert.equal(PINNED_SDK_VERSION, "1.3.1");
 });
 
 test("mock covers ordered deltas, cancel, dispose, and no open handles", async () => {

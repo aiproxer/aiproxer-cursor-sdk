@@ -5,7 +5,7 @@
 # This file keeps cursorsdk disabled so `check-config` / `routes` / `inventory` work without Node,
 # CURSOR_API_KEY, or an installed bridge. dogfood-local remains the runnable default route.
 #
-# To enable live SDK routing after installing the bridge (Node >=22.13, @cursor/sdk 1.0.23):
+# To enable live SDK routing after installing the bridge (Node >=22.13, @cursor/sdk 1.3.1):
 #   1. Build/install this plugin (Go plugin + bridge-node) into a trusted discovery root.
 #   2. Enable plugins.backend_discovery.paths pointing at that root (see dogfood-local-stub.yaml).
 #   3. Set CURSOR_API_KEY (or api_key below). Never reuse Cursor CLI/Desktop login for SDK auth.

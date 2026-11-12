@@ -47,6 +47,10 @@ jobs:
       - name: Check go.mod is tidy
         run: go mod tidy -diff
 
+      # Scan tests as well as production packages with the toolchain selected above.
+      - name: Check Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -test ./...
+
       - name: Build
         run: go build ./...
 
@@ -166,9 +170,9 @@ jobs:
     name: bridge-node
     # The SDK bridge now lives in this repository together with its production
     # lockfile, so the plugin owns its own SDK and JavaScript dependency
-    # security verification and the Go-LIP host runs no Node tooling. The lane
-    # keeps the host's proven sequence on the host's exact Node 22.22.3
-    # baseline: `npm ci`, `npm test`, `npm run typecheck`.
+    # security verification and the Go-LIP host runs no Node tooling. This lane
+    # uses the same patched Node baseline as packaging and checks the complete
+    # lockfile, including development dependencies.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -180,16 +184,29 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node (22.22.3)
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Setup Node (22.23.5)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.3
+          node-version: 22.23.5
           cache: npm
           cache-dependency-path: bridge-node/package-lock.json
 
       - name: Install bridge dependencies
         working-directory: bridge-node
         run: npm ci
+
+      # This checks the lockfile, not code bundled inside the Cursor SDK or Node.
+      - name: Check npm vulnerabilities
+        working-directory: bridge-node
+        run: npm audit --audit-level=high
+
+      - name: Test packaged npm security checks
+        run: node --test scripts/audit-bundled-npm.test.mjs scripts/check-packaged-npm.test.cjs
+
+      # Scan the independently pinned package; the native archive gate checks the
+      # actual staged copy on each platform. Moderate matches remain visible.
+      - name: Check packaged npm vulnerabilities
+        run: node scripts/audit-bundled-npm.mjs bridge-node/node_modules/npm --fail-on-high
 
       - name: Bridge unit tests
         working-directory: bridge-node
@@ -235,12 +252,12 @@ jobs:
       # Packaging is a build-time operation: npm builds the production JavaScript and
       # stages the private Node runtime from the runner's Node toolchain. Nothing the
       # assembled archive needs at run time is looked up on PATH, and no
-      # third-party package code ships in it: the operator provisions the Cursor SDK
-      # against the runtime the archive carries.
-      - name: Setup Node (22.22.3)
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # Cursor SDK package code ships in it: the operator provisions the SDK
+      # against the runtime the archive carries. Separately pinned npm does ship.
+      - name: Setup Node (22.23.5)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.3
+          node-version: 22.23.5
           cache: npm
           cache-dependency-path: bridge-node/package-lock.json
 

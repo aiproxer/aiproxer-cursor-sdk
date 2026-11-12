@@ -1,12 +1,12 @@
 /**
- * Testable live probe workflow for exact @cursor/sdk 1.0.23.
+ * Testable live probe workflow for exact @cursor/sdk 1.3.1.
  * Default tests inject mocks; the CLI loads the real package when opted in.
  */
 
 import type { LocalAgentStore } from "@cursor/sdk";
 import { createBridgeInMemoryLocalAgentStore } from "./inMemoryLocalAgentStore.js";
 
-export const PINNED_LIVE_SDK_VERSION = "1.0.23";
+export const PINNED_LIVE_SDK_VERSION = "1.3.1";
 
 export const DEFAULT_PROBE_TOTAL_TIMEOUT_MS = 120_000;
 export const DEFAULT_PROBE_PHASE_TIMEOUT_MS = 30_000;

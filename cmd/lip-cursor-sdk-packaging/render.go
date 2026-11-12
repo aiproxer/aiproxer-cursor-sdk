@@ -172,7 +172,7 @@ type compatibility struct {
 	// CursorSDKBundled is false in every archive this tool writes. The Cursor SDK is
 	// proprietary and is not redistributed: the archive ships the manifest and the
 	// lockfile that pin it and neither the SDK nor its dependency closure. The third-party
-	// package code this archive does ship is the private runtime's own bundled npm.
+	// package code this archive does ship is the separately pinned npm.
 	CursorSDKBundled bool `json:"cursor_sdk_bundled"`
 	// CursorSDKProvisioningCommand is the exact command that provisions the pinned SDK
 	// with the runtime the archive ships.
@@ -503,7 +503,7 @@ func renderCompatibility(in renderInputs, meta releaseMeta, archive packagelayou
 	if err := packagelayout.CheckSlot(priv.Entry, archive.BridgeEntryPath()); err != nil {
 		return nil, prerequisite(err)
 	}
-	// The shipped runtime's own npm is what the recorded provisioning command runs,
+	// The separately packaged npm is what the recorded provisioning command runs,
 	// so an archive that does not carry it cannot be provisioned without a global
 	// package manager and is not the archive this tool describes.
 	if err := packagelayout.CheckSlot(priv.NPMCLI, archive.PrivateRuntimeNPMCLIPath()); err != nil {
@@ -647,7 +647,7 @@ func rejectProvisionedTree(staging string, archive packagelayout.Archive) error 
 // licensingStatus is the standing redistribution statement.
 //
 // The private Node runtime is MIT and its notices ship with it, and that runtime does
-// carry third-party package code: its own bundled npm plus the dependencies npm bundles.
+// carry third-party package code: separately pinned npm plus the dependencies npm bundles.
 // Neither is covered by the Node.js MIT grant, so neither may be described by it. npm
 // ships its own license text inside the staged npm tree and licenses the npm application
 // under the Artistic License 2.0 while stating that its bundled Node package dependencies
@@ -663,7 +663,7 @@ func rejectProvisionedTree(staging string, archive packagelayout.Archive) error 
 // this tool writes and would contradict the npm disclosure in the same string, and it
 // would leave an auditor unable to tell what third-party code the archive does ship.
 const licensingStatus = "the private Node runtime is MIT, with those notices staged in LICENSES/ from " +
-	"the shipped runtime LICENSE; the runtime's bundled npm and the third-party packages npm bundles " +
+	"the shipped runtime LICENSE; the separately pinned npm and the third-party packages npm bundles " +
 	"with it ship as well, npm under its own Artistic-2.0 license text inside the staged npm tree and " +
 	"each bundled package under its own license text in its own package directory, with any bundled " +
 	"package shipping none named in LICENSES/THIRD-PARTY-NOTICES.md; the Cursor SDK is proprietary under " +

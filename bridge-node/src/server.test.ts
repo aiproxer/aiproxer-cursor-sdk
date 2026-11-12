@@ -182,7 +182,7 @@ test("lazy SDK load: loader not called until initialize", async () => {
 
 test("initialize reports exact package and runtime versions with capabilities", async () => {
   const { io, done } = await startServer({
-    loadSdk: async () => mockRuntime({ packageVersion: "1.0.23", sandboxSupported: true }),
+    loadSdk: async () => mockRuntime({ packageVersion: "1.3.1", sandboxSupported: true }),
     implVersion: "0.1.0",
     nodeVersion: "22.14.1",
     detectPlatform: () => "linux",
@@ -202,7 +202,7 @@ test("initialize reports exact package and runtime versions with capabilities", 
   };
   assert.equal(result.schemaVersion, SCHEMA_VERSION);
   assert.equal(result.implVersion, "0.1.0");
-  assert.equal(result.sdkVersion, "1.0.23");
+  assert.equal(result.sdkVersion, "1.3.1");
   assert.equal(result.nodeVersion, "22.14.1");
   assert.deepEqual(result.capabilities, [...METHODS]);
   assert.equal(result.sandboxSupported, true);
@@ -213,7 +213,7 @@ test("initialize reports exact package and runtime versions with capabilities", 
 
 test("initialize sandboxSupported is false without verified SDK capability even on non-win32", async () => {
   const { io, done } = await startServer({
-    loadSdk: async () => mockRuntime({ packageVersion: "1.0.23" }),
+    loadSdk: async () => mockRuntime({ packageVersion: "1.3.1" }),
     detectPlatform: () => "linux",
   });
 
@@ -230,7 +230,7 @@ test("initialize sandboxSupported is false without verified SDK capability even 
 
 test("initialize sandboxSupported follows verified SDK capability on win32", async () => {
   const { io, done } = await startServer({
-    loadSdk: async () => mockRuntime({ packageVersion: "1.0.23", sandboxSupported: true }),
+    loadSdk: async () => mockRuntime({ packageVersion: "1.3.1", sandboxSupported: true }),
     detectPlatform: () => "win32",
   });
 
@@ -247,7 +247,7 @@ test("initialize sandboxSupported follows verified SDK capability on win32", asy
 
 test("initialize sandboxSupported is false when probe fails", async () => {
   const { io, done } = await startServer({
-    loadSdk: async () => mockRuntime({ packageVersion: "1.0.23", sandboxSupported: true }),
+    loadSdk: async () => mockRuntime({ packageVersion: "1.3.1", sandboxSupported: true }),
     detectPlatform: () => "linux",
     probeSandboxSupported: async () => {
       throw new Error("probe exploded");

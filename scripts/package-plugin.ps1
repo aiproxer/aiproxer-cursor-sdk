@@ -7,14 +7,14 @@
     the host platform, builds the production JavaScript out of the source tree,
     stages the metadata the bridge needs to resolve and verify the SDK version - the
     package manifest and the lockfile that pins it - plus the private Node runtime
-    together with that runtime's own bundled npm, renders the closed host manifest and
+    and the separately pinned npm, renders the closed host manifest and
     the release metadata, records a checksum over every archive file including the
     plugin-private ones, and emits a per-platform archive with its own digest.
 
     The archive stages NO Cursor SDK package code. The Cursor SDK is proprietary and is
     not redistributed, so neither it nor its dependency closure is shipped: the operator
     provisions that tree once, out of band, with the runtime this archive carries. The
-    archive does ship third-party package code - the private runtime's own bundled npm
+    archive does ship third-party package code - the separately pinned private npm
     and the dependencies npm bundles with it - because the provisioning command has to run
     without a global Node or a global package manager. That code is NOT covered by the
     Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
@@ -620,11 +620,12 @@ function Write-ThirdPartyNotices {
     $lines.Add('  the Node.js license grant together with the notices for the components Node')
     $lines.Add('  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.')
     $lines.Add('  That grant is Node''s own and does not extend to the npm tree below.')
-    $lines.Add('- The runtime ships with its own bundled npm, and so does this archive, at')
-    # ${...} rather than a bare $PrivateNPMRoot: PowerShell reads a colon straight
-    # after a variable name as part of that name and rejects the reference.
-    $lines.Add("  ${PrivateNPMRoot}: that is what the provisioning command below runs, so an")
-    $lines.Add('  operator needs neither a global Node nor a global package manager.')
+    $npmVersion = (Get-Content -LiteralPath (Join-Path $StagedNPMRoot 'package.json') -Raw | ConvertFrom-Json).version
+    $lines.Add("- This archive ships separately pinned npm $npmVersion, at")
+    # ${...} avoids PowerShell interpreting the colon as part of the variable name.
+    $lines.Add("  ${PrivateNPMRoot}: it is resolved with integrity from the shipped bridge lockfile,")
+    $lines.Add('  not from the Node distribution. It runs the provisioning command below,')
+    $lines.Add('  so an operator needs neither a global Node nor a global package manager.')
     $lines.Add('- That npm tree, together with the third-party packages npm bundles inside it, IS')
     $lines.Add('  third-party package code shipped by this archive, and it is the only such code')
     $lines.Add('  here. It is NOT licensed under the Node.js MIT grant. npm ships its own license')
@@ -677,9 +678,11 @@ function Write-ThirdPartyNotices {
     $lines.Add("  operator's npm from the shipped lockfile, it is outside this project's")
     $lines.Add('  checksum record, and no notice in this archive covers it.')
     $lines.Add('')
-    $lines.Add('## Locked dependency closure (pinned, not shipped)')
+    $lines.Add('## Locked dependency closure and provisioning')
     $lines.Add('')
-    $lines.Add('- What the shipped lockfile pins for the operator to provision:')
+    $lines.Add('- The lockfile pins what the operator provisions and the separately shipped npm.')
+    $lines.Add('  The npm package listed under development-only below ships separately, not in')
+    $lines.Add('  the operator-provisioned bridge tree.')
     $lines.Add('')
     Write-LockedInventory -LockFile $LockFile -ManifestFile $BridgeManifest -Lines $lines
     $lines.Add('')
@@ -750,10 +753,10 @@ try {
     Invoke-Tool -Command 'go' -Arguments @('build', '-trimpath', '-ldflags=-buildid=', '-o', $outerExe, $outerCommand) -WorkingDirectory $RepoRoot | Out-Null
     Invoke-Tool -Command 'go' -Arguments @('build', '-trimpath', '-ldflags=-buildid=', '-o', $launcher, ('./cmd/' + [string]$layout.launcher_name)) -WorkingDirectory $RepoRoot | Out-Null
 
-    # 2. Production JavaScript. The dev toolchain stays in the source tree and never
-    #    enters the archive; only the built output does.
+    # 2. Install the locked build toolchain, including the separately pinned npm
+    #    staged below, and build the production JavaScript.
     $bridgeSource = Join-Path $RepoRoot 'bridge-node'
-    Invoke-Tool -Command 'npm' -Arguments @('ci', '--no-audit', '--no-fund') -WorkingDirectory $bridgeSource | Out-Null
+    Invoke-Tool -Command 'npm' -Arguments @('ci', '--include=dev', '--no-audit', '--no-fund') -WorkingDirectory $bridgeSource | Out-Null
     Invoke-Tool -Command 'npm' -Arguments @('run', 'build') -WorkingDirectory $bridgeSource | Out-Null
 
     # 3. Plugin-private bridge tree. The manifest and the lockfile ship because they are
@@ -802,24 +805,23 @@ try {
     Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'plugin-LICENSE') -Force
     $nodeVersion = (Invoke-Tool -Command $privateRuntime -Arguments @('--version')).Trim()
 
-    # The runtime ships with its own npm, and so does this archive. Without it the
-    # provisioning command would need a global package manager, which is the
-    # prerequisite the private runtime exists to remove. It is resolved from the same
-    # installation the runtime came from, so an archive carries the npm that belongs to
-    # its runtime rather than whatever npm happens to be nearest on the build machine.
-    $npmRel = ([string]$layout.private_npm_root).Substring(([string]$layout.private_runtime_dir).Length + 1)
-    $npmSource = ''
-    foreach ($npmRoot in @((Split-Path -Parent $runtimeSource.Executable),
-            (Split-Path -Parent (Split-Path -Parent $runtimeSource.Executable)))) {
-        $candidate = Join-Path $npmRoot ($npmRel -replace '/', $sep)
-        if (Test-Path -LiteralPath $candidate -PathType Container) { $npmSource = $candidate; break }
-    }
-    if (-not $npmSource) {
-        Fail "no bundled npm found at $npmRel beside $($runtimeSource.Executable); stage an official Node distribution with -NodeDist so the archive ships the npm that provisions the Cursor SDK"
+    # npm ci verified this separately pinned npm against the lockfile integrity.
+    # It ships outside the bridge tree, independently of the Node distribution.
+    $npmSource = Join-Path (Join-Path $bridgeSource (Split-Path -Leaf ([string]$layout.bridge_modules))) `
+        (Split-Path -Leaf ([string]$layout.private_npm_root))
+    if (-not (Test-Path -LiteralPath $npmSource -PathType Container)) {
+        Fail "the pinned npm build dependency was not installed at $npmSource"
     }
     $npmTarget = Join-Path $staging ($layout.private_npm_root -replace '/', $sep)
     New-Item -ItemType Directory -Path (Split-Path -Parent $npmTarget) -Force | Out-Null
     Copy-Item -LiteralPath $npmSource -Destination $npmTarget -Recurse -Force
+    # npm ci creates .bin shims absent from the pinned npm tarball. The CLI does not
+    # need them; in particular they must not become unchecksummed archive links.
+    $npmBin = Join-Path (Join-Path $staging ($layout.private_npm_modules -replace '/', $sep)) '.bin'
+    if (Test-Path -LiteralPath $npmBin) { Remove-Item -Recurse -Force -LiteralPath $npmBin }
+    Invoke-Tool -Command $privateRuntime -Arguments @(
+        (Join-Path $RepoRoot 'scripts/check-packaged-npm.cjs'), $npmTarget,
+        (Join-Path $bridgeSource 'package.json'), (Join-Path $bridgeSource 'package-lock.json')) | Out-Null
 
     # 5. Closed host manifest and release metadata, both derived from the staged
     #    tree rather than described independently of it. The renderer refuses to describe
@@ -872,6 +874,20 @@ try {
         "$($digests[$rel])$($layout.checksum_separator)$rel"
     }
     Set-Content -LiteralPath (Join-Path $staging $layout.checksums) -Value ($checksumLines -join "`n") -Encoding utf8NoBOM
+
+    # On POSIX, do not let the caller's umask make the staged archive writable by
+    # other principals. Never chmod through a link while protecting the tree.
+    if (-not $IsWindows) {
+        $writeMask = [int][System.IO.UnixFileMode]::GroupWrite -bor [int][System.IO.UnixFileMode]::OtherWrite
+        $items = @((Get-Item -LiteralPath $staging -Force)) + @(Get-ChildItem -LiteralPath $staging -Force -Recurse)
+        foreach ($item in $items) {
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                Fail "staged archive contains an unexpected link: $($item.FullName)"
+            }
+            $mode = [int][System.IO.File]::GetUnixFileMode($item.FullName)
+            [System.IO.File]::SetUnixFileMode($item.FullName, [System.IO.UnixFileMode]($mode -band (-bnot $writeMask)))
+        }
+    }
 
     # 7. Publish the install tree, then the per-platform archive.
     if (Test-Path -LiteralPath $installRoot) { Remove-Item -Recurse -Force -LiteralPath $installRoot }

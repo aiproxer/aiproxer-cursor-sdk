@@ -70,11 +70,11 @@ func TestProbeNativeBridgeLane_ReadyWhenNodeAndBridgePresent(t *testing.T) {
 		RunNode: func(ctx context.Context, nodeExe, bridgeBin string) (string, error) {
 			assert.Equal(t, "node-stub", nodeExe)
 			assert.NotEmpty(t, bridgeBin)
-			return "lip-cursor-sdk-bridge 0.1.0 (@cursor/sdk 1.0.23)", nil
+			return "lip-cursor-sdk-bridge 0.1.0 (@cursor/sdk 1.3.1)", nil
 		},
 	})
 	assert.Equal(t, "ready", probe.Status)
-	assert.Equal(t, "1.0.23", probe.SDKPin)
+	assert.Equal(t, "1.3.1", probe.SDKPin)
 	assert.Equal(t, "v22.13.0", probe.Node)
 	assert.Equal(t, runtime.GOOS, probe.GOOS)
 }
