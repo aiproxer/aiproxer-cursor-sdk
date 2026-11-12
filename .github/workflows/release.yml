@@ -153,9 +153,55 @@ jobs:
           fi
           echo "no release exists for $TAG yet"
 
+  # Scan the tagged revision at release time; a prior Verify run is neither a
+  # release prerequisite nor a fresh check against the advisory databases.
+  security:
+    name: security (tagged revision)
+    needs: [guard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.guard.outputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -test ./...
+
+      - name: Setup Node (22.23.5)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.5
+          cache: npm
+          cache-dependency-path: bridge-node/package-lock.json
+
+      # Lockfile only: bundled SDK and Node/npm code need separate review.
+      - name: Check npm vulnerabilities
+        working-directory: bridge-node
+        run: npm audit --audit-level=high
+
+      - name: Install the locked security tools without lifecycle scripts
+        working-directory: bridge-node
+        run: npm ci --include=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Test packaged npm security checks
+        run: node --test scripts/audit-bundled-npm.test.mjs scripts/check-packaged-npm.test.cjs
+
+      - name: Check packaged npm vulnerabilities
+        run: node scripts/audit-bundled-npm.mjs bridge-node/node_modules/npm --fail-on-high
+
   package:
     name: package + certify (${{ matrix.slug }})
-    needs: [guard]
+    needs: [guard, security]
     runs-on: ${{ matrix.os }}
     # Long on purpose: this leg resolves the Cursor SDK over the network, verifies the tree
     # several times, provisions it, and then drives the real-host certification gate, which
@@ -182,7 +228,7 @@ jobs:
             platform: linux/amd64
             slug: linux-amd64
             archive_extension: tar.gz
-            node_dist: node-v22.22.3-linux-x64.tar.gz
+            node_dist: node-v22.23.5-linux-x64.tar.gz
             packager: bash scripts/package-plugin.sh --out-dir dist --node-dist $env:NODE_DIST
             verifier_staged: bash scripts/verify-package.sh --package-root $env:STAGED_ROOT --tree-state shipped
             verifier_unpacked: bash scripts/verify-package.sh --package-root $env:INSTALL_ROOT --tree-state shipped
@@ -191,7 +237,7 @@ jobs:
             platform: windows/amd64
             slug: windows-amd64
             archive_extension: zip
-            node_dist: node-v22.22.3-win-x64.zip
+            node_dist: node-v22.23.5-win-x64.zip
             packager: "& ./scripts/package-plugin.ps1 -OutDir dist -NodeDist $env:NODE_DIST"
             verifier_staged: "& ./scripts/verify-package.ps1 -PackageRoot $env:STAGED_ROOT -TreeState shipped"
             verifier_unpacked: "& ./scripts/verify-package.ps1 -PackageRoot $env:INSTALL_ROOT -TreeState shipped"
@@ -238,10 +284,10 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Setup Node (22.22.3)
+      - name: Setup Node (22.23.5)
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.3
+          node-version: 22.23.5
           cache: npm
           cache-dependency-path: bridge-node/package-lock.json
 
@@ -425,6 +471,16 @@ jobs:
           }
           "INSTALL_ROOT=$($tree[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "unpacked $(Split-Path -Leaf $env:PLUGIN_ARCHIVE) into $($tree[0].FullName)"
+
+      - name: Check npm in the unpacked release archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $layout = go run ./cmd/lip-cursor-sdk-packaging layout -platform $env:RELEASE_PLATFORM | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $layout.private_npm_root) { throw 'could not read npm archive layout' }
+          $npmRoot = Join-Path $env:INSTALL_ROOT ($layout.private_npm_root -replace '/', [string][System.IO.Path]::DirectorySeparatorChar)
+          node scripts/audit-bundled-npm.mjs $npmRoot --fail-on-high |
+            Tee-Object -FilePath "npm-security-$env:RELEASE_SLUG.txt"
+          if ($LASTEXITCODE -ne 0) { throw "the unpacked archive's npm security scan failed on $env:RELEASE_PLATFORM" }
 
       - name: Audit the staged archive as it leaves the build
         run: |
@@ -617,6 +673,7 @@ jobs:
           Copy-Item "verify-shipped-$env:RELEASE_SLUG.txt" $scratch
           Copy-Item "verify-unpacked-$env:RELEASE_SLUG.txt" $scratch
           Copy-Item "verify-installed-$env:RELEASE_SLUG.txt" $scratch
+          Copy-Item "npm-security-$env:RELEASE_SLUG.txt" $scratch
           Copy-Item "host-cert-$env:RELEASE_SLUG.txt" $scratch
           Get-ChildItem $scratch | Select-Object Name, Length
 

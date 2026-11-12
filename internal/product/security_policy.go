@@ -14,7 +14,7 @@ func validateSettingSources(sources []SettingSource) error {
 			if s == "" {
 				return errors.New("cursorsdk: setting_sources entries must be non-empty")
 			}
-			return fmt.Errorf("cursorsdk: unknown setting_sources value %q (allowed: project, user, team, mdm, plugins, all per @cursor/sdk@1.0.23)", s)
+			return fmt.Errorf("cursorsdk: unknown setting_sources value %q (allowed: project, user, team, mdm, plugins, all per @cursor/sdk@1.3.1)", s)
 		}
 	}
 	return nil

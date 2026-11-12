@@ -1,6 +1,6 @@
 export const SCHEMA_VERSION = 1;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
-export const PINNED_SDK_VERSION = "1.0.23";
+export const PINNED_SDK_VERSION = "1.3.1";
 export const MIN_NODE_ENGINE = ">=22.13";
 
 export const TYPE_REQUEST = "request";

@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test, beforeEach } from "node:test";
+import type { AgentOptions, SettingSource } from "@cursor/sdk";
 import {
   AgentPool,
   MAX_MCP_CONFIG_BYTES,
+  mapCreateOptions,
   mapSdkDelta,
   mapSdkStep,
   normalizeTurnUsage,
   validateAgentCreateParams,
 } from "./agents.js";
 import type { AgentCreateParams } from "./params.js";
+import { createBridgeInMemoryLocalAgentStore } from "./inMemoryLocalAgentStore.js";
 import {
   RunSequencer,
   SCHEMA_VERSION,
@@ -46,6 +49,32 @@ function baseCreateParams(overrides: Partial<AgentCreateParams> = {}): AgentCrea
 
 beforeEach(() => {
   resetSdkMock();
+});
+
+test("mapped create options match the installed SDK's declared local-agent contract", () => {
+  // The satisfies and coverage check bind this test to the actual installed SDK
+  // type declarations, rather than only to a bridge-owned mock or old fixture.
+  const sources = ["project", "user", "team", "mdm", "plugins", "all"] as const satisfies readonly SettingSource[];
+  const allSourcesCovered: Exclude<SettingSource, (typeof sources)[number]> extends never ? true : never = true;
+  assert.equal(allSourcesCovered, true);
+
+  const params = baseCreateParams({ settingSources: [...sources] });
+  const store = createBridgeInMemoryLocalAgentStore();
+  validateAgentCreateParams(params);
+  const sdkOptions: AgentOptions = {
+    apiKey: "crsr_test_key",
+    model: { id: "gpt-5.3-codex", params: [{ id: "reasoning", value: "high" }] },
+    local: {
+      cwd: "/tmp/workspace",
+      store,
+      settingSources: [...sources],
+      sandboxOptions: { enabled: true },
+      autoReview: true,
+      enableAgentRetries: false,
+    },
+    mcpServers: { docs: { command: "echo", args: ["mcp"] } },
+  };
+  assert.deepEqual(mapCreateOptions(params, store), sdkOptions);
 });
 
 test("validateAgentCreateParams rejects unknown settingSources and oversized MCP", () => {
@@ -399,7 +428,7 @@ test("server agent/create and agent/send wire through AgentPool with protocol ev
   });
 
   const { io, done } = await startServer(async () => ({
-    packageVersion: "1.0.23",
+    packageVersion: "1.3.1",
     Cursor: MockCursor,
     Agent: MockAgent,
   }));
@@ -671,7 +700,7 @@ test("AgentPool shutdown disposes tracked agents only and leaves no open handles
 
 test("server run/cancel dispose and shutdown wire through AgentPool", async () => {
   const { io, done } = await startServer(async () => ({
-    packageVersion: "1.0.23",
+    packageVersion: "1.3.1",
     Cursor: MockCursor,
     Agent: MockAgent,
   }));

@@ -55,9 +55,9 @@ export interface SdkAgentHandle {
       local?: Record<string, never>;
     },
   ): Promise<SdkRunHandle>;
-  /** SDK 1.0.23 primary disposal. */
+  /** SDK 1.3.1 primary disposal. */
   [Symbol.asyncDispose]?: () => Promise<void>;
-  /** SDK 1.0.23 supported sync fallback when asyncDispose is absent. */
+  /** SDK 1.3.1 supported sync fallback when asyncDispose is absent. */
   close?: () => void;
 }
 

@@ -20,7 +20,7 @@ reasoned about, and never confuse the two.
 
 **The release ships the `private-runtime` archive: a directory containing the outer plugin
 executable, a plugin-private bridge launcher, the built bridge, its manifest and lockfile,
-and a pinned private Node runtime together with that runtime's own bundled npm. The
+and a pinned private Node runtime together with separately pinned npm. The
 Cursor SDK is not shipped; the operator provisions it once with the runtime the archive
 carries.**
 
@@ -44,8 +44,9 @@ directory and embedding a runtime in one file a real question rather than a pref
    SDK's export map does not expose `./package.json`.
 3. The SDK's platform package bundles native executables (`rg` and `cursorsandbox`)
    that have to exist as files on disk to be spawned.
-4. `overrides` in the bridge manifest pins `undici` to the security-fixed `6.28.1`,
-   which is npm semantics and therefore a package-manager step, not a bundler flag.
+4. `overrides` in the bridge manifest retains an `undici` `6.29.1` pin. The current
+   dependency graph does not install a separate `undici` package, but npm must still
+   interpret the manifest and lockfile; an override does not patch SDK-bundled code.
 
 ## Evaluation
 
@@ -56,8 +57,8 @@ from the four facts above, and nothing here measures it.
 
 | Subject | `private-runtime` (shipped) | Single Executable Application | Evidence status here |
 | --- | --- | --- | --- |
-| SDK loading | The launcher starts the shipped runtime, the runtime resolves `@cursor/sdk` from `private/bridge/node_modules/`, and the bridge loads it on the first request that needs it. | The SDK tree would have to be inside the blob. Node's SEA support embeds one script; `import()` of a package resolved from a `node_modules` tree is not a thing an SEA blob resolves. | `private-runtime` package **resolution** is tested (see [Tested](#tested)); a real SDK **import** is not, and the SEA column is reasoned. |
-| Dynamic imports | `import("@cursor/sdk")` and `import("dist/main.js")` are ordinary runtime resolutions inside the shipped runtime. Nothing is pre-bundled, so there is no second copy of the SDK. | A blob has no `node_modules` to resolve against, and the bridge's own `dist/` is dynamic too. Bundling it would mean a build step that duplicates the operator-provisioned tree. | `private-runtime` dynamic import is exercised by the bridge test suite with an injected importer; against the real package it is reasoned plus live-only. SEA is reasoned. |
+| SDK loading | The launcher starts the shipped runtime, the runtime resolves `@cursor/sdk` from `private/bridge/node_modules/`, and the bridge loads it on the first request that needs it. | The SDK tree would have to be inside the blob. Node's SEA support embeds one script; `import()` of a package resolved from a `node_modules` tree is not a thing an SEA blob resolves. | Package **resolution** is tested (see [Tested](#tested)); the bridge test suite also imports the installed SDK without credentials. Live SDK behavior and the SEA column remain unproven. |
+| Dynamic imports | `import("@cursor/sdk")` and `import("dist/main.js")` are ordinary runtime resolutions inside the shipped runtime. Nothing is pre-bundled, so there is no second copy of the SDK. | A blob has no `node_modules` to resolve against, and the bridge's own `dist/` is dynamic too. Bundling it would mean a build step that duplicates the operator-provisioned tree. | The bridge test suite exercises the importer both with an injected importer and against the installed SDK, without credentials. SEA is reasoned. |
 | Package metadata lookup | `readInstalledCursorSdkVersion` resolves the SDK entry and walks to its package root. On the installed layout the launcher and `doctor` read the same `package.json` the bridge walks to. | The metadata would have to come from the blob's own copy, which is the one thing that cannot be the operator's provisioned tree. | **Tested** hermetically in `bridge-node` (`sdk_runtime.test.ts`, including the export-map omission and unreadable/missing metadata cases) and on the installed layout by the launcher's preflight and `doctor`. |
 | Native assets | None are shipped. `rg` and `cursorsandbox` arrive with the operator's provisioned SDK and run from `private/bridge/node_modules/`, where the SDK expects them. | A blob would have to carry them or extract them at run time, and their license texts are not redistributed by the SDK itself. | `private-runtime` staging is **tested** (the archive content audit fails if the SDK tree is present). Whether `cursorsandbox` executes correctly is **not tested** here: it needs live provider credentials. |
 | Sandbox | The plugin rejects execution when configured sandbox support is not verified to be available, before it starts a run. Nothing about sandboxing is baked into the archive. | Same check, but the blob's child processes would have to be located inside the blob. | The **rejection** is tested (hermetic, with the fake bridge). The sandbox **executing** is not tested in this repository; live scenarios with credentials are the only path that exercises it. |
@@ -72,8 +73,8 @@ The shipped shape is validated natively, on the runner of each platform it claim
 `package` matrix in [`.github/workflows/verify.yml`](.github/workflows/verify.yml) on
 `windows-latest` and `ubuntu-latest`. What it establishes about the shipped shape:
 
-- An archive assembles from a real tree: production JavaScript, the private runtime, that
-  runtime's bundled npm, the closed manifest, and the compatibility record.
+- An archive assembles from a real tree: production JavaScript, the private runtime, separately
+  pinned npm, the closed manifest, and the compatibility record.
 - The archive contains no Cursor SDK and no SDK dependency closure, and the renderer
   refuses to describe a tree that does.
 - The shipped checksum record covers every shipped file; a tampered shipped file, an

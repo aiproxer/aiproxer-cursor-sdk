@@ -428,9 +428,9 @@ func probeTree(tb testing.TB, archive packagelayout.Archive) string {
 
 	text := map[string]string{
 		archive.BridgePackageJSONPath(): `{"name":"lip-cursor-sdk-bridge","version":"0.1.0",` +
-			`"engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.0.23"}}`,
+			`"engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.3.1"}}`,
 		archive.BridgePackageLockPath(): `{"name":"lip-cursor-sdk-bridge","lockfileVersion":3,` +
-			`"packages":{"":{"dependencies":{"@cursor/sdk":"1.0.23"}}}}`,
+			`"packages":{"":{"dependencies":{"@cursor/sdk":"1.3.1"}}}}`,
 		archive.BridgeEntryPath():                         "// bridge entry shim\n",
 		archive.BridgeDistPath() + "/main.js":             "// staged bridge build output\n",
 		archive.LicensesDir() + "/THIRD-PARTY-NOTICES.md": "# Third-party notices\n",
@@ -453,7 +453,7 @@ func probeTree(tb testing.TB, archive packagelayout.Archive) string {
 	// operator-owned content that the shipped record must not cover.
 	sdkMetadata := filepath.Join(root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
 	require.NoError(tb, os.MkdirAll(filepath.Dir(sdkMetadata), 0o755))
-	require.NoError(tb, os.WriteFile(sdkMetadata, []byte(`{"name":"@cursor/sdk","version":"1.0.23"}`), 0o644))
+	require.NoError(tb, os.WriteFile(sdkMetadata, []byte(`{"name":"@cursor/sdk","version":"1.3.1"}`), 0o644))
 
 	// The checksum record covers the shipped files the tree stages, plus the two probed
 	// executables, which are binaries rather than staged text.
@@ -490,7 +490,7 @@ func probeReleaseRecord(tb testing.TB, archive packagelayout.Archive, root strin
 
 	fields := map[string]any{}
 	require.NoError(tb, json.Unmarshal([]byte(provisioningRecord(tb, archive, root,
-		provisioningTreeOptions{provisionedVersion: "1.0.23"})), &fields))
+		provisioningTreeOptions{provisionedVersion: "1.3.1"})), &fields))
 	fields["private_runtime_version"] = fakePackageRuntimeVersion
 	fields["private_runtime_sha256"] = fileSHA256(tb,
 		filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimePath())))

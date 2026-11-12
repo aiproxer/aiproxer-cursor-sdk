@@ -90,7 +90,7 @@ func TestNormalize_sdkSettingSourcesPinned(t *testing.T) {
 	product.ResetLookPathCache()
 	t.Cleanup(product.ResetLookPathCache)
 
-	raw, err := os.ReadFile("testdata/fixtures/sdk_setting_sources_1.0.23.txt")
+	raw, err := os.ReadFile("testdata/fixtures/sdk_setting_sources_1.3.1.txt")
 	require.NoError(t, err)
 	var want []string
 	for line := range strings.SplitSeq(string(raw), "\n") {

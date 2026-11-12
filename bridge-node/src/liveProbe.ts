@@ -1,5 +1,5 @@
 /**
- * Opt-in live contract probe for exact @cursor/sdk 1.0.23.
+ * Opt-in live contract probe for exact @cursor/sdk 1.3.1.
  *
  * Requires:
  *   CURSOR_SDK_LIVE_PROBE=1

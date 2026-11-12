@@ -32,7 +32,7 @@ import (
 // packageGateEnv opts a checkout into the native package gate.
 //
 // The gate assembles a real archive: it builds production JavaScript, copies a private
-// Node runtime with that runtime's own bundled npm, and resolves the Cursor SDK over
+// Node runtime with the separately pinned private npm, and resolves the Cursor SDK over
 // the network exactly as an operator does. That takes minutes and needs the build-time
 // toolchain. That is deliberate work, not a unit test, so it runs only where it is asked
 // for - the packaging lane, or a maintainer running scripts/package-plugin by hand. The
@@ -67,6 +67,25 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 	// One provisioned tree for the whole gate: the SDK is resolved over the network
 	// exactly as an operator resolves it, and each case that needs one copies it.
 	provisioned := provisionedInstallRoot(t, built.installRoot)
+
+	t.Run("shipped_npm_matches_the_lock_and_has_no_high_advisories", func(t *testing.T) {
+		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
+		require.NoError(t, err)
+		root := built.installRoot
+		npmRoot := filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMRootPath()))
+		node := filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimePath()))
+		npm := filepath.Join(root, filepath.FromSlash(archive.PrivateRuntimeNPMCLIPath()))
+		manifest := decodeJSONObject(t, filepath.Join(root, filepath.FromSlash(archive.BridgePackageJSONPath())))
+		devDeps, ok := manifest["devDependencies"].(map[string]any)
+		require.True(t, ok)
+		wantVersion := devDeps["npm"]
+		require.NotEmpty(t, wantVersion)
+		version, err := exec.Command(node, npm, "--version").CombinedOutput()
+		require.NoError(t, err, "private npm did not run: %s", version)
+		require.Equal(t, wantVersion, strings.TrimSpace(string(version)))
+		out, err := exec.Command(node, filepath.Join(repoRoot(t), "scripts", "audit-bundled-npm.mjs"), npmRoot, "--fail-on-high").CombinedOutput()
+		require.NoError(t, err, "the shipped npm audit failed:\n%s", out)
+	})
 
 	t.Run("staged_tree_is_the_design_layout_block", func(t *testing.T) {
 		archive, err := packagelayout.ForPlatform(runtime.GOOS, runtime.GOARCH)
@@ -162,7 +181,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		// The SDK is required at run time and not shipped, and the record has to say
 		// so with the command that provides it. A record that only named a version
 		// would read as a claim about what the archive carries.
-		require.Equal(t, "1.0.23", record["cursor_sdk_required_version"])
+		require.Equal(t, "1.3.1", record["cursor_sdk_required_version"])
 		require.Equal(t, false, record["cursor_sdk_bundled"])
 		require.Equal(t, archive.ProvisionCommand(""), record["cursor_sdk_provisioning_command"])
 		require.NotContains(t, record, "cursor_sdk_version",
@@ -296,7 +315,12 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, words, "operator-attributable")
 		require.Contains(t, words, archive.ProvisionCommand(""),
 			"the notice has to print the provisioning command an operator runs")
-		require.Contains(t, words, "Locked dependency closure (pinned, not shipped)")
+		require.Contains(t, words, "Locked dependency closure and provisioning")
+		manifest := decodeJSONObject(t, filepath.Join(built.installRoot, filepath.FromSlash(archive.BridgePackageJSONPath())))
+		devDeps, ok := manifest["devDependencies"].(map[string]any)
+		require.True(t, ok)
+		require.Contains(t, words, fmt.Sprintf("separately pinned npm %s", devDeps["npm"]))
+		require.Contains(t, words, "not from the Node distribution")
 	})
 
 	t.Run("third_party_notices_attribute_the_shipped_npm_tree_to_its_own_license_texts", func(t *testing.T) {
@@ -505,7 +529,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Contains(t, report, "node on PATH: not required")
 		require.Contains(t, report, "plugin-private files checksummed:")
 		require.Contains(t, report, "host digest authority:")
-		require.Contains(t, report, "sdk: not redistributed, required 1.0.23 at run time")
+		require.Contains(t, report, "sdk: not redistributed, required 1.3.1 at run time")
 		require.Contains(t, report, "node engine required: >=22.13")
 		require.Contains(t, report, "private runtime resolves to itself: yes")
 
@@ -538,7 +562,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		root := copyInstallRoot(t, built.installRoot)
 		stagedSDK := filepath.Join(root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
 		require.NoError(t, os.MkdirAll(filepath.Dir(stagedSDK), 0o755))
-		require.NoError(t, os.WriteFile(stagedSDK, []byte(`{"name":"@cursor/sdk","version":"1.0.23"}`), 0o644))
+		require.NoError(t, os.WriteFile(stagedSDK, []byte(`{"name":"@cursor/sdk","version":"1.3.1"}`), 0o644))
 
 		report, errCode := runVerifyScript(t, root, nil, []string{"--tree-state", "shipped"})
 		require.NotEqual(t, 0, errCode,
@@ -560,7 +584,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.NotEqual(t, 0, errCode,
 			"an installed tree with no provisioned SDK passed verification:\n%s", report)
 		require.Contains(t, report, "not provisioned")
-		require.Contains(t, report, "1.0.23")
+		require.Contains(t, report, "1.3.1")
 		require.Contains(t, report, "ci --omit=dev")
 		require.NotContains(t, report, "verify-package: ok")
 
@@ -568,7 +592,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		out, launchErr := runPackagedExecutable(t, launcher, "doctor")
 		require.Error(t, launchErr, "the launcher served an unprovisioned tree:\n%s", out)
 		require.Contains(t, out, "not provisioned")
-		require.Contains(t, out, "1.0.23")
+		require.Contains(t, out, "1.3.1")
 		require.Contains(t, out, "ci --omit=dev")
 		require.NotContains(t, strings.ToLower(out), "cannot find module",
 			"the launcher has to answer with the prerequisite, not with a resolution stack")
@@ -585,7 +609,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 
 		report, errCode := runVerifyScript(t, root, nil, nil)
 		require.Equal(t, 0, errCode, "a provisioned install tree failed verification:\n%s", report)
-		require.Contains(t, report, "sdk: required 1.0.23, provisioned 1.0.23")
+		require.Contains(t, report, "sdk: required 1.3.1, provisioned 1.3.1")
 		require.Contains(t, report, "doctor: ok")
 		require.NotContains(t, report, "present but not listed",
 			"operator-provisioned files are outside the shipped record, not unaccounted for")
@@ -606,14 +630,14 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		// and refusing it there surfaces as a provider error an operator reads as a
 		// Cursor problem.
 		sdkMetadata := filepath.Join(root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
-		body := strings.Replace(readFileText(t, sdkMetadata), `"1.0.23"`, `"1.0.22"`, 1)
+		body := strings.Replace(readFileText(t, sdkMetadata), `"1.3.1"`, `"1.0.22"`, 1)
 		require.NoError(t, os.WriteFile(sdkMetadata, []byte(body), 0o644))
 
 		report, errCode := runVerifyScript(t, root, nil, nil)
 		require.NotEqual(t, 0, errCode,
 			"a provisioned tree at the wrong SDK version passed verification:\n%s", report)
 		require.Contains(t, report, "1.0.22")
-		require.Contains(t, report, "1.0.23")
+		require.Contains(t, report, "1.3.1")
 		require.Contains(t, report, "ci --omit=dev")
 	})
 
@@ -654,7 +678,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		installed := extractArchive(t, built.archive)
 		report, errCode := runVerifyScript(t, installed, nil, []string{"--tree-state", "shipped"})
 		require.Equal(t, 0, errCode, "extracted archive failed verification:\n%s", report)
-		require.Contains(t, report, "sdk: not redistributed, required 1.0.23 at run time")
+		require.Contains(t, report, "sdk: not redistributed, required 1.3.1 at run time")
 		require.Contains(t, report, "private runtime resolves to itself: yes")
 		require.Contains(t, report, fmt.Sprintf("install root: %s", installed))
 
@@ -837,7 +861,7 @@ func TestPackageArchive_NativeArchiveIsInstallableAndVerifiable(t *testing.T) {
 		require.Equal(t, 0, errCode, "verification needed a global Node:\n%s", report)
 		require.Contains(t, report, "node on PATH: not required")
 		require.Contains(t, report, "private runtime resolves to itself: yes")
-		require.Contains(t, report, "sdk: required 1.0.23, provisioned 1.0.23")
+		require.Contains(t, report, "sdk: required 1.3.1, provisioned 1.3.1")
 		require.Contains(t, report, "doctor: ok")
 	})
 

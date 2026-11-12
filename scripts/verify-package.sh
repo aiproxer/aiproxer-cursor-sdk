@@ -371,6 +371,16 @@ case " $(layout_entries tree_states | tr '\n' ' ') " in
     ;;
 esac
 
+# Check the complete tree before reading its metadata or running its executables.
+# The trusted-root-owner and trusted-ancestor assumptions still belong to the operator.
+if ! tree_check="$("$packaging_tool" inspect-tree -root "$package_root" 2>&1)"; then
+  failure="verify-package: FAIL: $tree_check"
+  [ -z "$report_path" ] || printf '%s\n' "$failure" >"$report_path"
+  printf '%s\n' "$failure"
+  printf 'verify-package: 1 finding(s); the install tree does not match the release it claims\n'
+  exit 1
+fi
+
 record_path="$package_root/$compatibility_name"
 record_json=""
 archive_platform="$expect_platform"
@@ -431,6 +441,7 @@ same_path() {
 
 line "install root: $package_root"
 line "tree state: $tree_state"
+line "install tree protection: $tree_check"
 
 # Protected install ownership: a group- or world-writable plugin root lets any local
 # user replace a checksummed companion after verification, which is exactly the

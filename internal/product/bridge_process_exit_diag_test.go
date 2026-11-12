@@ -151,7 +151,7 @@ func (g *gatedStderr) Close() error { return g.r.Close() }
 // names what is missing, the pinned version, and the one command that fixes it.
 const unprovisionedSDKDiagnostic = "lip-cursor-sdk-bridge: @cursor/sdk is not provisioned: " +
 	"\"[PATH]/node_modules/@cursor/sdk/package.json\" not found, and this archive ships no @cursor/sdk; " +
-	"required version 1.0.23. Provision it once with:\n  cd [PATH] && ../node/node ci --omit=dev\n"
+	"required version 1.3.1. Provision it once with:\n  cd [PATH] && ../node/node ci --omit=dev\n"
 
 func TestBridgeProcess_ExitedBridgeWriteReportsExitAndDiagnostic(t *testing.T) {
 	proc := newExitedBridgeProc(t, unprovisionedSDKDiagnostic)
@@ -169,7 +169,7 @@ func TestBridgeProcess_ExitedBridgeWriteReportsExitAndDiagnostic(t *testing.T) {
 	_, err := bp.EnsureReady(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not provisioned")
-	assert.Contains(t, err.Error(), "1.0.23")
+	assert.Contains(t, err.Error(), "1.3.1")
 	assert.Contains(t, err.Error(), "ci --omit=dev")
 	var fault *BridgeFault
 	require.ErrorAs(t, err, &fault)

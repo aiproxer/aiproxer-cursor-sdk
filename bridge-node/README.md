@@ -6,9 +6,20 @@ Operator documentation: [`docs/installation.md`](../docs/installation.md) in thi
 
 ## Pins
 
-- `@cursor/sdk` exact `1.0.23`
-- `undici` override `6.28.1`
-- Node `>=22.13` (CI lane pins `22.22.3`)
+- `@cursor/sdk` exact `1.3.1`
+- `zod` exact `4.6.6` (SDK peer)
+- `undici` override `6.29.1` (retained even though absent from the current dependency tree)
+- Node `>=22.13` for SDK compatibility; CI and release packaging pin `22.23.5`
+- npm `12.2.2` as a build dependency for separate staging into the archive
+
+The SDK's minimum Node version is not a security guarantee. If supplying a runtime rather than using
+a release archive, use a currently supported, patched Node release.
+
+The npm audit result covers the installed dependency graph, not code bundled inside the SDK or
+the separately packaged npm tree. In particular, the SDK bundles a custom-patched MCP SDK 1.25.1; its security
+status is not established by npm audit or the SDK upgrade. See the
+[MCP OAuth security guidance](../README.md#mcp-oauth-security). Existing host certification
+evidence predates this pin.
 
 ## Layout
 
@@ -36,6 +47,7 @@ side of the certification is recorded in [`docs/certification.md`](../docs/certi
 
 ```bash
 npm ci
+npm audit --audit-level=high
 npm run typecheck
 npm test
 npm run build

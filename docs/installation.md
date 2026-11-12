@@ -31,7 +31,7 @@ private/bridge/dist/                          built bridge JavaScript
 private/bridge/package.json                   bridge manifest; pins the SDK version
 private/bridge/package-lock.json              exact lockfile the operator provisions from
 private/node/node[.exe]                       private Node runtime
-private/node/{lib/,}node_modules/npm/         that runtime's own bundled npm
+private/node/{lib/,}node_modules/npm/         separately pinned npm
 ```
 
 There is **no** `private/bridge/node_modules/`. The Cursor SDK is proprietary, its
@@ -41,7 +41,7 @@ the manifest and the lockfile that pin the SDK, and neither the SDK nor any pack
 exists only to satisfy it. You provision that tree yourself; see below.
 
 To be precise about what third-party code this archive does ship, because most of it by
-file count is the private Node runtime's own bundled npm and the packages npm bundles
+file count is the separately pinned npm and the packages npm bundles
 inside it (`private/node/{lib/,}node_modules/npm/node_modules/`). Those ship on purpose —
 they are what lets the provisioning command run with no global Node and no global package
 manager. They are **not** covered by the Node.js MIT grant: npm ships its own license text
@@ -60,8 +60,7 @@ The host binary is unchanged by any of this. Cursor support is an optional plugi
 ## Is a system Node required
 
 **No. A system Node is not required, and neither is a global npm.** The archive ships its
-own Node runtime, and the provisioning command runs *that* runtime through *that*
-runtime's own bundled npm. You need:
+own Node runtime and a separately pinned npm, and the provisioning command runs both. You need:
 
 - a Go toolchain only if you want to run `scripts/verify-package` yourself; and
 - nothing else. No system Node, no global npm, no pnpm or yarn.
@@ -75,13 +74,13 @@ Two platforms are shipped, and they are the only two. Each one is assembled, ver
 and has its private runtime run natively on a runner of its own; there is no cross-compiled
 artifact and no unverified claim.
 
-| Platform | Archive | Bundled npm inside the runtime | Evidence |
+| Platform | Archive | Packaged npm entry point | Evidence |
 | --- | --- | --- | --- |
 | `windows/amd64` | `cursorsdk-<version>-windows-amd64.zip` | `../node/node_modules/npm/bin/npm-cli.js` | `windows-latest` leg of the `package` lane in [`.github/workflows/verify.yml`](../.github/workflows/verify.yml) |
 | `linux/amd64` | `cursorsdk-<version>-linux-amd64.tar.gz` | `../node/lib/node_modules/npm/bin/npm-cli.js` | `ubuntu-latest` leg of the same lane |
 
-The two commands differ only because each Node distribution keeps its bundled npm
-somewhere different; the forward-slash spelling of both works in PowerShell and `cmd` as
+The two commands use the conventional Node npm path for each platform; the
+forward-slash spelling of both works in PowerShell and `cmd` as
 well, since Windows accepts forward slashes in a path.
 
 `windows/arm64`, `linux/arm64`, and `darwin/*` are **not** declared platforms. No native
@@ -236,10 +235,11 @@ involved.
 
 Notes that matter:
 
-- **Use npm, not another package manager.** The bridge manifest pins `undici` to the
-  security-fixed `6.28.1` through npm `overrides`. `overrides` is npm semantics, and
-  other package managers resolve or ignore it differently, so a tree provisioned with
-  pnpm or yarn is unsupported and is reported as such.
+- **Use npm, not another package manager.** The bridge manifest retains an `undici`
+  `6.29.1` override using npm semantics. The current SDK dependency graph does not install
+  a separate `undici` package, and the override cannot update code bundled inside the SDK
+  or Node. Other package managers resolve or ignore overrides differently, so a tree
+  provisioned with pnpm or yarn is unsupported and is reported as such.
 - **This is the only download the plugin ever performs, and you perform it.** Nothing in
   the plugin or the host installs packages, shells out to npm, or fetches anything. The
   download happens under your own acceptance of
@@ -374,6 +374,12 @@ Nothing in the plugin performs that for you, and nothing in it fails if you do.
 
 ## Provenance and trust
 
+- **Protect the whole installed tree.** On Linux the verifiers reject group/world-writable
+  descendants, owners other than the install-root owner or root, and escaping or dangling
+  links, including in provisioned `node_modules`. This assumes the install-root owner
+  and its ancestors are trusted, does not establish content authenticity, and does not
+  check Windows ACLs. Use a restrictive umask when unpacking and provisioning; on
+  Windows independently verify ACLs. Keep untrusted principals from modifying the tree.
 - **The plugin authenticates what it ships.** `checksums.sha256` covers every shipped
   file, `compatibility.json` records the digests of the manifest and of the private
   runtime, and both are cross-checked against the staged files. The host's manifest

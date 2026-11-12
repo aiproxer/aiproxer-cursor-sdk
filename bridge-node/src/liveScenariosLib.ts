@@ -1,12 +1,12 @@
 /**
- * Opt-in live scenario runner for @cursor/sdk 1.0.23.
+ * Opt-in live scenario runner for @cursor/sdk 1.3.1.
  * Default tests inject mocks; the CLI loads the real package when opted in.
  */
 
 import type { LocalAgentStore } from "@cursor/sdk";
 import { createBridgeInMemoryLocalAgentStore } from "./inMemoryLocalAgentStore.js";
 
-export const PINNED_LIVE_SDK_VERSION = "1.0.23";
+export const PINNED_LIVE_SDK_VERSION = "1.3.1";
 
 export const DEFAULT_SCENARIOS_TOTAL_TIMEOUT_MS = 300_000;
 export const DEFAULT_SCENARIOS_PHASE_TIMEOUT_MS = 45_000;

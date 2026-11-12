@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const PINNED_SDK_VERSION = "1.0.23";
+const PINNED_SDK_VERSION = "1.3.1";
 const MIN_NODE_MAJOR = 22;
 const MIN_NODE_MINOR = 13;
 
