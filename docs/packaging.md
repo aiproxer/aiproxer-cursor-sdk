@@ -18,6 +18,8 @@ reasoned about, and never confuse the two.
 
 ## Decision
 
+Host certification posture for this release: `uncertified` (declared in `release.yaml`). The release workflow runs no real-host gate, so the v0.1.0 host measurement is not evidence for these bytes.
+
 **The release ships the `private-runtime` archive: a directory containing the outer plugin
 executable, a plugin-private bridge launcher, the built bridge, its manifest and lockfile,
 and a pinned private Node runtime together with separately pinned npm. The

@@ -684,7 +684,8 @@ if ($script:Record) {
     $certifiedPlatforms = @()
     $certifiedPlatformProperty = $record.PSObject.Properties['host_certification_platforms']
     if ($certifiedPlatformProperty) {
-        $certifiedPlatforms = @($certifiedPlatformProperty.Value)
+        # An uncertified record writes this key as JSON null, which is not one platform entry.
+        $certifiedPlatforms = @($certifiedPlatformProperty.Value | Where-Object { $null -ne $_ })
     }
     if ($certifiedPlatforms.Count -eq 0) {
         if ($certification -eq 'certified') {
