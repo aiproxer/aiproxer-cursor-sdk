@@ -360,7 +360,7 @@ jobs:
           # This release is published uncertified: the record has to say so, and must not carry
           # per-platform host evidence it would contradict.
           if ($record.host_certification_state -ne 'uncertified') { throw "the record is $($record.host_certification_state), not uncertified" }
-          if (@($record.host_certification_platforms).Count -ne 0) { throw "an uncertified record carries host_certification_platforms" }
+          if (@($record.host_certification_platforms | Where-Object { $null -ne $_ }).Count -ne 0) { throw "an uncertified record carries host_certification_platforms" }
 
           $archives = @(Get-ChildItem dist -Filter "cursorsdk-*.${{ matrix.archive_extension }}" -File)
           if ($archives.Count -ne 1) { throw "expected exactly one assembled archive in dist for $env:RELEASE_PLATFORM" }
