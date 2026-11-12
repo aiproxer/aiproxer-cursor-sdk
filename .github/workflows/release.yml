@@ -122,12 +122,8 @@ jobs:
             echo "::error::release metadata declares tag $want_tag for plugin version $version; the tag and the version have to agree"
             exit 1
           fi
-          if [ "$(jq -r .host_certification <<<"$declared")" != certified ]; then
-            echo "::error::the revision $COMMIT declares no certified host posture; publishing an uncertified plugin release is a separate decision"
-            exit 1
-          fi
-          if [ "$(jq '.platforms | length' <<<"$declared")" -ne "$(jq '.declared_platforms | length' <<<"$declared")" ]; then
-            echo "::error::the revision declares fewer certified host platforms than platforms it publishes"
+          if [ "$(jq -r .host_certification <<<"$declared")" != uncertified ]; then
+            echo "::error::the revision $COMMIT declares a host posture other than uncertified; a certified release needs the real-host gate in this workflow"
             exit 1
           fi
 
@@ -307,78 +303,6 @@ jobs:
       - name: Download modules
         run: go mod download
 
-      - name: Read this platform's certified host artifact out of the declared release
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # The declaration is read through the same tool that renders it into an archive, so
-          # the workflow cannot act on a host artifact the release metadata would refuse to
-          # ship.
-          $release = go run ./cmd/lip-cursor-sdk-packaging release | ConvertFrom-Json
-          $entry = @($release.platforms) | Where-Object { $_.platform -eq $env:RELEASE_PLATFORM }
-          if (-not $entry) { throw "the release declares no certified host artifact for $env:RELEASE_PLATFORM" }
-          # Every exported name is HOST_<FIELD>, with the redundant leading HOST_ of the host_*
-          # field names folded away, because every later step reads these back as $env:HOST_*.
-          # Naming them by uppercasing the field name alone exported COMPANION_CONTRACT and
-          # BRIDGE_EXECUTABLE_REL for the two fields that carry no host_ prefix, while the gate
-          # read HOST_COMPANION_CONTRACT and HOST_BRIDGE_EXECUTABLE_REL - so those two arrived
-          # empty and the leg refused its own archive on both platforms.
-          foreach ($name in @('host_release_url', 'host_checksums_url', 'host_release_asset', 'host_checksums_asset',
-              'host_binary', 'host_artifact_sha256', 'companion_contract', 'bridge_executable_rel')) {
-            if (-not $entry.$name) { throw "the declared host artifact for $env:RELEASE_PLATFORM has no $name" }
-            $variable = 'HOST_' + ($name.ToUpper() -replace '^HOST_', '')
-            "$variable=$($entry.$name)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
-          "declared: tag $($release.tag), plugin $($release.plugin_version), host certification $($release.host_certification)"
-
-      - name: Download the recorded host artifact and check it against the host's own digests
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $scratch = Join-Path $env:SCRATCH 'host'
-          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
-          $asset = Join-Path $scratch $env:HOST_RELEASE_ASSET
-          Invoke-WebRequest -Uri $env:HOST_RELEASE_URL -OutFile $asset
-          Invoke-WebRequest -Uri $env:HOST_CHECKSUMS_URL -OutFile (Join-Path $scratch $env:HOST_CHECKSUMS_ASSET)
-          # Two checks, in this order. The host's published checksum file says these are the
-          # bytes it released; the digest this repository recorded says which of them the
-          # certification ran against. Either one alone would accept a re-uploaded asset, or
-          # the wrong build of the right release.
-          $downloaded = (Get-FileHash -Algorithm SHA256 -Path $asset).Hash.ToLower()
-          $published = @(Select-String -Path (Join-Path $scratch $env:HOST_CHECKSUMS_ASSET) `
-              -Pattern ('^([0-9a-f]{64})\s+' + [regex]::Escape($env:HOST_RELEASE_ASSET) + '\s*$'))
-          if ($published.Count -ne 1) { throw "$($env:HOST_CHECKSUMS_ASSET) does not list $($env:HOST_RELEASE_ASSET) exactly once" }
-          $released = $published[0].Matches[0].Groups[1].Value
-          if ($released -ne $downloaded) {
-            throw "the downloaded host asset hashes to $downloaded, not to the $released the host published"
-          }
-          # Unpack by what the asset actually is. Expand-Archive is PowerShell's own and reads
-          # a zip on either platform; tar is the system's and reads the POSIX archive on either
-          # platform. Neither is asked to read a format it does not read, which is the whole
-          # reason the branch exists rather than one call for both.
-          if ($env:HOST_RELEASE_ASSET.EndsWith('.zip')) {
-            Expand-Archive -LiteralPath $asset -DestinationPath $scratch -Force
-          } else {
-            tar -xzf $asset -C $scratch
-            if ($LASTEXITCODE -ne 0) { throw "tar could not unpack $($env:HOST_RELEASE_ASSET)" }
-          }
-          $binary = Join-Path $scratch $env:HOST_BINARY
-          if (-not (Test-Path -LiteralPath $binary)) { throw "the host asset carries no $($env:HOST_BINARY)" }
-          # The certification gate hands this path to os/exec and runs the host with its
-          # working directory set to a temporary directory, and os/exec resolves a relative
-          # Path against that directory - so a repo-relative path here is looked up inside a
-          # temporary tree that has no such file, and every host launch fails at fork/exec
-          # while the digest re-check, which reads relative to this step's own directory,
-          # still passes. Export the physical path so both agree.
-          $binary = (Resolve-Path -LiteralPath $binary).ProviderPath
-          # The recorded digest is the certification's evidence, so it is checked against the
-          # bytes rather than trusted: a host release that was rebuilt and re-tagged would
-          # otherwise certify this release against a binary nobody measured.
-          $digest = (Get-FileHash -Algorithm SHA256 -Path $binary).Hash.ToLower()
-          if ($digest -ne $env:HOST_ARTIFACT_SHA256) {
-            throw "the host binary hashes to $digest but this release certifies $($env:HOST_ARTIFACT_SHA256); the recorded certification no longer describes this host"
-          }
-          "HOST_BINARY_PATH=$binary" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "certified host $($env:RELEASE_PLATFORM): $($env:HOST_BINARY) $digest from $($env:HOST_RELEASE_ASSET)"
-
       - name: Download the private runtime and check it against the Node release digests
         env:
           NODE_DIST_NAME: ${{ matrix.node_dist }}
@@ -433,19 +357,10 @@ jobs:
             throw "the record's source identity came from: $($record.source_stamp_evidence); this release builds in a primary checkout of the tagged commit, so the toolchain's own stamp is what binds it"
           }
 
-          # The certification gate. The archive has to say it is certified, name the host
-          # artifact this platform was measured against, and repeat that platform's contract -
-          # so a record whose per-platform evidence disagreed with the declaration, or whose
-          # contract had quietly become one general rule, cannot be published.
-          if ($record.host_certification_state -ne 'certified') { throw "the record is $($record.host_certification_state), not certified" }
-          if (@($record.tested_host_artifacts) -notcontains $env:HOST_ARTIFACT_SHA256) {
-            throw "the record does not name the $($env:HOST_ARTIFACT_SHA256) this platform was certified against"
-          }
-          $entry = @($record.host_certification_platforms) | Where-Object { $_.platform -eq $env:RELEASE_PLATFORM }
-          if (-not $entry) { throw "the record certifies no platform for this archive" }
-          if ($entry.host_artifact_sha256 -ne $env:HOST_ARTIFACT_SHA256) { throw "the record's per-platform host digest disagrees with the declaration" }
-          if ($entry.companion_contract -ne $env:HOST_COMPANION_CONTRACT) { throw "the record's companion contract for $env:RELEASE_PLATFORM disagrees with the declared one" }
-          if ($entry.bridge_executable_rel -ne $env:HOST_BRIDGE_EXECUTABLE_REL) { throw "the record's bridge_executable path for $env:RELEASE_PLATFORM disagrees with the archive layout" }
+          # This release is published uncertified: the record has to say so, and must not carry
+          # per-platform host evidence it would contradict.
+          if ($record.host_certification_state -ne 'uncertified') { throw "the record is $($record.host_certification_state), not uncertified" }
+          if (@($record.host_certification_platforms).Count -ne 0) { throw "an uncertified record carries host_certification_platforms" }
 
           $archives = @(Get-ChildItem dist -Filter "cursorsdk-*.${{ matrix.archive_extension }}" -File)
           if ($archives.Count -ne 1) { throw "expected exactly one assembled archive in dist for $env:RELEASE_PLATFORM" }
@@ -454,7 +369,7 @@ jobs:
           "STAGED_ROOT=$staged" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PLUGIN_ARCHIVE=$($archives[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PLUGIN_ARCHIVE_SHA256=$archiveDigest" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "staged tree: $($record.source_revision), clean, $($entry.companion_contract), certified against $($entry.host_artifact_sha256)"
+          "staged tree: $($record.source_revision), clean, uncertified"
 
       - name: Unpack the archive into a fresh tree
         run: |
@@ -533,149 +448,6 @@ jobs:
             Tee-Object -FilePath "verify-installed-$env:RELEASE_SLUG.txt"
           if ($LASTEXITCODE -ne 0) { throw "the provisioned install tree failed verification on $env:RELEASE_PLATFORM" }
 
-      - name: The released host refuses to serve as an administrative user
-        if: matrix.platform == 'linux/amd64'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # Say so here, where it is obvious, instead of inside a gate failure: a
-          # certification run that reached this as root would fail on the host's own policy
-          # rather than on anything about the plugin.
-          if ((id -u) -eq 0) {
-            throw "the released host refuses to compose its request plane as an administrative user, so this leg has to run as an unprivileged user"
-          }
-
-      - name: Certify this archive against the released host on this platform
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # The gate is given the archive about to be published and its recorded digest, the
-          # host binary and the digest this release certifies, and the provisioned install
-          # tree unpacked from that same archive. Set here rather than in the step's env so the
-          # values the earlier steps resolved are the ones the gate reads.
-          #
-          # No Cursor credential is set here and none is forwarded: the gate's own cases use a
-          # fixed non-secret value and stop at the SDK's credential check, so this leg spends no
-          # provider quota.
-          $env:LIP_HOST_CERT_GATE = '1'
-          $env:LIP_HOST_CERT_HOST_BINARY = $env:HOST_BINARY_PATH
-          $env:LIP_HOST_CERT_HOST_SHA256 = $env:HOST_ARTIFACT_SHA256
-          $env:LIP_HOST_CERT_PLUGIN_ROOT = $env:INSTALL_ROOT
-          $env:LIP_HOST_CERT_PLUGIN_ARCHIVE = $env:PLUGIN_ARCHIVE
-          $env:LIP_HOST_CERT_PLUGIN_ARCHIVE_SHA256 = $env:PLUGIN_ARCHIVE_SHA256
-          if ($env:RELEASE_PLATFORM -eq 'windows/amd64') {
-            # Windows runners are admin with UAC disabled; the released host
-            # refuses an administrative request plane (token.IsMember). Run the
-            # gate under a LUA restricted token so Go children inherit it. Same
-            # pattern as host tools/taskrunner (CreateRestrictedToken LUA_TOKEN
-            # plus TokenDefaultDacl user+RC+SY), embedded here because the tagged
-            # checkout carries no new files. Diagnostics print parent user and
-            # file SDDLs; no filesystem grants. No host change or weakened
-            # check; 60m/90m budgets and the bridge_executable contract stay.
-            $launcherLines = @(
-              'using System;',
-              'using System.Runtime.InteropServices;',
-              'using System.Security.Principal;',
-              'public static class RestrictedHostCertLauncher {',
-              '  const uint TOKEN_DUPLICATE = 0x0002;',
-              '  const uint TOKEN_ASSIGN_PRIMARY = 0x0001;',
-              '  const uint TOKEN_QUERY = 0x0008;',
-              '  const uint TOKEN_ADJUST_DEFAULT = 0x0080;',
-              '  const uint LUA_TOKEN = 0x4;',
-              '  const uint INFINITE = 0xFFFFFFFF;',
-              '  const uint WAIT_OBJECT_0 = 0;',
-              '  const int STARTF_USESTDHANDLES = 0x100;',
-              '  [StructLayout(LayoutKind.Sequential)]',
-              '  struct STARTUPINFO { public int cb; public string lpReserved; public string lpDesktop; public string lpTitle; public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError; }',
-              '  [StructLayout(LayoutKind.Sequential)]',
-              '  struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }',
-              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr h, uint acc, out IntPtr tok);',
-              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr h, uint flags, uint nDisable, IntPtr dDisable, uint nDelete, IntPtr dDelete, uint nPriv, IntPtr dPriv, out IntPtr newTok);',
-              '  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUser(IntPtr token, string app, string cmd, IntPtr secAttr, IntPtr thrAttr, bool inherit, uint flags, IntPtr env, string curDir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);',
-              '  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();',
-              '  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);',
-              '  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);',
-              '  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);',
-              '  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int n);',
-              '  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string sddl, uint revision, out IntPtr sd, out uint sdSize);',
-              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool daclPresent, out IntPtr dacl, out bool daclDefaulted);',
-              '  [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint len);',
-              '  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr LocalFree(IntPtr mem);',
-              '  const int TOKEN_DEFAULT_DACL_CLASS = 6;',
-              '  const uint SDDL_REVISION_1 = 1;',
-              '  static IntPtr SetRestrictedDefaultDacl(IntPtr restricted) {',
-              '    string userSddl = WindowsIdentity.GetCurrent().User.ToString();',
-              '    Console.WriteLine("parent-User=" + userSddl);',
-              '    string sddl = "D:(A;;GA;;;" + userSddl + ")(A;;GA;;;RC)(A;;GA;;;SY)";',
-              '    IntPtr sd = IntPtr.Zero; uint sdLen = 0;',
-              '    if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, SDDL_REVISION_1, out sd, out sdLen) || sd == IntPtr.Zero) throw new Exception("convert default dacl sddl " + Marshal.GetLastWin32Error());',
-              '    bool present; IntPtr dacl; bool defaulted;',
-              '    if (!GetSecurityDescriptorDacl(sd, out present, out dacl, out defaulted) || !present || dacl == IntPtr.Zero) { LocalFree(sd); throw new Exception("extract default dacl"); }',
-              '    IntPtr info = Marshal.AllocHGlobal(IntPtr.Size);',
-              '    try {',
-              '      Marshal.WriteIntPtr(info, dacl);',
-              '      if (!SetTokenInformation(restricted, TOKEN_DEFAULT_DACL_CLASS, info, (uint)IntPtr.Size)) { LocalFree(sd); throw new Exception("set token default dacl " + Marshal.GetLastWin32Error()); }',
-              '    } finally { Marshal.FreeHGlobal(info); }',
-              '    return sd;',
-              '  }',
-              '  public static int Launch(string commandLine, string curDir) {',
-              '    var curPr = new WindowsPrincipal(WindowsIdentity.GetCurrent());',
-              '    Console.WriteLine("current-IsInRole-Admin=" + curPr.IsInRole(WindowsBuiltInRole.Administrator));',
-              '    IntPtr cur2; if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE|TOKEN_ASSIGN_PRIMARY|TOKEN_QUERY|TOKEN_ADJUST_DEFAULT, out cur2)) throw new Exception("open process token " + Marshal.GetLastWin32Error());',
-              '    IntPtr restricted = IntPtr.Zero;',
-              '    IntPtr tokenDaclSource = IntPtr.Zero;',
-              '    try {',
-              '      if (!CreateRestrictedToken(cur2, LUA_TOKEN, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted)) throw new Exception("create restricted token " + Marshal.GetLastWin32Error());',
-              '      tokenDaclSource = SetRestrictedDefaultDacl(restricted);',
-              '      using (var ri = new WindowsIdentity(restricted)) {',
-              '        bool isAdmin = new WindowsPrincipal(ri).IsInRole(WindowsBuiltInRole.Administrator);',
-              '        Console.WriteLine("restricted-IsInRole-Admin=" + isAdmin);',
-              '        if (isAdmin) throw new Exception("restricted token is still an administrative member; refusing to run the gate");',
-              '      }',
-              '      var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES;',
-              '      si.hStdInput = GetStdHandle(-10); si.hStdOutput = GetStdHandle(-11); si.hStdError = GetStdHandle(-12);',
-              '      PROCESS_INFORMATION pi;',
-              '      if (!CreateProcessAsUser(restricted, null, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, curDir, ref si, out pi)) throw new Exception("create process as user " + Marshal.GetLastWin32Error());',
-              '      try {',
-              '        uint w = WaitForSingleObject(pi.hProcess, INFINITE);',
-              '        if (w != WAIT_OBJECT_0) throw new Exception("wait for gate " + w);',
-              '        uint code; if (!GetExitCodeProcess(pi.hProcess, out code)) throw new Exception("gate exit code " + Marshal.GetLastWin32Error());',
-              '        Console.WriteLine("gate-exit=" + code);',
-              '        return (int)code;',
-              '      } finally { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }',
-              '    } finally { if (tokenDaclSource != IntPtr.Zero) LocalFree(tokenDaclSource); if (restricted != IntPtr.Zero) CloseHandle(restricted); CloseHandle(cur2); }',
-              '  }',
-              '}'
-            )
-            Add-Type -TypeDefinition ($launcherLines -join "`n") -Language CSharp
-            Write-Host ('parent-User=' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
-            Write-Host ('host-SDDL=' + (Get-Acl -LiteralPath $env:HOST_BINARY_PATH).Sddl)
-            Write-Host ('go-SDDL=' + (Get-Acl -LiteralPath ((Get-Command go).Source)).Sddl)
-            Write-Host ('repo-SDDL=' + (Get-Acl -LiteralPath (Get-Location).Path).Sddl)
-            # Probe the actual launcher before the 60m gate: the child must print
-            # restricted:false, the marker, and host --help, then exit 3. Remote
-            # logs carry parent admin plus restricted:false for inspection.
-            # Encoded to avoid nested -Command quoting; fail-closed on admin or
-            # a nonzero host help.
-            $env:RESTRICTED_PROBE_MARKER = 'restricted-probe-ok'
-            $probeScript = '$ErrorActionPreference = ''Stop''; $isAdmin = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); Write-Output (''restricted:'' + $isAdmin.ToString().ToLower()); if ($isAdmin) { exit 11 }; Write-Output $env:RESTRICTED_PROBE_MARKER; try { & ($env:HOST_BINARY_PATH) --help } catch { Write-Output (''host-start-error:'' + $_.FullyQualifiedErrorId); exit 14 }; if ($LASTEXITCODE -ne 0) { exit 12 }; exit 3'
-            $probeB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
-            $probeCmd = 'pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $probeB64
-            $probeExit = [RestrictedHostCertLauncher]::Launch($probeCmd, (Get-Location).Path)
-            if ($probeExit -ne 3) { throw "restricted child probe failed on $env:RELEASE_PLATFORM (exit $probeExit)" }
-            # Full gate under the same token: env/handles inherited, wait/reap
-            # with exact exit, all handles closed. No extra job object; the
-            # runner contains the step and the host owns its tree.
-            $gateScript = '$ErrorActionPreference = ''Stop''; try { go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 | Tee-Object -FilePath (''host-cert-'' + $env:RELEASE_SLUG + ''.txt'') } catch { Write-Output (''gate-start-error:'' + $_.FullyQualifiedErrorId); exit 14 }; $code = $LASTEXITCODE; if (-not (Test-Path -LiteralPath (''host-cert-'' + $env:RELEASE_SLUG + ''.txt''))) { exit 13 }; exit $code'
-            $gateB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($gateScript))
-            $cmdLine = 'pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $gateB64
-            Write-Host "launching host-cert gate under restricted token"
-            $restrictedExit = [RestrictedHostCertLauncher]::Launch($cmdLine, (Get-Location).Path)
-            if ($restrictedExit -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM (restricted exit $restrictedExit)" }
-          } else {
-            go test -count=1 -timeout 60m -run TestHostReleaseCertification -v . 2>&1 |
-              Tee-Object -FilePath "host-cert-$env:RELEASE_SLUG.txt"
-            if ($LASTEXITCODE -ne 0) { throw "the real-host certification gate failed on $env:RELEASE_PLATFORM" }
-          }
-
       - name: Collect what this leg publishes
         run: |
           $ErrorActionPreference = 'Stop'
@@ -687,7 +459,6 @@ jobs:
           Copy-Item "verify-unpacked-$env:RELEASE_SLUG.txt" $scratch
           Copy-Item "verify-installed-$env:RELEASE_SLUG.txt" $scratch
           Copy-Item "npm-security-$env:RELEASE_SLUG.txt" $scratch
-          Copy-Item "host-cert-$env:RELEASE_SLUG.txt" $scratch
           Get-ChildItem $scratch | Select-Object Name, Length
 
       - name: Upload the assembled archive and its evidence
@@ -770,7 +541,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $release = go run ./cmd/lip-cursor-sdk-packaging release | ConvertFrom-Json
-          $platforms = @($release.platforms)
           $notes = @(
             "Cursor SDK backend plugin $($release.plugin_version) ($($release.plugin_id)).",
             '',
@@ -779,20 +549,11 @@ jobs:
             'A system Node is not required, and the Cursor SDK is not redistributed: this archive ships the pinned',
             '`package.json` and `package-lock.json`, and you provision the SDK yourself.',
             '',
-            'Companion configuration, as certified per platform:',
-            ''
-          )
-          foreach ($platform in $platforms) {
-            $notes += "- ``$($platform.platform)``: $($platform.companion_contract), pointing ``bridge_executable`` at ``$($platform.bridge_executable_rel)`` inside the install root"
-          }
-          $notes += @(
+            'Host compatibility: this release is NOT certified against the Go-LIP host. The release workflow does not',
+            'run the real-host gate; the maintainer measured Linux only, on a development build, against go-llm-interactive-proxy v0.1.0.',
             '',
-            "Certified against $($platforms[0].host_project) $($platforms[0].host_version): each archive records the host",
-            'binary digest it was certified against, per platform, in `host_certification_platforms`.',
-            '',
-            'Every archive is assembled natively, audited as shipped and as unpacked with `scripts/verify-package`,',
-            'and certified against the released host on its own platform before publication. Build provenance is',
-            'attested for every asset on this release.'
+            'Every archive is assembled natively and audited as shipped and as unpacked with `scripts/verify-package`.',
+            'Build provenance is attested for every asset on this release.'
           )
           Set-Content -Path artifacts/release-notes.md -Value $notes -Encoding utf8
           Get-Content artifacts/release-notes.md

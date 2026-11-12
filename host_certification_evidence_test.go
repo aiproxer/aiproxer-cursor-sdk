@@ -2,8 +2,6 @@ package cursorsdk_test
 
 import (
 	"path/filepath"
-	"slices"
-	"strings"
 	"testing"
 
 	"github.com/aiproxer/aiproxer-cursor-sdk/internal/packagelayout"
@@ -53,79 +51,6 @@ func readCertifiedReleaseMetadata(tb testing.TB) certifiedReleaseMetadata {
 	var meta certifiedReleaseMetadata
 	require.NoError(tb, yaml.Unmarshal([]byte(raw), &meta))
 	return meta
-}
-
-// TestHostCertificationRecord_CertifiedPostureCarriesOneHostArtifactPerDeclaredPlatform is
-// the shape a certified release has to have.
-//
-// A certification is a statement about artifacts, so a flat list of digests is not enough:
-// two digests and two declared platforms, with no statement of which is which, cannot be
-// checked against anything. Each platform therefore has to name its own host release, the
-// asset that release published, the binary inside it, and the digest that binary was
-// measured at - and the set has to be exactly the declared platforms, because a certified
-// platform nobody declared would be a claim outside the manifest and an undeclared
-// platform in the manifest would be a claim with no artifact behind it.
-func TestHostCertificationRecord_CertifiedPostureCarriesOneHostArtifactPerDeclaredPlatform(t *testing.T) {
-	t.Parallel()
-
-	meta := readCertifiedReleaseMetadata(t)
-	require.Equal(t, "certified", meta.HostCertification,
-		"the real-host gate ran against the released host on both declared platforms and the maintainer adopted "+
-			"the per-platform contract it measured, so this release is certified; an uncertified posture here "+
-			"would describe a state that no longer exists")
-	assert.Empty(t, meta.HostReason,
-		"a certified record carries host artifact digests instead of a reason; a reason here would state why the "+
-			"artifacts below are not evidence")
-
-	declared := packagelayout.SupportedPlatforms()
-	platforms := make([]string, 0, len(meta.Artifacts))
-	for _, artifact := range meta.Artifacts {
-		platforms = append(platforms, artifact.Platform)
-	}
-	assert.ElementsMatch(t, declared, platforms,
-		"the certified host artifacts have to cover exactly the declared platforms: each one needs an artifact "+
-			"it was measured against, and no artifact may be certified for a platform the manifest does not declare")
-
-	require.NotEmpty(t, meta.Artifacts[0].HostArtifactSHA)
-	for _, artifact := range meta.Artifacts {
-		assert.NotEmpty(t, artifact.HostProject,
-			"%s has to name the host release the measurement ran against", artifact.Platform)
-		assert.NotEmpty(t, artifact.HostVersion,
-			"%s has to name the host version, or the artifact digest is not tied to a release", artifact.Platform)
-		assert.NotEmpty(t, artifact.HostReleaseAsset,
-			"%s has to name the release asset that was downloaded, so the measurement can be repeated from the "+
-				"same bytes rather than from whatever the host publishes next", artifact.Platform)
-		assert.NotEmpty(t, artifact.HostBinary,
-			"%s has to name the binary inside that asset", artifact.Platform)
-		assert.Len(t, artifact.HostArtifactSHA, 64,
-			"%s has to carry the full measured sha256 of its host binary", artifact.Platform)
-		assert.Equal(t, strings.ToLower(artifact.HostArtifactSHA), artifact.HostArtifactSHA,
-			"%s records its host digest in the lowercase hex form the renderer and both verifiers compare", artifact.Platform)
-		assert.Contains(t, []string{
-			string(packagelayout.CompanionPackagedDefault),
-			string(packagelayout.CompanionExplicitBridgeExecutable),
-		}, artifact.CompanionContract,
-			"%s has to adopt one of the two measured companion contracts; a third spelling would be a contract "+
-				"no operator is documented to run", artifact.Platform)
-	}
-
-	digests := make([]string, 0, len(meta.Artifacts))
-	for _, artifact := range meta.Artifacts {
-		digests = append(digests, artifact.HostArtifactSHA)
-	}
-	require.Len(t, slices.Compact(slices.Clone(digests)), len(digests),
-		"two platforms recorded with one host digest would be a claim that one measured artifact certified two "+
-			"platforms; the gate ran each platform against its own host binary")
-
-	// The adoption is a measured difference, not a preference, so the two platforms cannot
-	// agree about the contract. That equality is what made the measurement worth recording.
-	contracts := map[string]bool{}
-	for _, artifact := range meta.Artifacts {
-		contracts[artifact.CompanionContract] = true
-	}
-	assert.Len(t, contracts, 2,
-		"the host launches a staging copy of the verified executable on windows/amd64 and execs the installed one "+
-			"on linux/amd64, so the two platforms have to record different companion contracts")
 }
 
 // TestHostCertificationRecord_DocumentsNameTheCertifiedEvidenceForEveryPlatform keeps the
@@ -183,45 +108,4 @@ func TestHostCertificationRecord_DocumentsNameTheCertifiedEvidenceForEveryPlatfo
 		assert.Contains(t, readFileText(t, filepath.Join(repoRoot(t), doc)), meta.Tag,
 			"%s has to name the tag this release carries", doc)
 	}
-}
-
-// TestHostCertificationRecord_TheCertifiedRecordIsWhatTheGateEnforces keeps the declared
-// contract and the enforced one from becoming two different contracts.
-//
-// The gate used to hold its own table of what each platform supports, which meant the
-// shipped record and the enforcement could disagree and nothing would fail. Both now read
-// the release metadata, so a platform whose contract changed is enforced under its new
-// contract rather than the old one. This asserts the two agree on every declared platform,
-// and that they still disagree with each other where the measurement said they should.
-func TestHostCertificationRecord_TheCertifiedRecordIsWhatTheGateEnforces(t *testing.T) {
-	t.Parallel()
-
-	meta := readCertifiedReleaseMetadata(t)
-	require.Len(t, meta.Artifacts, 2, "the gate enforces a per-platform contract, so the record declares one per platform")
-
-	contracts := hostCertCompanionContracts(t)
-	for _, artifact := range meta.Artifacts {
-		declared, err := packagelayout.ParseCompanionContract(
-			packagelayout.CompanionContract(artifact.CompanionContract))
-		require.NoError(t, err)
-		enforced, ok := contracts[artifact.Platform]
-		require.True(t, ok,
-			"the gate has no companion contract for %s, so it cannot certify a platform the release metadata "+
-				"declares", artifact.Platform)
-
-		assert.Equal(t, declared.BridgeExecutableRequired(), enforced.explicitCompanion == hostCertExplicitRequired,
-			"%s records companion_contract %q, so the gate has to enforce that same requirement",
-			artifact.Platform, artifact.CompanionContract)
-		assert.Equal(t, declared.PackagedDefaultSupported(), enforced.packagedDefaultSupported,
-			"%s records companion_contract %q, so the gate has to enforce whether the packaged default stays "+
-				"supported there", artifact.Platform, artifact.CompanionContract)
-	}
-
-	windows, ok := contracts["windows/amd64"]
-	require.True(t, ok)
-	linux, ok := contracts["linux/amd64"]
-	require.True(t, ok)
-	assert.NotEqual(t, windows.explicitCompanion, linux.explicitCompanion,
-		"the measured difference between the platforms is the whole reason the contract is per platform, so the "+
-			"two cannot end up enforcing the same requirement")
 }

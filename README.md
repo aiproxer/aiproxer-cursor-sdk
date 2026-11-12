@@ -3,6 +3,9 @@
 Standalone [Go-LIP](https://github.com/matdev83/go-llm-interactive-proxy) backend plugin that integrates the
 Cursor SDK.
 
+> **Host certification: `uncertified`** (see `release.yaml`). Releases do not run the real-host gate in CI; the
+> v0.1.1 maintenance line was measured by the maintainer on Linux only, against Go-LIP v0.1.0, and not on Windows.
+
 This repository is the Cursor-specific product project. It owns the Cursor connector, the Cursor SDK
 bridge, Cursor instrumentation, fixtures, tests, operator documentation, and release tooling, so that
 Cursor's JavaScript toolchain and dependencies evolve and release independently of the Go-LIP host.

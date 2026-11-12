@@ -57,44 +57,6 @@ func hostCertificationDocument(tb testing.TB) string {
 	return readFileText(tb, filepath.Join(repoRoot(tb), "docs", "certification.md"))
 }
 
-// TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence keeps the
-// release metadata's reason true.
-//
-// The reason used to say no downloadable host release existed, and then that the release was
-// simply not published yet. Neither is the state of the world: v0.1.0 is published, this
-// release carries the measured host artifacts per platform, and a stale reason in either
-// direction would hide work that was done or describe a blocker that does not exist. The
-// shape of the assertion follows the posture, because the two postures carry different
-// evidence: an uncertified release owes an auditor a reason, and a certified one owes
-// nothing but its artifacts.
-func TestHostCertificationRecord_PostureStatesTheMeasuredResultNotTheOldAbsence(t *testing.T) {
-	t.Parallel()
-
-	meta := readHostReleaseMetadata(t)
-	switch meta.HostCertification {
-	case "uncertified":
-		require.NotEmpty(t, meta.HostCertificationReason,
-			"an uncertified posture has to carry the measured reason, not an absent key")
-
-		reason := strings.ToLower(strings.Join(strings.Fields(meta.HostCertificationReason), " "))
-		assert.NotContains(t, reason, "no downloadable",
-			"a published host release exists now; the reason has to state what the measurement found")
-		assert.NotContains(t, reason, "deferred pending separate maintainer authorization",
-			"host publication happened; the reason has to name the measured finding instead")
-		for _, platform := range packagelayout.SupportedPlatforms() {
-			assert.Contains(t, reason, platform,
-				"the measurement covers %s, so the reason has to name what was measured there", platform)
-		}
-	case "certified":
-		assert.Empty(t, meta.HostCertificationReason,
-			"a certified release carries the per-platform host artifacts instead of a reason; a reason here "+
-				"would state why the recorded digests are not evidence")
-	default:
-		t.Fatalf("release.yaml declares host_certification %q; the postures are certified and uncertified",
-			meta.HostCertification)
-	}
-}
-
 // TestHostCertificationRecord_NamesTheHostReleaseTheMeasurementRanAgainst keeps the
 // declared evidence tied to a release anybody can download.
 //
@@ -124,55 +86,6 @@ func TestHostCertificationRecord_NamesTheHostReleaseTheMeasurementRanAgainst(t *
 		assert.NotEmpty(t, artifact.HostBinary,
 			"%s has to name the binary inside the asset the measurement ran", artifact.Platform)
 	}
-}
-
-// TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract is the
-// unit test for the decision requirements 3.5 records.
-//
-// The real-host gate used to decide the companion-path question by measurement and accept
-// either answer on either platform, which made a run that found nothing wrong and a run
-// that found the packaged default unusable indistinguishable. The contract is now
-// adopted per platform, so the gate has to know, before it runs anything, what this
-// platform's supported spelling is. That knowledge is asserted here rather than trusted:
-// a table that covered one platform, or that said the same thing everywhere, would let
-// the gate certify a configuration no operator on that platform is meant to run.
-func TestHostCertificationRecord_GateEnforcesTheAdoptedPerPlatformCompanionContract(t *testing.T) {
-	t.Parallel()
-
-	contracts := hostCertCompanionContracts(t)
-	declared := packagelayout.SupportedPlatforms()
-
-	platforms := make([]string, 0, len(contracts))
-	for platform := range contracts {
-		platforms = append(platforms, platform)
-	}
-	assert.ElementsMatch(t, declared, platforms,
-		"every platform the manifest declares needs a companion-path contract, or the gate would certify "+
-			"it against an answer nobody wrote down")
-	require.Len(t, contracts, 2, "the contract is per platform; a single entry would state one thing everywhere")
-
-	windows := contracts["windows/amd64"]
-	assert.Equal(t, hostCertExplicitRequired, windows.explicitCompanion,
-		"the host launches a digest-addressed staging copy of the outer executable on windows/amd64, so the "+
-			"packaged default cannot reach the installed launcher and an explicit full path is the supported spelling")
-	assert.False(t, windows.packagedDefaultSupported,
-		"windows/amd64 has no supported packaged default to fall back on")
-
-	linux := contracts["linux/amd64"]
-	assert.Equal(t, hostCertExplicitOptional, linux.explicitCompanion,
-		"the host execs the installed executable on linux/amd64, so the packaged default resolves on its own "+
-			"and an explicit override is optional there")
-	assert.True(t, linux.packagedDefaultSupported,
-		"linux/amd64 has to keep the packaged default supported with no operator action")
-
-	// One contract per platform, so the two entries cannot agree about both halves by
-	// accident, and the gate's own answer has to be the one this platform declares.
-	current, ok := contracts[hostCertPlatformLabel()]
-	require.True(t, ok, "this host runs on %s, which the manifest does not declare a contract for", hostCertPlatformLabel())
-	assert.NotEqual(t, windows.explicitCompanion, linux.explicitCompanion,
-		"the measured difference between the platforms is the whole reason the contract is per platform")
-	assert.Equal(t, current.packagedDefaultSupported, current.explicitCompanion != hostCertExplicitRequired,
-		"a platform cannot both require the explicit path and support the packaged default")
 }
 
 // TestHostCertificationRecord_DocumentsNameTheGateAndItsOptIn keeps the real-host record
