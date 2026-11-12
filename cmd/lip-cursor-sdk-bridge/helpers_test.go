@@ -54,7 +54,7 @@ func installRunnablePrivateLayout(tb testing.TB, script string) installedPrivate
 
 // pinnedTestSDKVersion is the SDK pin the launcher fixtures ship, matching the bridge
 // manifest the plugin stages.
-const pinnedTestSDKVersion = "1.0.23"
+const pinnedTestSDKVersion = "1.3.1"
 
 func strconvQuote(value string) string {
 	return strconv.Quote(value)

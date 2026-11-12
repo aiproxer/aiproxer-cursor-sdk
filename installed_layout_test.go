@@ -431,7 +431,7 @@ func exeSuffix() string {
 
 // pinnedSDKVersion is the SDK version the bridge manifest in this test's installed
 // layout pins, and the version an operator has to provision for it.
-const pinnedSDKVersion = "1.0.23"
+const pinnedSDKVersion = "1.3.1"
 
 // newInstalledLauncherLayout installs the packaged private runtime layout around
 // the real launcher executable: the launcher at private/bridge, the private Node

@@ -50,7 +50,7 @@ updates:
       # The `undici` override is a release decision, not an update stream.
       - dependency-name: "undici"
       # `@types/node` must describe the oldest runtime the bridge supports
-      # (engines `>=22.13`, CI Node 22.22.3); a newer major would type APIs
+      # (engines `>=22.13`, CI Node 22.23.5); a newer major would type APIs
       # that runtime does not have.
       - dependency-name: "@types/node"
         update-types:
@@ -58,9 +58,9 @@ updates:
     groups:
       # The certified baseline is deliberately not automated: `@cursor/sdk` is
       # an exact pin and the `undici` security override is a release decision,
-      # so neither moves through an unattended update. Only the bridge's own
-      # development tooling is grouped here. The `ignore` block above is the
-      # enforcement of that sentence, not a duplicate of it.
+      # so neither moves through an unattended update. These groups can update
+      # development tooling and the SDK's separately pinned `zod` peer; CI still
+      # checks the peer contract. The `ignore` block enforces the exceptions.
       npm-patch:
         patterns:
           - "*"

@@ -109,14 +109,14 @@ func TestPackageArchive_VerifierRejectsAShippedArchiveCarryingTheSDK(t *testing.
 				require.NotContains(t, finding, archive.BridgeModulesPath()+"/",
 					"a shipped archive with no Cursor SDK code must not raise a provisioned-tree finding:\n%s", report)
 			}
-			require.Contains(t, report, "sdk: not redistributed, required 1.0.23 at run time")
+			require.Contains(t, report, "sdk: not redistributed, required 1.3.1 at run time")
 			require.Contains(t, report, archive.PrivateRuntimeNPMCLIPath(),
 				"the shipped-state report has to say where the provisioning command gets its npm:\n%s", report)
 
 			// The same tree once the operator has provisioned it is a different claim,
 			// so the shipped-state audit has to be the thing that decides, not the tree
 			// alone.
-			provisioned := provisioningTree(t, archive, provisioningTreeOptions{provisionedVersion: "1.0.23"})
+			provisioned := provisioningTree(t, archive, provisioningTreeOptions{provisionedVersion: "1.3.1"})
 			report, code := runVerifyScriptImpl(t, impl, provisioned, nil, []string{"--tree-state", "shipped"})
 			require.NotEqual(t, 0, code,
 				"a shipped archive carrying the SDK passed the shipped-state audit:\n%s", report)
@@ -152,7 +152,7 @@ func TestPackageArchive_VerifierFailsClosedOnAnUnprovisionedTree(t *testing.T) {
 				"the finding has to name the missing SDK:\n%s", report)
 			require.Contains(t, report, "not provisioned",
 				"the finding has to say the tree is unprovisioned rather than broken:\n%s", report)
-			require.Contains(t, report, "1.0.23",
+			require.Contains(t, report, "1.3.1",
 				"the finding has to name the version the operator has to provision:\n%s", report)
 			require.Contains(t, report, "ci --omit=dev",
 				"the finding has to print the provisioning command:\n%s", report)
@@ -184,7 +184,7 @@ func TestPackageArchive_VerifierRejectsAWrongProvisionedSDKVersion(t *testing.T)
 			require.NotEqual(t, 0, code,
 				"a provisioned tree at the wrong SDK version passed verification:\n%s", report)
 			require.Contains(t, report, "1.0.22")
-			require.Contains(t, report, "1.0.23")
+			require.Contains(t, report, "1.3.1")
 			require.Contains(t, report, "ci --omit=dev")
 		})
 	}
@@ -207,18 +207,18 @@ func TestPackageArchive_VerifierAcceptsAProvisionedTreeAndScopesTheChecksumRecor
 		t.Run(impl, func(t *testing.T) {
 			t.Parallel()
 
-			root := provisioningTree(t, archive, provisioningTreeOptions{provisionedVersion: "1.0.23"})
+			root := provisioningTree(t, archive, provisioningTreeOptions{provisionedVersion: "1.3.1"})
 			report, code := runVerifyScriptImpl(t, impl, root, nil, nil)
 			require.NotContains(t, report, "present but not listed",
 				"operator-provisioned files are outside the shipped record, not unaccounted for:\n%s", report)
 			require.NotEmpty(t, verifyFindings(report),
 				"the tree is still missing its runtime and launcher, so the run must not be reported as clean")
-			require.Contains(t, report, "sdk: required 1.0.23, provisioned 1.0.23")
+			require.Contains(t, report, "sdk: required 1.3.1, provisioned 1.3.1")
 
 			// The same tree with a shipped file modified: the provisioned half of the
 			// split says nothing about this, so the shipped half has to catch it.
 			tampered := provisioningTree(t, archive, provisioningTreeOptions{
-				provisionedVersion: "1.0.23",
+				provisionedVersion: "1.3.1",
 				tamperShippedFile:  true,
 			})
 			report, code = runVerifyScriptImpl(t, impl, tampered, nil, nil)
@@ -246,7 +246,7 @@ func TestPackageArchive_VerifierRejectsAChecksumRecordOverProvisionedFiles(t *te
 			t.Parallel()
 
 			root := provisioningTree(t, archive, provisioningTreeOptions{
-				provisionedVersion: "1.0.23",
+				provisionedVersion: "1.3.1",
 				recordProvisioned:  true,
 			})
 			report, code := runVerifyScriptImpl(t, impl, root, nil, nil)
@@ -294,7 +294,7 @@ func TestPackageArchive_VerifierReportsTheRecordedReleaseEvidence(t *testing.T) 
 					t.Parallel()
 
 					root := provisioningTree(t, archive, provisioningTreeOptions{
-						provisionedVersion: "1.0.23",
+						provisionedVersion: "1.3.1",
 						sourceState:        tc.sourceState,
 					})
 					report, _ := runVerifyScriptImpl(t, impl, root, nil, nil)
@@ -350,7 +350,7 @@ func TestPackageArchive_VerifierNamesAMissingCertificationPostureWithoutEchoingT
 			t.Parallel()
 
 			root := provisioningTree(t, archive, provisioningTreeOptions{
-				provisionedVersion:     "1.0.23",
+				provisionedVersion:     "1.3.1",
 				omitCertificationState: true,
 			})
 			report, code := runVerifyScriptImpl(t, impl, root, nil, nil)
@@ -402,7 +402,7 @@ func TestPackageArchive_VerifierReportsTheCertifiedEvidencePerPlatform(t *testin
 			t.Parallel()
 
 			root := provisioningTree(t, archive, provisioningTreeOptions{
-				provisionedVersion: "1.0.23",
+				provisionedVersion: "1.3.1",
 				sourceState:        "false",
 				certified:          true,
 			})
@@ -455,9 +455,9 @@ func provisioningTree(tb testing.TB, archive packagelayout.Archive, opts provisi
 	root := filepath.Join(tb.TempDir(), "plugin install root with spaces")
 	staged := map[string]string{
 		archive.BridgePackageJSONPath(): `{"name":"lip-cursor-sdk-bridge","version":"0.1.0",` +
-			`"engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.0.23"}}`,
+			`"engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.3.1"}}`,
 		archive.BridgePackageLockPath(): `{"name":"lip-cursor-sdk-bridge","lockfileVersion":3,` +
-			`"packages":{"":{"dependencies":{"@cursor/sdk":"1.0.23"}}}}`,
+			`"packages":{"":{"dependencies":{"@cursor/sdk":"1.3.1"}}}}`,
 		archive.LicensesDir() + "/THIRD-PARTY-NOTICES.md": "# Third-party notices\n",
 		archive.CompatibilityPath():                       provisioningRecord(tb, archive, root, opts),
 	}
@@ -497,7 +497,7 @@ func provisioningRecord(tb testing.TB, archive packagelayout.Archive, root strin
 		`  "external_node_required": false,`,
 		`  "declared_platforms": [` + strings.Join(quoteAll(declared), ", ") + `],`,
 		`  "declared_platforms_not_assembled": [` + strings.Join(quoteAll(otherPlatforms(archive)), ", ") + `],`,
-		`  "cursor_sdk_required_version": "1.0.23",`,
+		`  "cursor_sdk_required_version": "1.3.1",`,
 		`  "cursor_sdk_bundled": false,`,
 		`  "cursor_sdk_provisioning_command": "` + strings.ReplaceAll(archive.ProvisionCommand(root), `\`, `\\`) + `",`,
 		`  "cursor_sdk_redistribution": "` + fixtureRedistribution + `",`,

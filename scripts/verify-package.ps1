@@ -344,6 +344,18 @@ try {
 # `cd "$repo_root"` corresponds to.
 $hostLayout = (& $packagingTool layout -platform $hostPlatform) | ConvertFrom-Json
 
+# Inspect the complete tree before reading its metadata or executing companions.
+# The root owner and ancestors still have to be trusted by the operator.
+$treeCheck = ((& $packagingTool inspect-tree -root $PackageRoot 2>&1) -join "`n").Trim()
+if ($LASTEXITCODE -ne 0) {
+    $failure = "verify-package: FAIL: $treeCheck"
+    if ($ReportPath) { Set-Content -LiteralPath $ReportPath -Value $failure -Encoding utf8NoBOM }
+    Write-Output $failure
+    Write-Output 'verify-package: 1 finding(s); the install tree does not match the release it claims'
+    Remove-ToolDir
+    exit 1
+}
+
 $recordPath = Join-Path $PackageRoot $hostLayout.compatibility
 $script:Record = $null
 $archivePlatform = ''
@@ -370,6 +382,7 @@ $shippedTree = $TreeState -eq 'shipped'
 
 Add-Line "install root: $PackageRoot"
 Add-Line "tree state: $TreeState"
+Add-Line "install tree protection: $treeCheck"
 
 # Protected install ownership: a plugin root any local user can write lets that user
 # replace a checksummed companion after verification, which is exactly the mutation

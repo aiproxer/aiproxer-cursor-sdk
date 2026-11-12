@@ -178,7 +178,7 @@ test("runLiveProbe covers full mocked workflow without network", async () => {
   });
 
   assert.equal(summary.ok, true);
-  assert.equal(summary.sdkVersion, "1.0.23");
+  assert.equal(summary.sdkVersion, "1.3.1");
   assert.equal(summary.modelCount, 2);
   assert.ok(summary.observedDeltaKinds.includes("text-delta"));
   assert.ok(summary.observedDeltaKinds.includes("thinking-delta"));
@@ -212,7 +212,7 @@ test("runLiveProbe rejects wrong SDK pin", async () => {
         },
         loadSdk: async () => sdk,
       }),
-    /expected @cursor\/sdk 1\.0\.23/,
+    /expected @cursor\/sdk 1\.3\.1/,
   );
 });
 

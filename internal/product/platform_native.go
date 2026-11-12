@@ -91,12 +91,12 @@ func ProbeNativeBridgeLane(opts ProbeNativeBridgeOpts) NativeBridgeProbeResult {
 		out.Reason = sanitizeProbeErr(err)
 		return out
 	}
-	if !strings.Contains(versionLine, "1.0.23") {
-		out.Reason = "bridge package not pinned to @cursor/sdk 1.0.23"
+	if !strings.Contains(versionLine, "1.3.1") {
+		out.Reason = "bridge package not pinned to @cursor/sdk 1.3.1"
 		return out
 	}
 	out.Bridge = "lip-cursor-sdk-bridge"
-	out.SDKPin = "1.0.23"
+	out.SDKPin = "1.3.1"
 	out.Status = "ready"
 	return out
 }

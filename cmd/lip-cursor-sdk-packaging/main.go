@@ -41,6 +41,8 @@ func main() {
 		err = runLayout(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
+	case "inspect-tree":
+		err = runInspectTree(os.Args[2:])
 	case "render":
 		err = runRender(os.Args[2:])
 	case "release":
@@ -60,12 +62,13 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: lip-cursor-sdk-packaging <layout|probe|render|release> [flags]
+	fmt.Fprint(os.Stderr, `usage: lip-cursor-sdk-packaging <layout|probe|inspect-tree|render|release> [flags]
 
   layout   print the archive layout of a platform as a JSON report
   probe    run one packaged executable under a fixed deadline and report what
            it did: its combined output on stdout, exit=<n> timed_out=<bool>
            deadline=<duration> on stderr
+  inspect-tree  check install-tree write permissions, ownership and link containment
   render   write the host manifest and compatibility metadata for a staged
            install root, deriving every value from the staged tree
   release  report the release this repository declares: its tag and version,

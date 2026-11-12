@@ -161,7 +161,7 @@ func TestRender_RecordsPrivateRuntimeAndSDKMetadataFromTheStagedTree(t *testing.
 			lay.nodeSource = tc.label
 			_, compatibility := renderAndRead(t, lay)
 
-			require.Equal(t, "1.0.23", compatibility["cursor_sdk_required_version"])
+			require.Equal(t, "1.3.1", compatibility["cursor_sdk_required_version"])
 			require.Equal(t, false, compatibility["cursor_sdk_bundled"])
 			require.Equal(t, "0.1.0", compatibility["bridge_version"])
 			require.Equal(t, ">=22.13", compatibility["bridge_node_engine"])
@@ -872,7 +872,7 @@ func TestRender_RecordsTheCursorSDKAsRequiredAndNotBundled(t *testing.T) {
 	archive, err := packagelayout.ForPlatform(lay.goos(), lay.goarch())
 	require.NoError(t, err)
 
-	require.Equal(t, "1.0.23", compatibility["cursor_sdk_required_version"],
+	require.Equal(t, "1.3.1", compatibility["cursor_sdk_required_version"],
 		"the required version is the pin the bridge verifies at run time")
 	require.Equal(t, false, compatibility["cursor_sdk_bundled"],
 		"the archive ships no Cursor SDK and none of its dependency closure")
@@ -931,7 +931,7 @@ func TestRender_RefusesAStagedOperatorProvisionedTree(t *testing.T) {
 	require.NoError(t, err)
 
 	staged := filepath.Join(lay.root, filepath.FromSlash(archive.ProvisionedSDKPackageJSONPath()))
-	writeFile(t, staged, `{"name":"@cursor/sdk","version":"1.0.23"}`)
+	writeFile(t, staged, `{"name":"@cursor/sdk","version":"1.3.1"}`)
 
 	err = runRenderCmd(t, lay)
 	require.Error(t, err)
@@ -1154,7 +1154,7 @@ func newStagedRelease(tb testing.TB) *stagedRelease {
 	writeFile(tb, filepath.Join(root, "private", "bridge", "lip-cursor-sdk-bridge"+exeSuffix), "launcher")
 	writeFile(tb, filepath.Join(root, "private", "bridge", "dist", "main.js"), "// built\n")
 	lay.bridgeJSON = writeFile(tb, filepath.Join(root, "private", "bridge", "package.json"),
-		`{"name":"lip-cursor-sdk-bridge","version":"0.1.0","engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.0.23"}}`)
+		`{"name":"lip-cursor-sdk-bridge","version":"0.1.0","engines":{"node":">=22.13"},"dependencies":{"@cursor/sdk":"1.3.1"}}`)
 	lay.bridgeLock = writeFile(tb, filepath.Join(root, "private", "bridge", "package-lock.json"),
 		`{"name":"lip-cursor-sdk-bridge","lockfileVersion":3,"packages":{}}`)
 

@@ -21,8 +21,8 @@ func TestPreflightSDK_ProvisionedTreePassesAndThePinIsReadFromTheShippedManifest
 	t.Parallel()
 
 	lay := installPrivateLayout(t, true, true)
-	writeBridgeManifest(t, lay, "1.0.23")
-	writeProvisionedSDK(t, lay, "1.0.23")
+	writeBridgeManifest(t, lay, "1.3.1")
+	writeProvisionedSDK(t, lay, "1.3.1")
 
 	require.NoError(t, preflightSDK((mustLayout(t, lay)).private))
 
@@ -47,13 +47,13 @@ func TestPreflightSDK_UnprovisionedTreeIsAnActionablePrerequisiteFailure(t *test
 	t.Parallel()
 
 	lay := installPrivateLayout(t, true, true)
-	writeBridgeManifest(t, lay, "1.0.23")
+	writeBridgeManifest(t, lay, "1.3.1")
 
 	err := preflightSDK((mustLayout(t, lay)).private)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), packagelayout.SDKPackageName)
 	require.Contains(t, err.Error(), "not provisioned")
-	require.Contains(t, err.Error(), "1.0.23")
+	require.Contains(t, err.Error(), "1.3.1")
 	require.Contains(t, err.Error(), filepath.ToSlash(lay.root))
 	require.Contains(t, err.Error(), "ci --omit=dev")
 	// The remedy is provisioning, not reinstalling: the archive is complete and the
@@ -69,13 +69,13 @@ func TestPreflightSDK_MismatchedProvisionedVersionIsAFailure(t *testing.T) {
 	t.Parallel()
 
 	lay := installPrivateLayout(t, true, true)
-	writeBridgeManifest(t, lay, "1.0.23")
+	writeBridgeManifest(t, lay, "1.3.1")
 	writeProvisionedSDK(t, lay, "1.0.22")
 
 	err := preflightSDK((mustLayout(t, lay)).private)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "1.0.22")
-	require.Contains(t, err.Error(), "1.0.23")
+	require.Contains(t, err.Error(), "1.3.1")
 	require.Contains(t, err.Error(), "ci --omit=dev")
 }
 
@@ -87,8 +87,8 @@ func TestPreflightSDK_UnreadableProvisionedMetadataIsAFailure(t *testing.T) {
 	t.Parallel()
 
 	lay := installPrivateLayout(t, true, true)
-	writeBridgeManifest(t, lay, "1.0.23")
-	path := writeProvisionedSDK(t, lay, "1.0.23")
+	writeBridgeManifest(t, lay, "1.3.1")
+	path := writeProvisionedSDK(t, lay, "1.3.1")
 	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o644))
 
 	err := preflightSDK((mustLayout(t, lay)).private)
@@ -104,8 +104,8 @@ func TestPreflightSDK_VersionlessProvisionedMetadataIsAFailure(t *testing.T) {
 	t.Parallel()
 
 	lay := installPrivateLayout(t, true, true)
-	writeBridgeManifest(t, lay, "1.0.23")
-	path := writeProvisionedSDK(t, lay, "1.0.23")
+	writeBridgeManifest(t, lay, "1.3.1")
+	path := writeProvisionedSDK(t, lay, "1.3.1")
 	require.NoError(t, os.WriteFile(path, []byte(`{"name":"@cursor/sdk"}`), 0o644))
 
 	err := preflightSDK((mustLayout(t, lay)).private)
@@ -121,7 +121,7 @@ func TestPreflightSDK_MissingShippedBridgeManifestIsAFailure(t *testing.T) {
 	t.Parallel()
 
 	lay := installPrivateLayout(t, true, true)
-	writeProvisionedSDK(t, lay, "1.0.23")
+	writeProvisionedSDK(t, lay, "1.3.1")
 
 	err := preflightSDK((mustLayout(t, lay)).private)
 	require.Error(t, err)
