@@ -8,7 +8,7 @@ import type {
 
 /**
  * Adapter-private in-memory LocalAgentStore for the bridge/probe.
- * Implements the exact exported @cursor/sdk 1.0.23 LocalAgentStore surface
+ * Implements the exact exported @cursor/sdk 1.3.1 LocalAgentStore surface
  * because createInMemoryLocalAgentStore is not part of the public package exports.
  */
 export function createBridgeInMemoryLocalAgentStore(): LocalAgentStore {

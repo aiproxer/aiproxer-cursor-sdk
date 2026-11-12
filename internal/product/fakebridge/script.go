@@ -63,7 +63,7 @@ func DefaultScript() Script {
 	models := json.RawMessage(`[{"id":"gpt-5.3-codex","displayName":"GPT-5.3 Codex","parameters":[{"id":"reasoning","values":["low","medium","high","xhigh"]}]}]`)
 	return Script{
 		ImplVersion: "fake-1.0.0",
-		SDKVersion:  "1.0.23",
+		SDKVersion:  "1.3.1",
 		Generation:  1,
 		Models:      models,
 		OnMethod:    map[string][]Action{},

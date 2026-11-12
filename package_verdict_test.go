@@ -74,7 +74,7 @@ func TestPackageArchive_AdversarialVerdictsSurviveTheIndexedGate(t *testing.T) {
 			mutate: func(tb testing.TB, root string, a packagelayout.Archive) {
 				metadata := filepath.Join(root, filepath.FromSlash(a.ProvisionedSDKPackageJSONPath()))
 				require.NoError(tb, os.WriteFile(metadata,
-					[]byte(strings.Replace(readFileText(tb, metadata), "1.0.23", "1.0.22", 1)), 0o644))
+					[]byte(strings.Replace(readFileText(tb, metadata), "1.3.1", "1.0.22", 1)), 0o644))
 			},
 			want: "the provisioned Cursor SDK is 1.0.22",
 		},

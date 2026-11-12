@@ -21,6 +21,12 @@ test("package.json pins exact SDK, engines, bin, and pack files", () => {
 
   const deps = pkg.dependencies as Record<string, string>;
   assert.equal(deps["@cursor/sdk"], PINNED_SDK_VERSION);
+  assert.equal(deps.zod, "4.6.6");
+  const devDeps = pkg.devDependencies as Record<string, string>;
+  const npmVersion = devDeps.npm;
+  assert.ok(npmVersion, "the separately shipped npm must be declared");
+  assert.match(npmVersion, /^\d+\.\d+\.\d+$/, "the separately shipped npm must be pinned exactly");
+  assert.deepEqual(pkg.overrides, { undici: "6.29.1" });
   assert.ok(!deps["@cursor/sdk"].startsWith("^"));
   assert.ok(!deps["@cursor/sdk"].startsWith("~"));
 
@@ -46,12 +52,18 @@ test("package.json pins exact SDK, engines, bin, and pack files", () => {
 
 test("package-lock.json pins @cursor/sdk exact version", () => {
   const lock = readJSON(join(bridgeRoot, "package-lock.json"));
-  const packages = lock.packages as Record<string, { version?: string; dependencies?: Record<string, string> }>;
+  const packages = lock.packages as Record<string, { version?: string; dependencies?: Record<string, string>; devDependencies?: Record<string, string> }>;
   const root = packages[""];
   assert.equal(root?.dependencies?.["@cursor/sdk"], PINNED_SDK_VERSION);
   const sdk = packages["node_modules/@cursor/sdk"];
   assert.ok(sdk, "lockfile must contain node_modules/@cursor/sdk");
   assert.equal(sdk.version, PINNED_SDK_VERSION);
+  assert.equal(root?.dependencies?.zod, "4.6.6");
+  assert.equal(packages["node_modules/zod"]?.version, "4.6.6");
+  const manifest = readJSON(join(bridgeRoot, "package.json"));
+  const expectedNpm = (manifest.devDependencies as Record<string, string>).npm;
+  assert.equal(root?.devDependencies?.npm, expectedNpm);
+  assert.equal(packages["node_modules/npm"]?.version, expectedNpm);
 });
 
 test("--version reports bridge and pinned SDK without loading credentials", () => {

@@ -5,15 +5,15 @@
 # Builds the outer plugin executable and the plugin-private bridge launcher for
 # the host platform, builds the production JavaScript out of the source tree, stages
 # the metadata the bridge needs to resolve and verify the SDK version - the package
-# manifest and the lockfile that pins it - plus the private Node runtime together with
-# that runtime's own bundled npm, renders the closed host manifest and the release
+# manifest and the lockfile that pins it - plus the private Node runtime and the
+# separately pinned npm, renders the closed host manifest and the release
 # metadata, records a checksum over every archive file including the plugin-private
 # ones, and emits a per-platform archive with its own digest.
 #
 # The archive stages NO Cursor SDK package code. The Cursor SDK is proprietary and is not
 # redistributed, so neither @cursor/sdk nor its dependency closure is shipped: the
 # operator provisions that tree once, out of band, with the runtime this archive carries.
-# The archive does ship third-party package code - the private runtime's own bundled npm
+# The archive does ship third-party package code - the separately pinned private npm
 # and the dependencies npm bundles with it - because the provisioning command has to run
 # without a global Node or a global package manager. That code is NOT covered by the
 # Node.js MIT grant: npm ships its own license text inside the staged npm tree, and each
@@ -50,6 +50,11 @@
 #                             [--node-dist ZIP|DIR] [--node-runtime EXE]
 #                             [--platform os/arch] [--tested-host SHA256]
 set -euo pipefail
+
+# A caller's permissive umask must not produce a group/world-writable archive.
+# Preserve a more restrictive caller policy rather than weakening it.
+caller_umask="$(umask)"
+umask "$(printf '%03o' "$(( 8#$caller_umask | 8#022 ))")"
 
 # usage prints the leading comment block of this script, so the help text cannot drift
 # out of the file by an edit to the header.
@@ -266,9 +271,10 @@ write_third_party_notices() {
     printf '  the Node.js license grant together with the notices for the components Node\n'
     printf '  bundles (ICU, OpenSSL, c-ares, libuv, and the rest). See the staged distribution LICENSE.\n'
     printf '  That grant is Node'"'"'s own and does not extend to the npm tree below.\n'
-    printf -- '- The runtime ships with its own bundled npm, and so does this archive, at\n'
-    printf '  %s: that is what the provisioning command below runs, so an\n' "$npm_root"
-    printf '  operator needs neither a global Node nor a global package manager.\n'
+    printf -- '- This archive ships separately pinned npm %s, at\n' "$("$runtime" -p 'require(process.argv[1]+"/package.json").version' "$npm_staged")"
+    printf '  %s: it is resolved with integrity from the shipped bridge lockfile,\n' "$npm_root"
+    printf '  not from the Node distribution. It runs the provisioning command below,\n'
+    printf '  so an operator needs neither a global Node nor a global package manager.\n'
     printf -- '- That npm tree, together with the third-party packages npm bundles inside it, IS\n'
     printf '  third-party package code shipped by this archive, and it is the only such code\n'
     printf '  here. It is NOT licensed under the Node.js MIT grant. npm ships its own license\n'
@@ -312,8 +318,10 @@ write_third_party_notices() {
     printf -- '- The provisioned tree is operator-attributable: it is resolved by the\n'
     printf "  operator's npm from the shipped lockfile, it is outside this project's\n"
     printf '  checksum record, and no notice in this archive covers it.\n\n'
-    printf '## Locked dependency closure (pinned, not shipped)\n\n'
-    printf -- '- What the shipped lockfile pins for the operator to provision:\n\n'
+    printf '## Locked dependency closure and provisioning\n\n'
+    printf -- '- The lockfile pins what the operator provisions and the separately shipped npm.\n'
+    printf '  The npm package listed under development-only below ships separately, not in\n'
+    printf '  the operator-provisioned bridge tree.\n\n'
     write_locked_inventory "$runtime" "$lockfile" "$bridge_manifest"
     printf '\n\n## Plugin\n\n'
     printf -- '- The plugin sources are MIT licensed (see the staged plugin LICENSE). Derived\n'
@@ -553,12 +561,7 @@ private_runtime_dir="$(layout_report private_runtime_dir)"
 # The private runtime file name comes from the archive contract, so the staged
 # runtime is whatever the launcher will look for on this platform.
 runtime_file_name="${private_runtime##*/}"
-# Where the platform's own Node distribution keeps its bundled npm, relative to the
-# runtime executable's installation directory. It is the same relative path the archive
-# stages it at, so nothing inside the npm tree is renamed and the entry point the
-# provisioning command names is the real one.
-npm_rel="${private_npm_root#"$private_runtime_dir"/}"
-
+# The layout locates the separately pinned npm next to the private runtime.
 
 plugin_id="$(release_scalar plugin_id)"
 version="$(release_scalar version)"
@@ -598,10 +601,10 @@ outer_command="$(release_scalar command)"
 (cd "$repo_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$outer_exe" "$outer_command")
 (cd "$repo_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= -o "$launcher" "./cmd/$launcher_name")
 
-# 2. Production JavaScript. The dev toolchain stays in the source tree and never enters
-#    the archive; only the built output does.
+# 2. Production JavaScript. The build installs the locked dev toolchain, including
+#    the separately pinned npm that will be staged below.
 bridge_source="$repo_root/bridge-node"
-run_in "$bridge_source" npm ci --no-audit --no-fund >/dev/null
+run_in "$bridge_source" npm ci --include=dev --no-audit --no-fund >/dev/null
 run_in "$bridge_source" npm run build >/dev/null
 
 # 3. Plugin-private bridge tree. The manifest and the lockfile ship because they are
@@ -680,22 +683,17 @@ cp "$runtime_license" "$staging/$licenses_dir/nodejs-LICENSE"
 cp "$repo_root/LICENSE" "$staging/$licenses_dir/plugin-LICENSE"
 node_version="$("$private_runtime_path" --version)"
 
-# The runtime ships with its own npm, and so does this archive. Without it the
-# provisioning command would need a global package manager, which is the prerequisite
-# the private runtime exists to remove. It is resolved from the same installation the
-# runtime came from, so an archive carries the npm that belongs to its runtime rather
-# than whatever npm happens to be nearest on the build machine.
-npm_source=""
-for npm_root in "$(dirname -- "$runtime_source")" "$(dirname -- "$(dirname -- "$runtime_source")")"; do
-  if [ -d "$npm_root/$npm_rel" ]; then
-    npm_source="$npm_root/$npm_rel"
-    break
-  fi
-done
-[ -n "$npm_source" ] ||
-  fail "no bundled npm found at $npm_rel beside $runtime_source; stage an official Node distribution with --node-dist so the archive ships the npm that provisions the Cursor SDK"
+# Stage npm independently of Node: npm ci above verified its pinned lockfile
+# integrity. The package is a build dependency but ships outside the bridge tree.
+npm_source="$bridge_source/${bridge_modules##*/}/${private_npm_root##*/}"
+[ -d "$npm_source" ] || fail "the pinned npm build dependency was not installed at $npm_source"
 mkdir -p "$(dirname -- "$staging/$private_npm_root")"
 cp -R "$npm_source" "$staging/$private_npm_root"
+# npm ci creates .bin links that are not in the pinned npm tarball. They are not
+# needed by the npm CLI and must not become unchecksummed archive links.
+rm -rf "$staging/$private_npm_modules/.bin"
+"$private_runtime_path" "$repo_root/scripts/check-packaged-npm.cjs" \
+  "$staging/$private_npm_root" "$bridge_source/package.json" "$bridge_source/package-lock.json"
 
 # 5. Closed host manifest and release metadata, both derived from the staged tree
 #    rather than described independently of it. The renderer refuses to describe a tree

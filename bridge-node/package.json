@@ -1,6 +1,6 @@
 {
   "name": "lip-cursor-sdk-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Plugin-owned Cursor SDK NDJSON bridge for the aiproxer-cursor-sdk cursorsdk backend plugin",
   "type": "module",
@@ -26,14 +26,16 @@
     "live-scenarios": "tsx src/liveScenarios.ts"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.23"
+    "@cursor/sdk": "1.3.1",
+    "zod": "4.6.6"
   },
   "devDependencies": {
-    "@types/node": "^22.15.30",
-    "tsx": "^4.20.3",
-    "typescript": "^5.8.3"
+    "@types/node": "^22.20.5",
+    "npm": "12.2.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   },
   "overrides": {
-    "undici": "6.28.1"
+    "undici": "6.29.1"
   }
 }

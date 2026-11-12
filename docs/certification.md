@@ -39,7 +39,13 @@ because it was the one behaviour the measurement made platform-dependent.
 Measured against **`github.com/matdev83/go-llm-interactive-proxy` v0.1.0**, on **both**
 platforms this project declares, by
 `TestHostReleaseCertification_RealHostInstallTrustAndOptionalActivation`
-(`host_release_certification_test.go`):
+(`host_release_certification_test.go`). These are historical results for plugin v0.1.0,
+not for the `cursorsdk-v0.1.1` maintenance candidate; the release workflow reruns the
+same real-host gate against each new archive before publication. On 2026-11-12 the
+v0.1.1 development tree passed this gate on Linux against the pinned v0.1.0 host and a
+staged, provisioned archive (archive SHA-256 `9ab449a777c82d601f876e9c9a592ff3cc93e8b140eb9f045b5c51de983ecc25`).
+That local build used a dirty source tree and is not the release artifact; Windows and
+both final published archives still require their own release-gate results.
 
 | Platform | Host binary digest | Plugin archive | Result |
 | --- | --- | --- | --- |
@@ -276,15 +282,15 @@ cannot become three contracts.
 ### The release process, and how to reproduce a publication
 
 Every published archive comes from [`.github/workflows/release.yml`](.github/workflows/release.yml),
-and the tag is `cursorsdk-v<version>` — `cursorsdk-v0.1.0` for this release.
+and the tag is `cursorsdk-v<version>` — `cursorsdk-v0.1.1` for this maintenance release.
 
 ```text
 # 1. the maintainer tags the reviewed commit and pushes the tag; the workflow never creates or moves one
-git tag cursorsdk-v0.1.0 <reviewed-commit> && git push origin cursorsdk-v0.1.0
+git tag cursorsdk-v0.1.1 <reviewed-commit> && git push origin cursorsdk-v0.1.1
 
 # 2. guard: resolve the tag to its commit, check THAT commit out, and only then read the declaration
-#    out of it; then require the tag to be the one release.yaml declares, its commit to be on
-#    origin/main, its posture certified with one certified platform per declared platform, and no
+#    out of it; then require the tag to be the one release.yaml declares, its commit to be the
+#    merge of a PR into origin/release/0.1, its posture certified for each platform, and no
 #    release to exist for the tag yet
 
 # 3. package matrix, one leg per declared platform, on that platform's own runner:
@@ -332,16 +338,10 @@ about the archive as assembled while every other claim is about the archive as d
 
 ### Rolling back a plugin update
 
-`cursorsdk-v0.1.0` is this plugin's **first** published release, so at the time it is
-published there is no earlier plugin artifact to roll back to, and no document here can name
-one. That is stated rather than papered over: the rollback artifact for this project starts
-at v0.1.0, and the *next* release is what gives a later operator something to return to.
-
-Until then, the only genuine prior artifact an operator can return to is the integration that
-ships inside the Go-LIP host itself — host `v0.1.0`, with the Cursor connector built in — which
-is a host-side decision and needs no plugin rollback at all. The migration and rollback
-rehearsal, including which host configuration continues to work and what an upgrade changes
-about executable paths, is the cutover's own task and is not claimed here.
+For v0.1.1, the preceding plugin artifact is `cursorsdk-v0.1.0`. Rolling back restores its
+older dependencies and their known security risks; do so only if operationally necessary.
+The separate Cursor connector built into Go-LIP v0.1.0 is a host-side alternative, not a
+plugin rollback, and is outside this repository's dependency audit.
 
 Whatever artifact a later operator does roll back to, the procedure is fixed and does not
 include an implicit SDK downgrade: install the earlier archive's shipped files, then run that
@@ -420,7 +420,7 @@ Relocated connector proofs, for the semantics the public proofs above do not exe
 | `internal/product/testdata/fixtures/protocol/valid_frames.ndjson` | Go (`protocol/protocol_test.go`, `protocol/params_test.go`) and TypeScript (`protocol.test.ts`) |
 | `internal/product/testdata/fixtures/protocol/invalid_frames.json` | Go (`protocol/protocol_test.go`) and TypeScript (`protocol.test.ts`) |
 | `internal/product/testdata/fixtures/protocol/event_sequences.json` | Go (`protocol/protocol_test.go`) and TypeScript (`protocol.test.ts`) |
-| `internal/product/testdata/fixtures/sdk_setting_sources_1.0.23.txt` | **Go only** (`internal/product/config_test.go`) — it pins the SDK setting-source names the Go configuration accepts; the JavaScript side never parses it |
+| `internal/product/testdata/fixtures/sdk_setting_sources_1.3.1.txt` | **Go only** (`internal/product/config_test.go`) — it pins the SDK setting-source names the Go configuration accepts; the JavaScript side never parses it |
 | `internal/product/testdata/fixtures/models_sdk_variants_missing_id.json` | **TypeScript only** (`bridge-node/src/models.test.ts`) — it pins how the JavaScript bridge rejects a model row with no id; the Go normalizer has its own equivalent assertions in `internal/product/inventory_test.go` and does not read this file |
 
 Two of the eight fixtures are single-language. The rest are shared, and both suites read

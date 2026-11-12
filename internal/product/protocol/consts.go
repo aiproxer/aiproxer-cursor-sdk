@@ -8,7 +8,7 @@ const (
 	MaxFrameBytes = 16 << 20
 
 	// PinnedSDKVersion is the exact @cursor/sdk version the bridge may load.
-	PinnedSDKVersion = "1.0.23"
+	PinnedSDKVersion = "1.3.1"
 
 	// MinNodeEngine is the official SDK Node engine lower bound.
 	MinNodeEngine = ">=22.13"

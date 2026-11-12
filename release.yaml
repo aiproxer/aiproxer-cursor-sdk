@@ -5,9 +5,9 @@ factory_kind: cursorsdk
 module: github.com/aiproxer/aiproxer-cursor-sdk
 command: ./cmd/lip-backend-cursorsdk
 manifest_template: manifest/template.backendplugin.json
-version: 0.1.0
+version: 0.1.1
 build_id: localdev
-tag: cursorsdk-v0.1.0
+tag: cursorsdk-v0.1.1
 profiles:
   - full
 # The published Go-LIP modules this plugin is pinned to. Their exact versions are read
@@ -20,10 +20,10 @@ replace_policy: released-dependency-pins-no-replace
 private_companions:
   - bridge-node
 
-# Host certification posture. A downloadable Go-LIP host release exists, this plugin has
-# been certified against it through the real host binary on both platforms the manifest
-# declares, and the measured platform difference in companion resolution is the adopted
-# per-platform installation contract rather than an incompatibility.
+# Host certification posture for the v1-compatible maintenance release. The host
+# artifacts and companion contracts below were measured with plugin v0.1.0; the
+# release workflow must rerun the real-host gate against the new v0.1.1 archive on
+# each platform before publishing. Historical evidence does not certify new bytes.
 #
 # The certified evidence is declared here, one entry per declared platform, rather than
 # typed into a packaging command: each entry names the host project and release, the asset

@@ -72,7 +72,7 @@ func TestDiag_StatusSnapshotStableFieldsOnly(t *testing.T) {
 		Info: BridgeInfo{
 			SchemaVersion: 1,
 			ImplVersion:   "0.1.0",
-			SDKVersion:    "1.0.23",
+			SDKVersion:    "1.3.1",
 			NodeVersion:   "22.13.0",
 		},
 		RuntimeState:   "ready",
@@ -85,7 +85,7 @@ func TestDiag_StatusSnapshotStableFieldsOnly(t *testing.T) {
 	require.Equal(t, "inst-1", snap.BackendInstance)
 	require.Equal(t, 1, snap.BridgeProtocolVersion)
 	require.Equal(t, "0.1.0", snap.BridgePackageVersion)
-	require.Equal(t, "1.0.23", snap.SDKVersion)
+	require.Equal(t, "1.3.1", snap.SDKVersion)
 	require.Equal(t, "22.13.0", snap.NodeVersion)
 	require.Equal(t, "ready", snap.RuntimeState)
 	require.Equal(t, "ok", snap.DiscoveryState)

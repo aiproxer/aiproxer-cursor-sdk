@@ -47,8 +47,9 @@ check out, install `connectors/cursorsdk/bridge-node` with Node 22.22.3, and run
 So for the great majority of host PRs it was a no-op gate whose only real effect was to keep a required
 context alive. Its substantive evidence - that the Cursor SDK JavaScript bridge builds, tests, and
 typechecks against its own pinned lockfile - is now owned by this repository: the `bridge-node` job in
-`.github/workflows/verify.yml` runs `npm ci` -> `npm test` -> `npm run typecheck` on the same pinned
-Node 22.22.3 against `bridge-node/package-lock.json` (relocated in task 2.2).
+`.github/workflows/verify.yml` runs `npm ci`, `npm audit`, `npm test`, and `npm run typecheck` against
+`bridge-node/package-lock.json` (relocated in task 2.2). This repository now pins Node 22.23.5 for that
+lane; the historical host-side lane described above used Node 22.22.3.
 
 ## Replacement invariant
 
